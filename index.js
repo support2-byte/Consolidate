@@ -10,18 +10,44 @@ dotenv.config();
 const { Pool } = pkg;
 const app = express();
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL ,ssl: { rejectUnauthorized: false }});
+// ---------- DATABASE ----------
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
+// ---------- MIDDLEWARE ----------
 app.use(express.json());
 app.use(cookieParser());
-app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }));
+
+// Allowed origins from env (comma separated) or fallback
+const allowedOrigins = process.env.CLIENT_ORIGINS
+  ? process.env.CLIENT_ORIGINS.split(",")
+  : [
+      "http://localhost:5173", // dev frontend
+      "https://imaginative-pothos-0a1193.netlify.app", // prod frontend
+    ];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+  })
+);
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// --------- auth helpers ----------
+// ---------- AUTH MIDDLEWARE ----------
 function auth(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: "Unauthenticated" });
+
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
@@ -30,10 +56,12 @@ function auth(req, res, next) {
   }
 }
 
-// --------- AUTH ROUTES ----------
+// ---------- AUTH ROUTES ----------
 app.post("/auth/register", async (req, res) => {
   const { email, password } = req.body ?? {};
-  if (!email || !password) return res.status(400).json({ error: "Email & password required" });
+  if (!email || !password)
+    return res.status(400).json({ error: "Email & password required" });
+
   const hash = await bcrypt.hash(password, 12);
   try {
     const { rows } = await pool.query(
@@ -42,7 +70,8 @@ app.post("/auth/register", async (req, res) => {
     );
     res.status(201).json({ user: rows[0] });
   } catch (e) {
-    if (e.code === "23505") return res.status(409).json({ error: "Email already registered" });
+    if (e.code === "23505")
+      return res.status(409).json({ error: "Email already registered" });
     console.error(e);
     res.status(500).json({ error: "Server error" });
   }
@@ -50,19 +79,33 @@ app.post("/auth/register", async (req, res) => {
 
 app.post("/auth/login", async (req, res) => {
   const { email, password } = req.body ?? {};
-  const { rows } = await pool.query("SELECT id,email,password_hash FROM users WHERE email=$1", [email]);
+  const { rows } = await pool.query(
+    "SELECT id,email,password_hash FROM users WHERE email=$1",
+    [email]
+  );
   const user = rows[0];
   if (!user) return res.status(400).json({ error: "Invalid credentials" });
+
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return res.status(400).json({ error: "Invalid credentials" });
-  const token = jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
-  res.cookie("token", token, { httpOnly: true, sameSite: "lax" });
+
+  const token = jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, {
+    expiresIn: "7d",
+  });
+
+  res.cookie("token", token, {
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    secure: process.env.NODE_ENV === "production",
+  });
+
   res.json({ user: { id: user.id, email: user.email } });
 });
 
 app.get("/auth/me", (req, res) => {
   const token = req.cookies.token;
   if (!token) return res.status(401).json({ error: "No token" });
+
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     res.json({ user: { id: payload.sub, email: payload.email } });
@@ -72,11 +115,15 @@ app.get("/auth/me", (req, res) => {
 });
 
 app.post("/auth/logout", (req, res) => {
-  res.clearCookie("token");
+  res.clearCookie("token", {
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    secure: process.env.NODE_ENV === "production",
+  });
   res.json({ ok: true });
 });
 
-// ---------- CRUD UTILS ----------
+// ---------- CRUD HELPER ----------
 const q = (text, params) => pool.query(text, params);
 
 // ---------- CUSTOMERS ----------
@@ -229,7 +276,13 @@ app.delete("/api/consignments/:id", auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- HEALTH CHECK ----------
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
+});
+
+// ---------- SERVER ----------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
-  console.log(`API running on http://localhost:${PORT}`)
+  console.log(`✅ API running on http://localhost:${PORT}`)
 );
