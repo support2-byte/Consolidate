@@ -31,10 +31,15 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
       "https://imaginative-pothos-0a1193.netlify.app", // prod frontend
     ];
 
+// Add Replit domains to allowed origins
+const replitDomains = process.env.REPLIT_DOMAINS ? process.env.REPLIT_DOMAINS.split(",") : [];
+const allAllowedOrigins = [...allowedOrigins, ...replitDomains];
+
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      // Allow all origins in development or if no origin (for tools like Postman)
+      if (!origin || allAllowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
         callback(null, true);
       } else {
         callback(new Error("Not allowed by CORS"));
@@ -733,7 +738,7 @@ app.get("/health", (_req, res) => {
 });
 
 // ---------- SERVER ----------
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`✅ API running on http://localhostsasas:${PORT}`)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "localhost", () =>
+  console.log(`✅ API running on http://localhost:${PORT}`)
 );
