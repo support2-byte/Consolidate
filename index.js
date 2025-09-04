@@ -38,14 +38,36 @@ const allAllowedOrigins = [...allowedOrigins, ...replitDomains];
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow all origins in development or if no origin (for tools like Postman)
-      if (!origin || allAllowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
+      // Always allow requests without origin (like mobile apps, Postman)
+      if (!origin) {
+        return callback(null, true);
       }
+      
+      // Allow all localhost origins for development
+      if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+        return callback(null, true);
+      }
+      
+      // Allow Replit domains
+      if (origin.includes('replit.dev') || origin.includes('repl.co')) {
+        return callback(null, true);
+      }
+      
+      // Allow configured origins
+      if (allAllowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      
+      // In development, allow all origins
+      if (process.env.NODE_ENV !== "production") {
+        return callback(null, true);
+      }
+      
+      callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
   })
 );
 
