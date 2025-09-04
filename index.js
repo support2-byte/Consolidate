@@ -13,7 +13,7 @@ const app = express();
 // ---------- DATABASE ----------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  // ssl: { rejectUnauthorized: false },
 });
 
 // ---------- MIDDLEWARE ----------
@@ -284,5 +284,5 @@ app.get("/health", (_req, res) => {
 // ---------- SERVER ----------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
-  console.log(`✅ API running on http://localhost:${PORT}`)
+  console.log(`✅ API running on http://localhostsasas:${PORT}`)
 );
