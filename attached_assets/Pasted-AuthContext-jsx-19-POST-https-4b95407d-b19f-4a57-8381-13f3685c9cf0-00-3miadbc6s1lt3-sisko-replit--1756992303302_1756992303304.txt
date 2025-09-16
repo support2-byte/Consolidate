@@ -1,0 +1,39 @@
+AuthContext.jsx:19  POST https://4b95407d-b19f-4a57-8381-13f3685c9cf0-00-3miadbc6s1lt3.sisko.replit.dev/auth/login net::ERR_FAILED
+dispatchXhrRequest @ axios.js?v=5ae0840c:1672
+xhr @ axios.js?v=5ae0840c:1552
+dispatchRequest @ axios.js?v=5ae0840c:2027
+_request @ axios.js?v=5ae0840c:2248
+request @ axios.js?v=5ae0840c:2139
+httpMethod @ axios.js?v=5ae0840c:2277
+wrap @ axios.js?v=5ae0840c:8
+login @ AuthContext.jsx:19
+onSubmit @ Login.jsx:28
+executeDispatch @ react-dom_client.js?v=5ae0840c:11736
+runWithFiberInDEV @ react-dom_client.js?v=5ae0840c:1485
+processDispatchQueue @ react-dom_client.js?v=5ae0840c:11772
+(anonymous) @ react-dom_client.js?v=5ae0840c:12182
+batchedUpdates$1 @ react-dom_client.js?v=5ae0840c:2628
+dispatchEventForPluginEventSystem @ react-dom_client.js?v=5ae0840c:11877
+dispatchEvent @ react-dom_client.js?v=5ae0840c:14792
+dispatchDiscreteEvent @ react-dom_client.js?v=5ae0840c:14773Understand this error
+login:1 Access to XMLHttpRequest at 'https://4b95407d-b19f-4a57-8381-13f3685c9cf0-00-3miadbc6s1lt3.sisko.replit.dev/auth/login' from origin 'http://localhost:5173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.Understand this error
+AuthContext.jsx:19  POST https://4b95407d-b19f-4a57-8381-13f3685c9cf0-00-3miadbc6s1lt3.sisko.replit.dev/auth/login net::ERR_FAILED
+dispatchXhrRequest @ axios.js?v=5ae0840c:1672
+xhr @ axios.js?v=5ae0840c:1552
+dispatchRequest @ axios.js?v=5ae0840c:2027
+_request @ axios.js?v=5ae0840c:2248
+request @ axios.js?v=5ae0840c:2139
+httpMethod @ axios.js?v=5ae0840c:2277
+wrap @ axios.js?v=5ae0840c:8
+login @ AuthContext.jsx:19
+onSubmit @ Login.jsx:28
+executeDispatch @ react-dom_client.js?v=5ae0840c:11736
+runWithFiberInDEV @ react-dom_client.js?v=5ae0840c:1485
+processDispatchQueue @ react-dom_client.js?v=5ae0840c:11772
+(anonymous) @ react-dom_client.js?v=5ae0840c:12182
+batchedUpdates$1 @ react-dom_client.js?v=5ae0840c:2628
+dispatchEventForPluginEventSystem @ react-dom_client.js?v=5ae0840c:11877
+dispatchEvent @ react-dom_client.js?v=5ae0840c:14792
+dispatchDiscreteEvent @ react-dom_client.js?v=5ae0840c:14773Understand this error
+login:1 Access to XMLHttpRequest at 'https://4b95407d-b19f-4a57-8381-13f3685c9cf0-00-3miadbc6s1lt3.sisko.replit.dev/auth/login' from origin 'http://localhost:5173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.Understand this error
+AuthContext.jsx:19  POST https://4b95407d-b19f-4a57-8381-13f3685c9cf0-00-3miadbc6s1lt3.sisko.replit.dev/auth/login net::ERR_FAILED
