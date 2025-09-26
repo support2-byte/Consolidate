@@ -3,7 +3,7 @@ import multer from "multer";
 import {
   createCustomer,
   getCustomerById,
-  getCustomers,
+  getvendors,
   saveContacts,
   deleteContact,
   uploadDocument,
@@ -13,14 +13,14 @@ import {
   downloadDocument,
   updateDocument,
   deleteCustomer
-} from "./customer.controller.js"; // Adjust path as needed
+} from "./vendorController.js"; // Adjust path as needed
 import upload from "../../middleware/upload.js";
 const router = express.Router();
 // const upload = multer({ storage: multer.memoryStorage() });
 
 router.post("/", createCustomer);
 router.get("/:id", getCustomerById);
-router.get("/", getCustomers);
+router.get("/", getvendors);
 router.put("/:zoho_id", updateCustomer);
 router.delete("/:zoho_id", deleteCustomer);
 // Contact routes

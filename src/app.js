@@ -2,9 +2,11 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
 import authRoutes from "./modules/auth/auth.routes.js";
 import customerRoutes from "./modules/customers/customer.routes.js";
-
+import vendorRoutes from "./modules/vendors/vendorRoutes.js";
+import containerRoutes from "./modules/containers/container.routes.js";
 dotenv.config();
 
 const app = express();
@@ -29,7 +31,8 @@ app.use(
 
 app.use("/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
-
+app.use("/api/vendors", vendorRoutes);
+app.use("/api/containers", containerRoutes);
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });

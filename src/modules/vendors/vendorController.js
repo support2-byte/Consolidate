@@ -41,10 +41,10 @@ export async function getZohoAccessToken() {
     throw err;
   }
 }
-export async function getCustomers(req, res) {
+export async function getvendors(req, res) {
 try {
   const token = await getZohoAccessToken();
-  console.log("Fetched Zoho access token:", {
+  console.log("Fetched Zoho access token2222:", {
     access_token: token,
     scope: "ZohoBooks.fullaccess.all",
   });
@@ -70,31 +70,31 @@ try {
 
   // Split contacts
  
-  const customers = contacts.filter(c => c.contact_type === "customer");
+  const vendors = contacts.filter(c => c.contact_type === "vendor");
 
-  // Insert/Update customers
-  for (const c of customers) {
+  // Insert/Update vendors
+  for (const c of vendors) {
     if (!c.contact_id) {
       console.warn("Skipping customer without contact_id:", c);
       continue;
     }
 
     await pool.query(
-      `INSERT INTO customers 
+      `INSERT INTO vendors 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
          system_notes, contact_type, status, created_by, modified_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (zoho_id) DO UPDATE SET
-         contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-         email = COALESCE(EXCLUDED.email, customers.email),
-         address = COALESCE(customers.address, EXCLUDED.address),
-         zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-         associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
-         system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
-         contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
-         status = COALESCE(EXCLUDED.status, customers.status),
-         created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-         modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)`,
+         contact_name = COALESCE(EXCLUDED.contact_name, vendors.contact_name),
+         email = COALESCE(EXCLUDED.email, vendors.email),
+         address = COALESCE(vendors.address, EXCLUDED.address),
+         zoho_notes = COALESCE(EXCLUDED.zoho_notes, vendors.zoho_notes),
+         associated_by = COALESCE(vendors.associated_by, EXCLUDED.associated_by),
+         system_notes = COALESCE(vendors.system_notes, EXCLUDED.system_notes),
+         contact_type = COALESCE(EXCLUDED.contact_type, vendors.contact_type),
+         status = COALESCE(EXCLUDED.status, vendors.status),
+         created_by = COALESCE(EXCLUDED.created_by, vendors.created_by),
+         modified_by = COALESCE(vendors.modified_by, EXCLUDED.modified_by)`,
       [
         c.contact_id,
         c.contact_name || null,
@@ -114,12 +114,12 @@ try {
 
 
   const { rows } = await pool.query(
-    "SELECT * FROM customers ORDER BY created_time DESC"
+    "SELECT * FROM vendors ORDER BY created_time DESC"
   );
 
  
   res.json(rows );
-  console.log("Sent customers and vendors response:", rows);  
+  console.log("Sent vendors and vendors response:", rows);  
   return
 } catch (err) {
   console.error("Zoho Books sync error:", {
@@ -154,7 +154,7 @@ export async function deleteCustomer(req, res) {
 
     // Delete from local DB
     const { rows } = await pool.query(
-      `DELETE FROM customers WHERE zoho_id = $1 RETURNING zoho_id, contact_name, contact_type`,
+      `DELETE FROM vendors WHERE zoho_id = $1 RETURNING zoho_id, contact_name, contact_type`,
       [zoho_id]
     );
 
@@ -689,7 +689,7 @@ export async function updateCustomer(req, res) {
       contact_name: contact_name || null,
       email: email || null,
       notes: zoho_notes || "",
-      contact_type: "customer", // always required by Zoho
+      contact_type: "vendor", // always required by Zoho
     };
 
     const zohoRes = await axios.put(
@@ -708,22 +708,22 @@ export async function updateCustomer(req, res) {
     console.log("Zoho update response:", zohoCustomer);
 
     const { rows } = await pool.query(
-      `INSERT INTO customers 
+      `INSERT INTO vendors 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
          system_notes, type, contact_type, status, created_by, modified_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (zoho_id) DO UPDATE SET
-         contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-         email = COALESCE(EXCLUDED.email, customers.email),
-         address = COALESCE(EXCLUDED.address, customers.address),
-         zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-         associated_by = COALESCE(EXCLUDED.associated_by, customers.associated_by),
-         system_notes = COALESCE(EXCLUDED.system_notes, customers.system_notes),
-         type = COALESCE(EXCLUDED.type, customers.type),
-         contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
-         status = COALESCE(EXCLUDED.status, customers.status),
-         created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-         modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by)
+         contact_name = COALESCE(EXCLUDED.contact_name, vendors.contact_name),
+         email = COALESCE(EXCLUDED.email, vendors.email),
+         address = COALESCE(EXCLUDED.address, vendors.address),
+         zoho_notes = COALESCE(EXCLUDED.zoho_notes, vendors.zoho_notes),
+         associated_by = COALESCE(EXCLUDED.associated_by, vendors.associated_by),
+         system_notes = COALESCE(EXCLUDED.system_notes, vendors.system_notes),
+         type = COALESCE(EXCLUDED.type, vendors.type),
+         contact_type = COALESCE(EXCLUDED.contact_type, vendors.contact_type),
+         status = COALESCE(EXCLUDED.status, vendors.status),
+         created_by = COALESCE(EXCLUDED.created_by, vendors.created_by),
+         modified_by = COALESCE(EXCLUDED.modified_by, vendors.modified_by)
        RETURNING zoho_id, contact_name, email, address, zoho_notes, associated_by, 
                  system_notes, type, contact_type, status, created_by, modified_by`,
       [
@@ -735,7 +735,7 @@ export async function updateCustomer(req, res) {
         associated_by || null,
         system_notes || null,
         type || null, // frontend
-        zohoCustomer.contact_type || "customer", // Zoho
+        zohoCustomer.contact_type || "vendor", // Zoho
         zohoCustomer.status === "active",
         zohoCustomer.created_by_name || null,
         zohoCustomer.updated_by_name || null,
@@ -771,7 +771,7 @@ export async function createCustomer(req, res) {
     const payload = {
       contact_name: `${contact_name.trim()}`,
       company_name: contact_name.trim(),
-      contact_type: "customer", // Zoho requires this
+      contact_type: "vendor", // Zoho requires this
       email: email
         ? `${email.split("@")[0]}.${uniqueSuffix}@${email.split("@")[1]}`
         : `test.${uniqueSuffix}@example.com`,
@@ -794,22 +794,22 @@ export async function createCustomer(req, res) {
 
     // Insert into DB (12 columns now)
     const { rows } = await pool.query(
-      `INSERT INTO customers 
+      `INSERT INTO vendors 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
          system_notes, type, contact_type, status, created_by, modified_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (zoho_id) DO UPDATE SET
-         contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-         email = COALESCE(customers.email, EXCLUDED.email),
-         address = COALESCE(customers.address, EXCLUDED.address),
-         zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-         associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
-         system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
-         type = COALESCE(EXCLUDED.type, customers.type),
-         contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
-         status = COALESCE(EXCLUDED.status, customers.status),
-         created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-         modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)
+         contact_name = COALESCE(EXCLUDED.contact_name, vendors.contact_name),
+         email = COALESCE(vendors.email, EXCLUDED.email),
+         address = COALESCE(vendors.address, EXCLUDED.address),
+         zoho_notes = COALESCE(EXCLUDED.zoho_notes, vendors.zoho_notes),
+         associated_by = COALESCE(vendors.associated_by, EXCLUDED.associated_by),
+         system_notes = COALESCE(vendors.system_notes, EXCLUDED.system_notes),
+         type = COALESCE(EXCLUDED.type, vendors.type),
+         contact_type = COALESCE(EXCLUDED.contact_type, vendors.contact_type),
+         status = COALESCE(EXCLUDED.status, vendors.status),
+         created_by = COALESCE(EXCLUDED.created_by, vendors.created_by),
+         modified_by = COALESCE(vendors.modified_by, EXCLUDED.modified_by)
        RETURNING zoho_id, contact_name, email, address, zoho_notes, associated_by, 
                  system_notes, type, contact_type, status, created_by, modified_by`,
       [
@@ -821,7 +821,7 @@ export async function createCustomer(req, res) {
         associated_by || null,
         system_notes || null,
         type || null, // <-- from frontend
-        zohoCustomer.contact_type || "customer", // <-- from Zoho
+        zohoCustomer.contact_type || "vendor", // <-- from Zoho
         zohoCustomer.status === "active",
         zohoCustomer.created_by_name || req.user?.name || "System",
         zohoCustomer.updated_by_name || null,
@@ -845,7 +845,7 @@ export async function getCustomerById(req, res) {
     const { rows } = await pool.query(
       `SELECT zoho_id, contact_name, email, address, zoho_notes, associated_by, 
               system_notes, type, contact_type, status, created_by, modified_by 
-       FROM customers WHERE zoho_id = $1`,
+       FROM vendors WHERE zoho_id = $1`,
       [id]
     );
 
@@ -876,22 +876,22 @@ export async function getCustomerById(req, res) {
     }));
      
 const { rows: updatedRows } = await pool.query(
-  `INSERT INTO customers 
+  `INSERT INTO vendors 
     (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
      system_notes, type, contact_type, status, created_by, modified_by)
    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
    ON CONFLICT (zoho_id) DO UPDATE SET
-     contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-     email = COALESCE(customers.email, EXCLUDED.email),
-     address = COALESCE(customers.address, EXCLUDED.address),
-     zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-     associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
-     system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
-     type = COALESCE(customers.type, EXCLUDED.type),
-     contact_type = COALESCE(customers.contact_type, EXCLUDED.contact_type),
-     status = COALESCE(EXCLUDED.status, customers.status),
-     created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-     modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)
+     contact_name = COALESCE(EXCLUDED.contact_name, vendors.contact_name),
+     email = COALESCE(vendors.email, EXCLUDED.email),
+     address = COALESCE(vendors.address, EXCLUDED.address),
+     zoho_notes = COALESCE(EXCLUDED.zoho_notes, vendors.zoho_notes),
+     associated_by = COALESCE(vendors.associated_by, EXCLUDED.associated_by),
+     system_notes = COALESCE(vendors.system_notes, EXCLUDED.system_notes),
+     type = COALESCE(vendors.type, EXCLUDED.type),
+     contact_type = COALESCE(vendors.contact_type, EXCLUDED.contact_type),
+     status = COALESCE(EXCLUDED.status, vendors.status),
+     created_by = COALESCE(EXCLUDED.created_by, vendors.created_by),
+     modified_by = COALESCE(vendors.modified_by, EXCLUDED.modified_by)
    RETURNING zoho_id, contact_name, email, address, zoho_notes, associated_by, 
              system_notes, type, contact_type, status, created_by, modified_by`,
   [
@@ -903,7 +903,7 @@ const { rows: updatedRows } = await pool.query(
     null,
     null,
     null, // type
-    zohoCustomer.contact_type || "customer",
+    zohoCustomer.contact_type || "vendor",
     zohoCustomer.status === "active",
     zohoCustomer.created_by_name || null,
     zohoCustomer.custom_fields?.cf_updated_by_name || zohoCustomer.updated_by_name || null,
