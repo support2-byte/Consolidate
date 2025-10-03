@@ -7,6 +7,7 @@ import authRoutes from "./modules/auth/auth.routes.js";
 import customerRoutes from "./modules/customers/customer.routes.js";
 import vendorRoutes from "./modules/vendors/vendorRoutes.js";
 import containerRoutes from "./modules/containers/container.routes.js";
+import orderRoutes from './modules/orders/orderRoutes.js'
 dotenv.config();
 
 const app = express();
@@ -33,6 +34,8 @@ app.use("/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/vendors", vendorRoutes);
 app.use("/api/containers", containerRoutes);
+app.use("/api/orders", orderRoutes);
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
