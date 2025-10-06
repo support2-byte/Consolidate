@@ -59,24 +59,18 @@ function getStatusColor(status) {
   return colors[status] || 'default';
 }
 
-
-
 export async function getStatuses(req, res) {
   try {
-    // Original SQL query (must include this!)
+    // Updated SQL query aligned with client status flow
+    // Derives based on availability, with precedence for job lifecycle statuses
+    // Defaults to 'Available' if no matching status
+    // Removed hire-date specific logic (Hired/Occupied) as per client flow
     const query = `
       SELECT DISTINCT derived_status AS value, derived_status AS label 
       FROM (
         SELECT 
           CASE 
-            WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-            WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-            WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-            WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-            WHEN cs.availability = 'Arrived' THEN 'Arrived'
-            WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-            WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-            WHEN cs.availability = 'Returned' THEN 'Returned'
+            WHEN cs.availability IN ('Assigned to Job', 'Loaded', 'In Transit', 'Arrived', 'De-Linked', 'Cleared', 'Returned') THEN cs.availability
             ELSE 'Available'
           END as derived_status
         FROM container_master cm
@@ -87,7 +81,6 @@ export async function getStatuses(req, res) {
           ORDER BY css.sid DESC NULLS LAST
           LIMIT 1
         ) cs ON true
-        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
         WHERE cm.status = 1
       ) sub
       WHERE derived_status IS NOT NULL
@@ -100,7 +93,7 @@ export async function getStatuses(req, res) {
       color: getStatusColor(row.value)
     }));
 
-    // Hardcode full list if query returns < 5 (or always, for consistency)
+//     // Hardcode full list if query returns < 5 (or always, for consistency)
     if (statuses.length < 5) {
       statuses = [
         { value: 'Available', label: 'Available', color: getStatusColor('Available') },
@@ -128,10 +121,59 @@ export async function getStatuses(req, res) {
     res.status(500).json({ error: 'Failed to fetch statuses' });
   }
 }
-// // Dynamic options endpoints
+
+
+
 // export async function getStatuses(req, res) {
 //   try {
-//     // Fetch distinct derived statuses using the computation logic
+//     // Updated SQL query with 'Hired' and 'Occupied' added to availability IN clause
+//     const query = `
+//       SELECT DISTINCT derived_status AS value, derived_status AS label 
+//       FROM (
+//         SELECT 
+//           CASE 
+//             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//             WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//             WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//             WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job', 'Hired', 'Occupied') THEN cs.availability
+//             WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//             WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//             WHEN cs.availability = 'Returned' THEN 'Returned'
+//             ELSE 'Available'
+//           END as derived_status
+//         FROM container_master cm
+//         LEFT JOIN LATERAL (
+//           SELECT location, availability
+//           FROM container_status css
+//           WHERE css.cid = cm.cid
+//           ORDER BY css.sid DESC NULLS LAST
+//           LIMIT 1
+//         ) cs ON true
+//         LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//         WHERE cm.status = 1
+//       ) sub
+//       WHERE derived_status IS NOT NULL
+//       ORDER BY value
+//     `;
+    
+//     const result = await pool.query(query);
+//     let statuses = result.rows.map(row => ({
+//       ...row,
+//       color: getStatusColor(row.value)
+//     }));
+
+//     res.json(statuses);
+//   } catch (err) {
+//     console.error('Error fetching statuses:', err);
+//     res.status(500).json({ error: 'Failed to fetch statuses' });
+//   }
+// }
+
+
+// export async function getStatuses(req, res) {
+//   try {
+//     // Original SQL query (must include this!)
 //     const query = `
 //       SELECT DISTINCT derived_status AS value, derived_status AS label 
 //       FROM (
@@ -161,17 +203,44 @@ export async function getStatuses(req, res) {
 //       WHERE derived_status IS NOT NULL
 //       ORDER BY value
 //     `;
+    
 //     const result = await pool.query(query);
-//     const statuses = result.rows.map(row => ({
+//     let statuses = result.rows.map(row => ({
 //       ...row,
 //       color: getStatusColor(row.value)
 //     }));
+
+//     // Hardcode full list if query returns < 5 (or always, for consistency)
+//     if (statuses.length < 5) {
+//       statuses = [
+//         { value: 'Available', label: 'Available', color: getStatusColor('Available') },
+//         { value: 'Hired', label: 'Hired', color: getStatusColor('Hired') },
+//         { value: 'Occupied', label: 'Occupied', color: getStatusColor('Occupied') },
+//         { value: 'In Transit', label: 'In Transit', color: getStatusColor('In Transit') },
+//         { value: 'Loaded', label: 'Loaded', color: getStatusColor('Loaded') },
+//         { value: 'Assigned to Job', label: 'Assigned to Job', color: getStatusColor('Assigned to Job') },
+//         { value: 'Arrived', label: 'Arrived', color: getStatusColor('Arrived') },
+//         { value: 'De-Linked', label: 'De-Linked', color: getStatusColor('De-Linked') },
+//         { value: 'Under Repair', label: 'Under Repair', color: getStatusColor('Under Repair') },
+//         { value: 'Returned', label: 'Returned', color: getStatusColor('Returned') },
+//         // Add more if needed
+//       ];
+//     }
+
+//     // Remove duplicates if mixing dynamic + hardcoded
+//     statuses = statuses.filter((s, index, self) => 
+//       index === self.findIndex(t => t.value === s.value)
+//     );
+
 //     res.json(statuses);
 //   } catch (err) {
 //     console.error("Error fetching statuses:", err);
 //     res.status(500).json({ error: 'Failed to fetch statuses' });
 //   }
 // }
+
+
+
 
 export async function getLocations(req, res) {
   try {

@@ -21,7 +21,10 @@ const storage = multer.diskStorage({
 router.post('/', upload.array('attachments'), createOrder);
 
 // PUT /api/orders/:id - Update an existing order
-router.put('/:id', upload.array('attachments'), updateOrder);
+router.put('/:id', upload.fields([
+  { name: 'attachments', maxCount: 10 },
+  { name: 'gatepass', maxCount: 10 }
+]), updateOrder)
 
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);
