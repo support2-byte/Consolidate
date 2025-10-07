@@ -67,83 +67,62 @@ export function getContainerAvailability(orderStatus) {
   }
 }
 
-
-// Update an existing order (handles multipart/form-data for files; refined validation)
-export async function updateOrder(req, res) {
+// Create a new order (defaults for all vars; log values.length)
+export async function createOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
 
-    const { id } = req.params;
-    const updates = req.body;
+    const updates = req.body || {};
     const files = req.files || {}; // Assuming multer .fields() or .any()
-    const created_by = updates.created_by || 'system';
+    const created_by = 'system';
 
     // Debug log
-    console.log('Order update body (key fields):', { booking_ref: updates.booking_ref, status: updates.status, eta: updates.eta, etd: updates.etd, shipping_line: updates.shipping_line });
+    console.log('Order create body (key fields):', { booking_ref: updates.booking_ref, status: updates.status, eta: updates.eta, etd: updates.etd, shipping_line: updates.shipping_line });
     console.log('Files received:', Object.keys(files));
 
-    // Fetch current order
-    const currentResult = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
-    if (currentResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order not found' });
-    }
-    const currentOrder = currentResult.rows[0];
-
-    // Parse existing attachments and gatepass if JSON strings
+    // Parse existing attachments and gatepass if provided in form (for consistency, though typically empty for create)
     let currentAttachments = [];
-    if (currentOrder.attachments) {
-      try {
-        currentAttachments = typeof currentOrder.attachments === 'string' ? JSON.parse(currentOrder.attachments) : currentOrder.attachments;
-      } catch (e) {
-        currentAttachments = [];
-      }
-    }
     let currentGatepass = [];
-    if (currentOrder.gatepass) {
-      try {
-        currentGatepass = typeof currentOrder.gatepass === 'string' ? JSON.parse(currentOrder.gatepass) : currentOrder.gatepass;
-      } catch (e) {
-        currentGatepass = [];
-      }
-    }
 
     // Handle attachments
     let newAttachments = currentAttachments;
+    let existingAttachmentsFromForm = [];
+    if (updates.attachments_existing) {
+      try {
+        existingAttachmentsFromForm = JSON.parse(updates.attachments_existing);
+      } catch (e) {
+        console.warn('Failed to parse attachments_existing:', e.message);
+      }
+    }
+    if (existingAttachmentsFromForm.length > 0) {
+      newAttachments = existingAttachmentsFromForm; // Use form's existing if provided (e.g., text-only create with presets)
+    }
     if (files.attachments && files.attachments.length > 0) {
       const uploadedPaths = await uploadFiles(files.attachments, 'attachments'); // Implement uploadFiles to save to disk/S3 and return paths
-      newAttachments = [...currentAttachments, ...uploadedPaths];
+      newAttachments = [...newAttachments, ...uploadedPaths];
     }
     const attachmentsJson = JSON.stringify(newAttachments);
 
     // Handle gatepass (similarly)
     let newGatepass = currentGatepass;
+    let existingGatepassFromForm = [];
+    if (updates.gatepass_existing) {
+      try {
+        existingGatepassFromForm = JSON.parse(updates.gatepass_existing);
+      } catch (e) {
+        console.warn('Failed to parse gatepass_existing:', e.message);
+      }
+    }
+    if (existingGatepassFromForm.length > 0) {
+      newGatepass = existingGatepassFromForm; // Use form's existing if provided
+    }
     if (files.gatepass && files.gatepass.length > 0) {
       const uploadedPaths = await uploadFiles(files.gatepass, 'gatepass');
-      newGatepass = [...currentGatepass, ...uploadedPaths];
-    } else if (updates.gatepass_existing) {
-      // If no new files, but existing sent (for cases where only text updated)
-      try {
-        newGatepass = JSON.parse(updates.gatepass_existing);
-      } catch (e) {
-        newGatepass = currentGatepass;
-      }
+      newGatepass = [...newGatepass, ...uploadedPaths];
     }
     const gatepassJson = JSON.stringify(newGatepass);
-
-    // Handle existing attachments if sent separately
-    if (updates.attachments_existing) {
-      try {
-        const existingOnly = JSON.parse(updates.attachments_existing);
-        if (!files.attachments || files.attachments.length === 0) {
-          newAttachments = existingOnly;
-        }
-      } catch (e) {
-        // Ignore if invalid
-      }
-    }
 
     // Allowed update fields (now includes attachments, gatepass)
     const allowedUpdateFields = [
@@ -217,80 +196,562 @@ export async function updateOrder(req, res) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const mobileRegex = /^\d{10,15}$/;
 
-    for (const [camelField, value] of Object.entries(updatedFields)) {
-      if (value !== undefined) {  // Validate if provided, even if empty
-        // Complete mapping for actualField (snake_case)
-        let actualField;
-        switch (camelField) {
-          case 'bookingRef': actualField = 'booking_ref'; break;
-          case 'rglBookingNumber': actualField = 'rgl_booking_number'; break;
-          case 'placeOfLoading': actualField = 'place_of_loading'; break;
-          case 'finalDestination': actualField = 'final_destination'; break;
-          case 'placeOfDelivery': actualField = 'place_of_delivery'; break;
-          case 'senderName': actualField = 'sender_name'; break;
-          case 'receiverName': actualField = 'receiver_name'; break;
-          case 'shippingLine': actualField = 'shipping_line'; break;
-          case 'consignmentRemarks': actualField = 'consignment_remarks'; break;
-          case 'orderRemarks': actualField = 'order_remarks'; break;
-          case 'consignmentNumber': actualField = 'consignment_number'; break;
-          case 'consignmentVessel': actualField = 'consignment_vessel'; break;
-          case 'consignmentVoyage': actualField = 'consignment_voyage'; break;
-          case 'senderContact': actualField = 'sender_contact'; break;
-          case 'senderAddress': actualField = 'sender_address'; break;
-          case 'senderEmail': actualField = 'sender_email'; break;
-          case 'receiverContact': actualField = 'receiver_contact'; break;
-          case 'receiverAddress': actualField = 'receiver_address'; break;
-          case 'receiverEmail': actualField = 'receiver_email'; break;
-          case 'driverName': actualField = 'driver_name'; break;
-          case 'driverContact': actualField = 'driver_contact'; break;
-          case 'driverNic': actualField = 'driver_nic'; break;
-          case 'driverPickupLocation': actualField = 'driver_pickup_location'; break;
-          case 'truckNumber': actualField = 'truck_number'; break;
-          case 'thirdPartyTransport': actualField = 'third_party_transport'; break;
-          case 'deliveryAddress': actualField = 'delivery_address'; break;
-          case 'pickupLocation': actualField = 'pickup_location'; break;
-          case 'dropMethod': actualField = 'drop_method'; break;
-          case 'dropOffCnic': actualField = 'drop_off_cnic'; break;
-          case 'dropOffMobile': actualField = 'drop_off_mobile'; break;
-          case 'plateNo': actualField = 'plate_no'; break;
-          case 'dropDate': actualField = 'drop_date'; break;
-          case 'collectionMethod': actualField = 'collection_method'; break;
-          case 'fullPartial': actualField = 'full_partial'; break;
-          case 'qtyDelivered': actualField = 'qty_delivered'; break;
-          case 'clientReceiverName': actualField = 'client_receiver_name'; break;
-          case 'clientReceiverId': actualField = 'client_receiver_id'; break;
-          case 'clientReceiverMobile': actualField = 'client_receiver_mobile'; break;
-          case 'deliveryDate': actualField = 'delivery_date'; break;
-          default: actualField = camelField.toLowerCase().replace(/([A-Z])/g, '_$1');
-        }
+    // Helper to get actual field name (snake_case)
+    const getActualField = (camelField) => {
+      switch (camelField) {
+        case 'bookingRef': return 'booking_ref';
+        case 'rglBookingNumber': return 'rgl_booking_number';
+        case 'placeOfLoading': return 'place_of_loading';
+        case 'finalDestination': return 'final_destination';
+        case 'placeOfDelivery': return 'place_of_delivery';
+        case 'senderName': return 'sender_name';
+        case 'receiverName': return 'receiver_name';
+        case 'shippingLine': return 'shipping_line';
+        case 'consignmentRemarks': return 'consignment_remarks';
+        case 'orderRemarks': return 'order_remarks';
+        case 'consignmentNumber': return 'consignment_number';
+        case 'consignmentVessel': return 'consignment_vessel';
+        case 'consignmentVoyage': return 'consignment_voyage';
+        case 'senderContact': return 'sender_contact';
+        case 'senderAddress': return 'sender_address';
+        case 'senderEmail': return 'sender_email';
+        case 'receiverContact': return 'receiver_contact';
+        case 'receiverAddress': return 'receiver_address';
+        case 'receiverEmail': return 'receiver_email';
+        case 'driverName': return 'driver_name';
+        case 'driverContact': return 'driver_contact';
+        case 'driverNic': return 'driver_nic';
+        case 'driverPickupLocation': return 'driver_pickup_location';
+        case 'truckNumber': return 'truck_number';
+        case 'thirdPartyTransport': return 'third_party_transport';
+        case 'deliveryAddress': return 'delivery_address';
+        case 'pickupLocation': return 'pickup_location';
+        case 'dropMethod': return 'drop_method';
+        case 'dropOffCnic': return 'drop_off_cnic';
+        case 'dropOffMobile': return 'drop_off_mobile';
+        case 'plateNo': return 'plate_no';
+        case 'dropDate': return 'drop_date';
+        case 'collectionMethod': return 'collection_method';
+        case 'fullPartial': return 'full_partial';
+        case 'qtyDelivered': return 'qty_delivered';
+        case 'clientReceiverName': return 'client_receiver_name';
+        case 'clientReceiverId': return 'client_receiver_id';
+        case 'clientReceiverMobile': return 'client_receiver_mobile';
+        case 'deliveryDate': return 'delivery_date';
+        default: return camelField.toLowerCase().replace(/([A-Z])/g, '_$1').toLowerCase();
+      }
+    };
 
-        if (value === '' || value === null) {
-          updateErrors.push(`${actualField} cannot be empty`);
-        } else if (['eta', 'etd', 'dropDate', 'deliveryDate'].includes(camelField) && !isValidDate(value)) {
+    // Required fields validation
+    const requiredFields = [
+      'bookingRef',
+      'rglBookingNumber',
+      'senderName',
+      'receiverName',
+      'placeOfLoading',
+      'finalDestination',
+      'category',
+      'subcategory',
+      'type',
+      'weight'
+    ];
+
+    requiredFields.forEach(camelField => {
+      const value = updatedFields[camelField];
+      if (!value || !value.trim()) {
+        const actualField = getActualField(camelField);
+        updateErrors.push(`${actualField} is required`);
+      }
+    });
+
+    // Conditional validations
+    const showInbound = updates.final_destination && updates.final_destination.includes('Karachi');
+    const showOutbound = updates.place_of_loading && updates.place_of_loading.includes('Dubai');
+
+    if (showInbound && updatedFields.dropMethod === 'Drop-Off') {
+      if (!updatedFields.dropOffCnic || !updatedFields.dropOffCnic.trim()) updateErrors.push('drop_off_cnic required for Drop-Off');
+      if (!updatedFields.dropOffMobile || !updatedFields.dropOffMobile.trim()) updateErrors.push('drop_off_mobile required for Drop-Off');
+    }
+    if (showInbound && (!updatedFields.dropDate || !updatedFields.dropDate.trim())) {
+      updateErrors.push('drop_date required');
+    }
+
+    if (showOutbound && (!updatedFields.deliveryDate || !updatedFields.deliveryDate.trim())) {
+      updateErrors.push('delivery_date required');
+    }
+    if (showOutbound && updatedFields.fullPartial === 'Partial' && (!updatedFields.qtyDelivered || !updatedFields.qtyDelivered.trim())) {
+      updateErrors.push('qty_delivered required for Partial delivery');
+    }
+    if (showOutbound && updatedFields.collectionMethod === 'Collected by Client') {
+      if (!updatedFields.clientReceiverName || !updatedFields.clientReceiverName.trim()) updateErrors.push('client_receiver_name required for Client Collection');
+      if (!updatedFields.clientReceiverId || !updatedFields.clientReceiverId.trim()) updateErrors.push('client_receiver_id required for Client Collection');
+      if (!updatedFields.clientReceiverMobile || !updatedFields.clientReceiverMobile.trim()) updateErrors.push('client_receiver_mobile required for Client Collection');
+    }
+
+    // Format validations (only if provided and not empty)
+    for (const [camelField, value] of Object.entries(updatedFields)) {
+      if (value !== undefined && value !== null && value.trim() !== '') {
+        const actualField = getActualField(camelField);
+
+        if (['eta', 'etd', 'dropDate', 'deliveryDate'].includes(camelField) && !isValidDate(value)) {
           updateErrors.push(`${actualField} invalid date format (use YYYY-MM-DD)`);
         } else if (camelField === 'weight' && (isNaN(value) || parseFloat(value) <= 0)) {
           updateErrors.push(`${actualField} must be a positive number`);
         } else if (['senderEmail', 'receiverEmail'].includes(camelField) && !emailRegex.test(value)) {
           updateErrors.push(`${actualField} invalid email format`);
-        } else if (['dropOffMobile', 'clientReceiverMobile', 'senderContact', 'receiverContact', 'driverContact'].includes(camelField) && !mobileRegex.test(value.replace(/\D/g, ''))) {
+        } else if (['dropOffMobile', 'clientReceiverMobile'].includes(camelField) && !mobileRegex.test(value.replace(/\D/g, ''))) {
           updateErrors.push(`${actualField} invalid mobile number (10-15 digits expected)`);
         }
         // Add more specific validations as needed (e.g., enums for status, drop_method, etc.)
       }
     }
 
-    // Conditional validations
-    if (updates.drop_method === 'Drop-Off') {
-      if (!updates.drop_off_cnic || updates.drop_off_cnic.trim() === '') updateErrors.push('drop_off_cnic required for Drop-Off');
-      if (!updates.drop_off_mobile || updates.drop_off_mobile.trim() === '') updateErrors.push('drop_off_mobile required for Drop-Off');
+    if (updateErrors.length > 0) {
+      console.warn('Create validation failed:', updateErrors);
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: 'Invalid create fields',
+        details: updateErrors.join('; ')
+      });
     }
-    if (updates.full_partial === 'Partial' && (!updates.qty_delivered || updates.qty_delivered.trim() === '')) {
-      updateErrors.push('qty_delivered required for Partial delivery');
+
+    // Normalize dates
+    const normEta = updates.eta ? normalizeDate(updates.eta) : null;
+    const normEtd = updates.etd ? normalizeDate(updates.etd) : null;
+    const normDropDate = updates.drop_date ? normalizeDate(updates.drop_date) : null;
+    const normDeliveryDate = updates.delivery_date ? normalizeDate(updates.delivery_date) : null;
+
+    if ((updates.eta && !normEta) || (updates.etd && !normEtd) || (updates.drop_date && !normDropDate) || (updates.delivery_date && !normDeliveryDate)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
     }
-    if (updates.collection_method === 'Collected by Client') {
-      if (!updates.client_receiver_name || updates.client_receiver_name.trim() === '') updateErrors.push('client_receiver_name required for Client Collection');
-      if (!updates.client_receiver_id || updates.client_receiver_id.trim() === '') updateErrors.push('client_receiver_id required for Client Collection');
-      if (!updates.client_receiver_mobile || updates.client_receiver_mobile.trim() === '') updateErrors.push('client_receiver_mobile required for Client Collection');
+
+    const query = `
+      INSERT INTO orders (
+        booking_ref, status, rgl_booking_number, consignment_remarks,
+        place_of_loading, final_destination, place_of_delivery, order_remarks,
+        associated_container, consignment_number, consignment_vessel, consignment_voyage,
+        sender_name, sender_contact, sender_address, sender_email,
+        receiver_name, receiver_contact, receiver_address, receiver_email,
+        eta, etd, shipping_line,
+        driver_name, driver_contact, driver_nic, driver_pickup_location, truck_number,
+        third_party_transport, category, subcategory, type, delivery_address, pickup_location, weight,
+        drop_method, drop_off_cnic, drop_off_mobile, plate_no, drop_date,
+        collection_method, full_partial, qty_delivered, client_receiver_name, client_receiver_id,
+        client_receiver_mobile, delivery_date, attachments, gatepass, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32,
+                $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50)
+      RETURNING *
+    `;
+
+    const values = [
+      updates.booking_ref || '',
+      updates.status || 'In Transit',
+      updates.rgl_booking_number || '',
+      updates.consignment_remarks || '',
+      updates.place_of_loading || '',
+      updates.final_destination || '',
+      updates.place_of_delivery || '',
+      updates.order_remarks || '',
+      updates.associated_container || '',
+      updates.consignment_number || '',
+      updates.consignment_vessel || '',
+      updates.consignment_voyage || '',
+      updates.sender_name || '',
+      updates.sender_contact || '',
+      updates.sender_address || '',
+      updates.sender_email || '',
+      updates.receiver_name || '',
+      updates.receiver_contact || '',
+      updates.receiver_address || '',
+      updates.receiver_email || '',
+      normEta,
+      normEtd,
+      updates.shipping_line || '',
+      updates.driver_name || '',
+      updates.driver_contact || '',
+      updates.driver_nic || '',
+      updates.driver_pickup_location || '',
+      updates.truck_number || '',
+      updates.third_party_transport || '',
+      updates.category || '',
+      updates.subcategory || '',
+      updates.type || '',
+      updates.delivery_address || '',
+      updates.pickup_location || '',
+      updates.weight || null,
+      updates.drop_method || '',
+      updates.drop_off_cnic || '',
+      updates.drop_off_mobile || '',
+      updates.plate_no || '',
+      normDropDate,
+      updates.collection_method || '',
+      updates.full_partial || '',
+      updates.qty_delivered || null,
+      updates.client_receiver_name || '',
+      updates.client_receiver_id || '',
+      updates.client_receiver_mobile || '',
+      normDeliveryDate,
+      attachmentsJson,
+      gatepassJson,
+      created_by
+    ];
+
+    // Debug: Log length to confirm match
+    console.log('Query columns: 50, Values length:', values.length);
+
+    const result = await client.query(query, values);
+    const newOrder = result.rows[0];
+
+    // If associated_container is being assigned
+    const associatedContainer = updates.associated_container;
+    if (associatedContainer) {
+      const containerCheck = await client.query(
+        'SELECT cid FROM container_master WHERE container_number = $1 AND status = 1',
+        [associatedContainer]
+      );
+      if (containerCheck.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Associated container not found' });
+      }
+      const cid = containerCheck.rows[0].cid;
+      const availability = getContainerAvailability(updates.status || 'In Transit');
+      await client.query(
+        'INSERT INTO container_status (cid, availability, status_notes, created_by) VALUES ($1, $2, $3, $4)',
+        [cid, availability, `Assigned to order ${newOrder.id} (${updates.status || 'In Transit'})`, created_by]
+      );
+    }
+
+    await client.query('COMMIT');
+    console.log("Created new order:", { id: newOrder.id });
+    res.status(201).json(newOrder);
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    console.error('Error creating order:', error);
+    // Enhanced error handling
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Booking reference already exists' });
+    }
+    if (error.code === '23514') {
+      return res.status(400).json({ error: 'Invalid value for constrained field' });
+    }
+    if (error.code === '22007' || error.code === '22008') {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+    if (error.code === '42P01') { // Column does not exist
+      return res.status(500).json({ error: 'Database schema missing columns. Run migrations for new fields.' });
+    }
+    res.status(500).json({ error: 'Failed to create order', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
+
+// Update an existing order (handles multipart/form-data for files; refined validation)
+export async function updateOrder(req, res) {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const { id } = req.params;
+    const updates = req.body;
+    const files = req.files || {}; // Assuming multer .fields() or .any()
+    const created_by = updates.created_by || 'system';
+
+    // Debug log
+    console.log('Order update body (key fields):', { booking_ref: updates.booking_ref, status: updates.status, eta: updates.eta, etd: updates.etd, shipping_line: updates.shipping_line });
+    console.log('Files received:', Object.keys(files));
+
+    // Fetch current order
+    const currentResult = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
+    if (currentResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const currentOrder = currentResult.rows[0];
+
+    // Parse existing attachments and gatepass if JSON strings
+    let currentAttachments = [];
+    if (currentOrder.attachments) {
+      try {
+        currentAttachments = typeof currentOrder.attachments === 'string' ? JSON.parse(currentOrder.attachments) : currentOrder.attachments;
+      } catch (e) {
+        currentAttachments = [];
+      }
+    }
+    let currentGatepass = [];
+    if (currentOrder.gatepass) {
+      try {
+        currentGatepass = typeof currentOrder.gatepass === 'string' ? JSON.parse(currentOrder.gatepass) : currentOrder.gatepass;
+      } catch (e) {
+        currentGatepass = [];
+      }
+    }
+
+    // Handle attachments
+    let newAttachments = currentAttachments;
+    let existingAttachmentsFromForm = [];
+    if (updates.attachments_existing) {
+      try {
+        existingAttachmentsFromForm = JSON.parse(updates.attachments_existing);
+      } catch (e) {
+        console.warn('Failed to parse attachments_existing:', e.message);
+      }
+    }
+    if (existingAttachmentsFromForm.length > 0) {
+      newAttachments = existingAttachmentsFromForm; // Use form's existing if provided (e.g., text-only update)
+    }
+    if (files.attachments && files.attachments.length > 0) {
+      const uploadedPaths = await uploadFiles(files.attachments, 'attachments'); // Returns relative paths
+      newAttachments = [...newAttachments, ...uploadedPaths];
+    }
+    const attachmentsJson = JSON.stringify(newAttachments);
+
+    // Handle gatepass (similarly to attachments)
+    let newGatepass = currentGatepass;
+    let existingGatepassFromForm = [];
+    if (updates.gatepass_existing) {
+      try {
+        existingGatepassFromForm = JSON.parse(updates.gatepass_existing);
+      } catch (e) {
+        console.warn('Failed to parse gatepass_existing:', e.message);
+      }
+    }
+    if (existingGatepassFromForm.length > 0) {
+      newGatepass = existingGatepassFromForm; // Use form's existing if provided
+    }
+    if (files.gatepass && files.gatepass.length > 0) {
+      const uploadedPaths = await uploadFiles(files.gatepass, 'gatepass'); // Returns relative paths
+      newGatepass = [...newGatepass, ...uploadedPaths];
+    }
+    const gatepassJson = JSON.stringify(newGatepass);
+
+    // Allowed update fields (now includes attachments, gatepass)
+    const allowedUpdateFields = [
+      'booking_ref', 'status', 'eta', 'etd', 'place_of_loading', 'final_destination',
+      'place_of_delivery', 'sender_name', 'receiver_name', 'shipping_line',
+      'associated_container', 'consignment_remarks', 'rgl_booking_number',
+      'order_remarks', 'consignment_number', 'consignment_vessel',
+      'consignment_voyage', 'sender_contact', 'sender_address', 'sender_email',
+      'receiver_contact', 'receiver_address', 'receiver_email', 'driver_name',
+      'driver_contact', 'driver_nic', 'driver_pickup_location', 'truck_number',
+      'third_party_transport', 'category', 'subcategory', 'type', 'delivery_address',
+      'pickup_location', 'weight', 'drop_method', 'drop_off_cnic', 'drop_off_mobile',
+      'plate_no', 'drop_date', 'collection_method', 'full_partial', 'qty_delivered',
+      'client_receiver_name', 'client_receiver_id', 'client_receiver_mobile',
+      'delivery_date', 'attachments', 'gatepass'
+    ];
+
+    // Date keys to exclude from text fields
+    const dateKeys = ['eta', 'etd', 'drop_date', 'delivery_date'];
+
+    // Numeric fields that should be null if empty
+    const numericFields = ['weight', 'qty_delivered'];
+
+    // Validation (only for provided fields)
+    const updatedFields = {
+      bookingRef: updates.booking_ref,
+      status: updates.status,
+      eta: updates.eta,
+      etd: updates.etd,
+      placeOfLoading: updates.place_of_loading,
+      finalDestination: updates.final_destination,
+      placeOfDelivery: updates.place_of_delivery,
+      senderName: updates.sender_name,
+      receiverName: updates.receiver_name,
+      shippingLine: updates.shipping_line,
+      rglBookingNumber: updates.rgl_booking_number,
+      consignmentRemarks: updates.consignment_remarks,
+      orderRemarks: updates.order_remarks,
+      consignmentNumber: updates.consignment_number,
+      consignmentVessel: updates.consignment_vessel,
+      consignmentVoyage: updates.consignment_voyage,
+      senderContact: updates.sender_contact,
+      senderAddress: updates.sender_address,
+      senderEmail: updates.sender_email,
+      receiverContact: updates.receiver_contact,
+      receiverAddress: updates.receiver_address,
+      receiverEmail: updates.receiver_email,
+      driverName: updates.driver_name,
+      driverContact: updates.driver_contact,
+      driverNic: updates.driver_nic,
+      driverPickupLocation: updates.driver_pickup_location,
+      truckNumber: updates.truck_number,
+      thirdPartyTransport: updates.third_party_transport,
+      category: updates.category,
+      subcategory: updates.subcategory,
+      type: updates.type,
+      deliveryAddress: updates.delivery_address,
+      pickupLocation: updates.pickup_location,
+      weight: updates.weight,
+      dropMethod: updates.drop_method,
+      dropOffCnic: updates.drop_off_cnic,
+      dropOffMobile: updates.drop_off_mobile,
+      plateNo: updates.plate_no,
+      dropDate: updates.drop_date,
+      collectionMethod: updates.collection_method,
+      fullPartial: updates.full_partial,
+      qtyDelivered: updates.qty_delivered,
+      clientReceiverName: updates.client_receiver_name,
+      clientReceiverId: updates.client_receiver_id,
+      clientReceiverMobile: updates.client_receiver_mobile,
+      deliveryDate: updates.delivery_date,
+    };
+    const updateErrors = [];
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const mobileRegex = /^\d{10,15}$/;
+
+    // Helper to get actual field name (snake_case)
+    const getActualField = (camelField) => {
+      switch (camelField) {
+        case 'bookingRef': return 'booking_ref';
+        case 'rglBookingNumber': return 'rgl_booking_number';
+        case 'placeOfLoading': return 'place_of_loading';
+        case 'finalDestination': return 'final_destination';
+        case 'placeOfDelivery': return 'place_of_delivery';
+        case 'senderName': return 'sender_name';
+        case 'receiverName': return 'receiver_name';
+        case 'shippingLine': return 'shipping_line';
+        case 'consignmentRemarks': return 'consignment_remarks';
+        case 'orderRemarks': return 'order_remarks';
+        case 'consignmentNumber': return 'consignment_number';
+        case 'consignmentVessel': return 'consignment_vessel';
+        case 'consignmentVoyage': return 'consignment_voyage';
+        case 'senderContact': return 'sender_contact';
+        case 'senderAddress': return 'sender_address';
+        case 'senderEmail': return 'sender_email';
+        case 'receiverContact': return 'receiver_contact';
+        case 'receiverAddress': return 'receiver_address';
+        case 'receiverEmail': return 'receiver_email';
+        case 'driverName': return 'driver_name';
+        case 'driverContact': return 'driver_contact';
+        case 'driverNic': return 'driver_nic';
+        case 'driverPickupLocation': return 'driver_pickup_location';
+        case 'truckNumber': return 'truck_number';
+        case 'thirdPartyTransport': return 'third_party_transport';
+        case 'deliveryAddress': return 'delivery_address';
+        case 'pickupLocation': return 'pickup_location';
+        case 'dropMethod': return 'drop_method';
+        case 'dropOffCnic': return 'drop_off_cnic';
+        case 'dropOffMobile': return 'drop_off_mobile';
+        case 'plateNo': return 'plate_no';
+        case 'dropDate': return 'drop_date';
+        case 'collectionMethod': return 'collection_method';
+        case 'fullPartial': return 'full_partial';
+        case 'qtyDelivered': return 'qty_delivered';
+        case 'clientReceiverName': return 'client_receiver_name';
+        case 'clientReceiverId': return 'client_receiver_id';
+        case 'clientReceiverMobile': return 'client_receiver_mobile';
+        case 'deliveryDate': return 'delivery_date';
+        default: return camelField.toLowerCase().replace(/([A-Z])/g, '_$1').toLowerCase();
+      }
+    };
+
+    // Required fields validation using effective values
+    const requiredFields = [
+      'bookingRef',
+      'rglBookingNumber',
+      'senderName',
+      'receiverName',
+      'placeOfLoading',
+      'finalDestination',
+      'category',
+      'subcategory',
+      'type',
+      'weight'
+    ];
+
+    requiredFields.forEach(camelField => {
+      const actualField = getActualField(camelField);
+      const effectiveValue = updates[actualField] !== undefined ? updates[actualField] : currentOrder[actualField];
+      if (camelField === 'weight') {
+        const numValue = parseFloat(effectiveValue);
+        if (isNaN(numValue) || numValue <= 0) {
+          updateErrors.push(`${actualField} must be a positive number`);
+        }
+      } else if (!effectiveValue || (typeof effectiveValue === 'string' && !effectiveValue.trim())) {
+        updateErrors.push(`${actualField} is required`);
+      }
+    });
+
+    // Effective values for conditionals
+    const effectiveFinalDestination = updates.final_destination !== undefined ? updates.final_destination : currentOrder.final_destination;
+    const showInbound = !!effectiveFinalDestination && effectiveFinalDestination.includes('Karachi');
+    const effectivePlaceOfLoading = updates.place_of_loading !== undefined ? updates.place_of_loading : currentOrder.place_of_loading;
+    const showOutbound = !!effectivePlaceOfLoading && effectivePlaceOfLoading.includes('Dubai');
+
+    const effectiveDropMethod = updates.drop_method !== undefined ? updates.drop_method : currentOrder.drop_method;
+    if (showInbound && effectiveDropMethod === 'Drop-Off') {
+      const effectiveDropOffCnic = updates.drop_off_cnic !== undefined ? updates.drop_off_cnic : currentOrder.drop_off_cnic;
+      if (!effectiveDropOffCnic || (typeof effectiveDropOffCnic === 'string' && !effectiveDropOffCnic.trim())) {
+        updateErrors.push('drop_off_cnic required for Drop-Off');
+      }
+      const effectiveDropOffMobile = updates.drop_off_mobile !== undefined ? updates.drop_off_mobile : currentOrder.drop_off_mobile;
+      if (!effectiveDropOffMobile || (typeof effectiveDropOffMobile === 'string' && !effectiveDropOffMobile.trim())) {
+        updateErrors.push('drop_off_mobile required for Drop-Off');
+      }
+    }
+    if (showInbound) {
+      const effectiveDropDate = updates.drop_date !== undefined ? updates.drop_date : currentOrder.drop_date;
+      if (!effectiveDropDate || (typeof effectiveDropDate === 'string' && !effectiveDropDate.trim())) {
+        updateErrors.push('drop_date required');
+      }
+    }
+
+    if (showOutbound) {
+      const effectiveDeliveryDate = updates.delivery_date !== undefined ? updates.delivery_date : currentOrder.delivery_date;
+      if (!effectiveDeliveryDate || (typeof effectiveDeliveryDate === 'string' && !effectiveDeliveryDate.trim())) {
+        updateErrors.push('delivery_date required');
+      }
+    }
+    const effectiveFullPartial = updates.full_partial !== undefined ? updates.full_partial : currentOrder.full_partial;
+    if (showOutbound && effectiveFullPartial === 'Partial') {
+      const effectiveQtyDelivered = updates.qty_delivered !== undefined ? updates.qty_delivered : currentOrder.qty_delivered;
+      if (!effectiveQtyDelivered || (typeof effectiveQtyDelivered === 'string' && !effectiveQtyDelivered.trim())) {
+        updateErrors.push('qty_delivered required for Partial delivery');
+      }
+    }
+    const effectiveCollectionMethod = updates.collection_method !== undefined ? updates.collection_method : currentOrder.collection_method;
+    if (showOutbound && effectiveCollectionMethod === 'Collected by Client') {
+      const effectiveClientReceiverName = updates.client_receiver_name !== undefined ? updates.client_receiver_name : currentOrder.client_receiver_name;
+      if (!effectiveClientReceiverName || (typeof effectiveClientReceiverName === 'string' && !effectiveClientReceiverName.trim())) {
+        updateErrors.push('client_receiver_name required for Client Collection');
+      }
+      const effectiveClientReceiverId = updates.client_receiver_id !== undefined ? updates.client_receiver_id : currentOrder.client_receiver_id;
+      if (!effectiveClientReceiverId || (typeof effectiveClientReceiverId === 'string' && !effectiveClientReceiverId.trim())) {
+        updateErrors.push('client_receiver_id required for Client Collection');
+      }
+      const effectiveClientReceiverMobile = updates.client_receiver_mobile !== undefined ? updates.client_receiver_mobile : currentOrder.client_receiver_mobile;
+      if (!effectiveClientReceiverMobile || (typeof effectiveClientReceiverMobile === 'string' && !effectiveClientReceiverMobile.trim())) {
+        updateErrors.push('client_receiver_mobile required for Client Collection');
+      }
+    }
+
+    // Format validations (only if provided)
+    for (const [camelField, value] of Object.entries(updatedFields)) {
+      if (value !== undefined) {
+        const actualField = getActualField(camelField);
+        // Skip format check if empty string (allow updating to empty for optionals)
+        const trimmedValue = typeof value === 'string' ? value.trim() : value;
+        if (trimmedValue !== '' && trimmedValue !== null && trimmedValue !== undefined) {
+          if (['eta', 'etd', 'dropDate', 'deliveryDate'].includes(camelField) && !isValidDate(value)) {
+            updateErrors.push(`${actualField} invalid date format (use YYYY-MM-DD)`);
+          } else if (camelField === 'weight' && (isNaN(value) || parseFloat(value) <= 0)) {
+            updateErrors.push(`${actualField} must be a positive number`);
+          } else if (['senderEmail', 'receiverEmail'].includes(camelField) && !emailRegex.test(value)) {
+            updateErrors.push(`${actualField} invalid email format`);
+          } else if (['dropOffMobile', 'clientReceiverMobile'].includes(camelField) && !mobileRegex.test(value.replace(/\D/g, ''))) {
+            updateErrors.push(`${actualField} invalid mobile number (10-15 digits expected)`);
+          }
+          // Add more specific validations as needed (e.g., enums for status, drop_method, etc.)
+        }
+      }
     }
 
     if (updateErrors.length > 0) {
@@ -300,9 +761,7 @@ export async function updateOrder(req, res) {
         error: 'Invalid update fields',
         details: updateErrors.join('; ')
       });
-    }
-
-    // Normalize dates
+    }    // Normalize dates
     const normEta = updates.eta ? normalizeDate(updates.eta) : currentOrder.eta;
     const normEtd = updates.etd ? normalizeDate(updates.etd) : currentOrder.etd;
     const normDropDate = updates.drop_date ? normalizeDate(updates.drop_date) : currentOrder.drop_date;
@@ -386,8 +845,12 @@ export async function updateOrder(req, res) {
 
       // Text fields (excluding dates)
       textUpdateFields.forEach(key => {
+        let val = updates[key];
+        if (numericFields.includes(key) && (val === '' || val === null || val === undefined)) {
+          val = null;
+        }
         setClauseParts.push(`${key} = $${paramIndex}`);
-        values.push(updates[key]);  // Use original, not normalized (dates excluded)
+        values.push(val);  // Use processed value
         paramIndex++;
       });
 
@@ -462,15 +925,13 @@ export async function updateOrder(req, res) {
   }
 }
 
-// Helper function (implement based on your storage, e.g., local disk or S3)
+// Helper function (Multer already saves files; just return relative paths)
 async function uploadFiles(files, type) {
+  console.log('Controller execution', files, type);
   const paths = [];
   for (const file of files) {
-    const filename = `${Date.now()}-${file.originalname}`;
-    const path = `/uploads/${type}/${filename}`; // Adjust path
-    // await fs.writeFileSync(`public${path}`, file.buffer); // For local
-    // Or use AWS S3 upload
-    paths.push(path);
+    const relativePath = `/uploads/${type}/${file.filename}`;
+    paths.push(relativePath);
   }
   return paths;
 }
@@ -700,7 +1161,6 @@ export async function getOrders(req, res) {
     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
   }
 }
-
 export async function getOrderById(req, res) {
   try {
     const { id } = req.params;
@@ -772,24 +1232,45 @@ export async function getOrderById(req, res) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    // Parse attachments and gatepass for easier use (handles empty string)
+    // Parse attachments and gatepass for easier use (handles arrays, strings, null, or empty)
     const row = result.rows[0];
     let parsedAttachments = [];
-    if (row.attachments && typeof row.attachments === 'string' && row.attachments.trim() !== '') {
-      try {
-        parsedAttachments = JSON.parse(row.attachments);
-      } catch (parseErr) {
-        console.warn('Invalid JSON in attachments for order', row.id, ':', parseErr.message);
-        parsedAttachments = [];  // Fallback to empty array
+    const attachmentsValue = row.attachments;
+    if (attachmentsValue) {
+      if (Array.isArray(attachmentsValue)) {
+        parsedAttachments = attachmentsValue;  // Already parsed by pg (JSONB)
+      } else if (typeof attachmentsValue === 'string' && attachmentsValue.trim() !== '') {
+        try {
+          parsedAttachments = JSON.parse(attachmentsValue);
+        } catch (parseErr) {
+          console.warn('Invalid JSON in attachments for order', row.id, ':', parseErr.message);
+          parsedAttachments = [];  // Fallback to empty array
+        }
+      }
+      // If it's an object or other type, log and fallback (edge case)
+      else if (typeof attachmentsValue === 'object') {
+        console.warn('Unexpected object type for attachments in order', row.id);
+        parsedAttachments = [];  // Or convert if needed
       }
     }
+
     let parsedGatepass = [];
-    if (row.gatepass && typeof row.gatepass === 'string' && row.gatepass.trim() !== '') {
-      try {
-        parsedGatepass = JSON.parse(row.gatepass);
-      } catch (parseErr) {
-        console.warn('Invalid JSON in gatepass for order', row.id, ':', parseErr.message);
-        parsedGatepass = [];  // Fallback to empty array
+    const gatepassValue = row.gatepass;
+    if (gatepassValue) {
+      if (Array.isArray(gatepassValue)) {
+        parsedGatepass = gatepassValue;  // Already parsed by pg (JSONB)
+      } else if (typeof gatepassValue === 'string' && gatepassValue.trim() !== '') {
+        try {
+          parsedGatepass = JSON.parse(gatepassValue);
+        } catch (parseErr) {
+          console.warn('Invalid JSON in gatepass for order', row.id, ':', parseErr.message);
+          parsedGatepass = [];  // Fallback to empty array
+        }
+      }
+      // If it's an object or other type, log and fallback (edge case)
+      else if (typeof gatepassValue === 'object') {
+        console.warn('Unexpected object type for gatepass in order', row.id);
+        parsedGatepass = [];  // Or convert if needed
       }
     }
     const orderData = {
@@ -810,197 +1291,6 @@ export async function getOrderById(req, res) {
     res.status(500).json({ error: 'Failed to fetch order', details: err.message });
   }
 }
-
-// Create a new order (added body logging; refined validation call)
-export async function createOrder(req, res) {
-  let client;
-  try {
-    client = await pool.connect();
-    await client.query('BEGIN');
-
-    const {
-      bookingRef,
-      status,
-      rglBookingNumber,
-      consignmentRemarks,
-      placeOfLoading,
-      finalDestination,
-      placeOfDelivery,
-      orderRemarks,
-      associatedContainer,
-      consignmentNumber,
-      consignmentVessel,
-      consignmentVoyage,
-      senderName,
-      senderContact,
-      senderAddress,
-      senderEmail,
-      receiverName,
-      receiverContact,
-      receiverAddress,
-      receiverEmail,
-      eta,
-      etd,
-      shippingLine,
-      driverName,
-      driverContact,
-      driverNic,
-      driverPickupLocation,
-      truckNumber,
-      thirdPartyTransport,
-      // New fields
-      category,
-      subcategory,
-      type,
-      deliveryAddress,
-      pickupLocation,
-      weight,
-      dropMethod,
-      dropOffCnic,
-      dropOffMobile,
-      plateNo,
-      dropDate,
-      collectionMethod,
-      fullPartial,
-      qtyDelivered,
-      clientReceiverName,
-      clientReceiverId,
-      clientReceiverMobile,
-      deliveryDate
-    } = req.body;
-
-    // Debug: Log req.body for missing fields
-    console.log('Order create body (key fields):', { bookingRef, status, eta, etd, shippingLine, placeOfLoading, finalDestination, placeOfDelivery, senderName, receiverName, category, weight, dropDate, deliveryDate });
-
-    // Handle attachments: store file paths as JSON array
-    let attachments = [];
-    if (req.files && req.files.attachments) {
-      attachments = req.files.attachments.map(file => file.path);
-    }
-
-    // Handle gatepass: store file paths as JSON array
-    let gatepass = [];
-    if (req.files && req.files.gatepass) {
-      gatepass = req.files.gatepass.map(file => file.path);
-    }
-
-    // Handle existing if provided (though for create, likely empty)
-    if (req.body.attachments_existing) {
-      try {
-        attachments = JSON.parse(req.body.attachments_existing);
-      } catch (e) {
-        attachments = [];
-      }
-    }
-    if (req.body.gatepass_existing) {
-      try {
-        gatepass = JSON.parse(req.body.gatepass_existing);
-      } catch (e) {
-        gatepass = [];
-      }
-    }
-
-    // Validation (updated function to include new fields)
-    const validationErrors = validateOrderFields({
-      bookingRef, status, eta, etd, placeOfLoading, finalDestination, placeOfDelivery,
-      senderName, receiverName, shippingLine, category, subcategory, type, weight,
-      dropMethod, dropOffCnic, dropOffMobile, dropDate, collectionMethod, fullPartial,
-      qtyDelivered, clientReceiverName, clientReceiverId, clientReceiverMobile, deliveryDate
-    });
-    if (validationErrors.length > 0) {
-      await client.query('ROLLBACK');
-      console.warn('Validation failed for fields:', validationErrors);
-      return res.status(400).json({ 
-        error: 'Order fields missing or invalid',
-        details: validationErrors.join('; ')
-      });
-    }
-
-    // Normalize dates (now safe since validated)
-    const normEta = normalizeDate(eta);
-    const normEtd = normalizeDate(etd);
-    const normDropDate = normalizeDate(dropDate);
-    const normDeliveryDate = normalizeDate(deliveryDate);
-
-    const query = `
-      INSERT INTO orders (
-        booking_ref, status, rgl_booking_number, consignment_remarks,
-        place_of_loading, final_destination, place_of_delivery, order_remarks,
-        associated_container, consignment_number, consignment_vessel, consignment_voyage,
-        sender_name, sender_contact, sender_address, sender_email,
-        receiver_name, receiver_contact, receiver_address, receiver_email,
-        eta, etd, shipping_line,
-        driver_name, driver_contact, driver_nic, driver_pickup_location, truck_number,
-        third_party_transport, category, subcategory, type, delivery_address, pickup_location, weight,
-        drop_method, drop_off_cnic, drop_off_mobile, plate_no, drop_date,
-        collection_method, full_partial, qty_delivered, client_receiver_name, client_receiver_id,
-        client_receiver_mobile, delivery_date, attachments, gatepass, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32,
-                $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49)
-      RETURNING *
-    `;
-
-    const values = [
-      bookingRef, status, rglBookingNumber, consignmentRemarks,
-      placeOfLoading, finalDestination, placeOfDelivery, orderRemarks,
-      associatedContainer, consignmentNumber, consignmentVessel, consignmentVoyage,
-      senderName, senderContact, senderAddress, senderEmail,
-      receiverName, receiverContact, receiverAddress, receiverEmail,
-      normEta, normEtd, shippingLine,
-      driverName, driverContact, driverNic, driverPickupLocation, truckNumber,
-      thirdPartyTransport, category, subcategory, type, deliveryAddress, pickupLocation, weight,
-      dropMethod, dropOffCnic, dropOffMobile, plateNo, normDropDate,
-      collectionMethod, fullPartial, qtyDelivered, clientReceiverName, clientReceiverId,
-      clientReceiverMobile, normDeliveryDate, JSON.stringify(attachments), JSON.stringify(gatepass), 'system'  // Assume system creator
-    ];
-
-    const result = await client.query(query, values);
-    const newOrder = result.rows[0];
-
-    // If associatedContainer is provided, verify it exists and insert new container status history
-    if (associatedContainer) {
-      const containerCheck = await client.query(
-        'SELECT cid FROM container_master WHERE container_number = $1 AND status = 1',
-        [associatedContainer]
-      );
-      if (containerCheck.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Associated container not found' });
-      }
-      const cid = containerCheck.rows[0].cid;
-      const availability = getContainerAvailability(status);
-      await client.query(
-        'INSERT INTO container_status (cid, availability, status_notes, created_by) VALUES ($1, $2, $3, $4)',
-        [cid, availability, `Assigned to order ${newOrder.id} (${status})`, 'system']
-      );
-    }
-
-    await client.query('COMMIT');
-    console.log("Created new order:", { id: newOrder.id });
-    res.status(201).json(newOrder);
-  } catch (error) {
-    if (client) {
-      await client.query('ROLLBACK');
-    }
-    console.error('Error creating order:', error.message);
-    if (error.code === '23505') {
-      return res.status(409).json({ error: 'Booking reference already exists' });
-    }
-    if (error.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value for constrained field (e.g., status)' });
-    }
-    if (error.code === '22007' || error.code === '22008') {
-      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
-    }
-    res.status(500).json({ error: 'Failed to create order', details: error.message });
-  } finally {
-    if (client) {
-      client.release();
-    }
-  }
-}
-
 
 
 export async function getOrderStatuses(req, res) {

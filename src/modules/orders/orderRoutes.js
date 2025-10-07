@@ -18,7 +18,10 @@ const storage = multer.diskStorage({
 // const upload = multer({ storage });
 
 // POST /api/orders - Create a new order (expects multipart/form-data with 'attachments' field)
-router.post('/', upload.array('attachments'), createOrder);
+router.post('/', upload.fields([
+  { name: 'attachments', maxCount: 10 },
+  { name: 'gatepass', maxCount: 10 }
+]),createOrder);
 
 // PUT /api/orders/:id - Update an existing order
 router.put('/:id', upload.fields([

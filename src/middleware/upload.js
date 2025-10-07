@@ -11,14 +11,19 @@ if (!fs.existsSync(uploadDir)) {
 
 // Configure storage
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    console.log("Multer destination:", uploadDir);
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const filename = `${req.params.zoho_id}-${file.originalname}`;
-    console.log("Multer saving file:", { filename, mimetype: file.mimetype });
-    cb(null, filename);
+ destination: (req, file, cb) => {
+  const type = file.fieldname; // e.g., 'attachments'
+  const dir = path.join(uploadDir, type);
+  fs.mkdirSync(dir, { recursive: true });
+  cb(null, dir);
+},
+ filename: (req, file, cb) => {
+  const timestamp = Date.now();
+  const ext = path.extname(file.originalname);
+  const baseName = path.basename(file.originalname, ext);
+  const filename = `${timestamp}-${baseName}${ext}`;
+  cb(null, filename);
+
   },
 });
 

@@ -35,7 +35,8 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/vendors", vendorRoutes);
 app.use("/api/containers", containerRoutes);
 app.use("/api/orders", orderRoutes);
-
+// Serve uploads folder statically on /uploads
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
