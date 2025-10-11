@@ -1,5 +1,5 @@
 import express from "express";
-import { createOrder, updateOrder, getOrders, getOrderById}  from './order.controller.js'
+import { createOrder, updateOrder, getOrders, getOrderById,getOrderByTrackingId, getOrderByItemRef}  from './order.controller.js'
 // import express from "express";
 import multer from "multer"
 import upload from "../../middleware/upload.js";
@@ -31,7 +31,8 @@ router.put('/:id', upload.fields([
 
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);
-
+router.get('/track/:trackingId', getOrderByTrackingId);
+router.get('/track/item/:itemRef', getOrderByItemRef);
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
 
