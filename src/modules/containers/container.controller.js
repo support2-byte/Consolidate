@@ -851,6 +851,7 @@ export async function getAllContainers(req, res) {
     const baseFromFinal = baseFrom + ` WHERE ${whereClause}`;
 
     const orderBy = ' ORDER BY cm.container_number ';
+    const outerOrderBy = ' ORDER BY sub.container_number ';  // Use sub alias for outer query
 
     let query, countQuery;
     let countValues = [...values];
@@ -860,7 +861,7 @@ export async function getAllContainers(req, res) {
       const statusIndex = values.length + 1;
       const limitIndex = statusIndex + 1;
       const offsetIndex = limitIndex + 1;
-      query = `SELECT * FROM (${innerQuery}) AS sub WHERE derived_status = $${statusIndex} ${orderBy} LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
+      query = `SELECT * FROM (${innerQuery}) AS sub WHERE derived_status = $${statusIndex} ${outerOrderBy} LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
       values.push(status, parseInt(limit), offset);
 
       const innerCountQuery = `${selectClause} ${baseFromFinal}`;
@@ -875,6 +876,9 @@ export async function getAllContainers(req, res) {
 
       countQuery = `SELECT COUNT(*) as total ${baseFrom} WHERE ${whereClause}`;
     }
+
+    console.log("Generated Query:", query);  // Add logging for debugging
+    console.log("Generated Count Query:", countQuery);
 
     const rowsResult = await pool.query(query, values);
     const countResult = await pool.query(countQuery, countValues);

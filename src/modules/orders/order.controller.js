@@ -16,7 +16,7 @@ function validateOrderFields({
   if (!placeOfDelivery) errors.push('place_of_delivery required');
   if (!senderName) errors.push('sender_name required');
   if (!receiverName) errors.push('receiver_name required');
-  if (!shippingLine) errors.push('shipping_line required');
+  // if (!shippingLine) errors.push('shipping_line required');
 
   // Required dates: Check if missing or invalid
   if (eta === undefined || eta === null || eta === '') {
@@ -55,29 +55,61 @@ export function getContainerAvailability(orderStatus) {
   }
 }
 
-function normalizeDate(dateStr) {
-  if (!dateStr || dateStr === '') return null;
+// function normalizeDate(dateStr) {
+//   if (!dateStr || dateStr === '') return null;
 
-  // Try strict YYYY-MM-DD first
-  let parsed = new Date(dateStr);
-  if (isNaN(parsed.getTime())) {
-    // Fallback: Try parsing as MM/DD/YYYY (common US format)
-    const parts = dateStr.split('/');
-    if (parts.length === 3 && parts[0].length <= 2 && parts[1].length <= 2) {
-      // Assume MM/DD/YYYY
-      parsed = new Date(`${parts[2]}-${String(parseInt(parts[0])).padStart(2, '0')}-${String(parseInt(parts[1])).padStart(2, '0')}`);
-    }
-  }
+//   // Try strict YYYY-MM-DD first
+//   let parsed = new Date(dateStr);
+//   if (isNaN(parsed.getTime())) {
+//     // Fallback: Try parsing as MM/DD/YYYY (common US format)
+//     const parts = dateStr.split('/');
+//     if (parts.length === 3 && parts[0].length <= 2 && parts[1].length <= 2) {
+//       // Assume MM/DD/YYYY
+//       parsed = new Date(`${parts[2]}-${String(parseInt(parts[0])).padStart(2, '0')}-${String(parseInt(parts[1])).padStart(2, '0')}`);
+//     }
+//   }
 
-  if (isNaN(parsed.getTime())) return null;
+//   if (isNaN(parsed.getTime())) return null;
 
-  return parsed.toISOString().split('T')[0]; // Always normalize to YYYY-MM-DD
-}
+//   return parsed.toISOString().split('T')[0]; // Always normalize to YYYY-MM-DD
+// }
 
 // Also update isValidDate if it exists, to match:
-function isValidDate(dateStr) {
-  return normalizeDate(dateStr) !== null;
+// function isValidDate(dateStr) {
+//   return normalizeDate(dateStr) !== null;
+// }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Helper function (assume defined elsewhere)
+function normalizeDate(dateStr) {
+  if (!dateStr) return null;
+  const date = new Date(dateStr);
+  return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
 }
+
+function isValidDate(dateStr) {
+  return !isNaN(Date.parse(dateStr));
+}
+
+// Assume uploadFiles is defined
+async function uploadFiles(files, type) {
+  // Implementation for uploading files
+  return files.map(f => `/uploads/${type}/${Date.now()}-${f.originalname}`);
+}
+
 export async function createOrder(req, res) {
   let client;
   try {
@@ -88,44 +120,99 @@ export async function createOrder(req, res) {
     const files = req.files || {}; // Assuming multer .fields() or .any()
     const created_by = 'system';
 
-    // Debug log (updated with new fields)
-    console.log('Order create body (key fields):', { 
-      bookingRef: updates.bookingRef, 
-      status: updates.status, 
-      rglBookingNumber: updates.rglBookingNumber,
-      pointOfOrigin: updates.pointOfOrigin,
-      placeOfLoading: updates.placeOfLoading,
-      placeOfDelivery: updates.placeOfDelivery,
-      finalDestination: updates.finalDestination,
-      orderRemarks: updates.orderRemarks,
-      senderType: updates.senderType,  
-      selectedSenderOwner: updates.selectedSenderOwner,  
-      transportType: updates.transportType,
-      dropMethod: updates.dropMethod,
-      collectionMethod: updates.collectionMethod,
+    // Map incoming snake_case to camelCase for consistency
+    const camelUpdates = {
+      bookingRef: updates.booking_ref,
+      status: updates.status,
+      rglBookingNumber: updates.rgl_booking_number,
+      placeOfLoading: updates.place_of_loading,
+      pointOfOrigin: updates.point_of_origin,
+      finalDestination: updates.final_destination,
+      placeOfDelivery: updates.place_of_delivery,
+      orderRemarks: updates.order_remarks,
+      eta: updates.eta,
+      etd: updates.etd,
+      // Sender fields
+      senderName: updates.sender_name,
+      senderContact: updates.sender_contact,
+      senderAddress: updates.sender_address,
+      senderEmail: updates.sender_email,
+      senderRef: updates.sender_ref,
+      senderRemarks: updates.sender_remarks,
+      // Receiver fields (for when sender_type='receiver')
+      receiverName: updates.receiver_name,
+      receiverContact: updates.receiver_contact,
+      receiverAddress: updates.receiver_address,
+      receiverEmail: updates.receiver_email,
+      receiverRef: updates.receiver_ref,
+      receiverRemarks: updates.receiver_remarks,
+      senderType: updates.sender_type,
+      selectedSenderOwner: updates.selected_sender_owner || '',
+      transportType: updates.transport_type,
+      thirdPartyTransport: updates.third_party_transport,
+      driverName: updates.driver_name,
+      driverContact: updates.driver_contact,
+      driverNic: updates.driver_nic,
+      driverPickupLocation: updates.driver_pickup_location,
+      truckNumber: updates.truck_number,
+      dropMethod: updates.drop_method,
+      dropoffName: updates.dropoff_name,
+      dropOffCnic: updates.drop_off_cnic,
+      dropOffMobile: updates.drop_off_mobile,
+      plateNo: updates.plate_no,
+      dropDate: updates.drop_date,
+      collectionMethod: updates.collection_method,
       collectionScope: updates.collection_scope,
-      qtyDelivered: updates.qtyDelivered,
-      receivers_sample: updates.receivers ? JSON.parse(updates.receivers).slice(0,1) : null,  
-      senders_sample: updates.senders ? JSON.parse(updates.senders).slice(0,1) : null  
+      qtyDelivered: updates.qty_delivered,
+      clientReceiverName: updates.client_receiver_name,
+      clientReceiverId: updates.client_receiver_id,
+      clientReceiverMobile: updates.client_receiver_mobile,
+      deliveryDate: updates.delivery_date,
+      // JSON fields remain as-is
+      receivers: updates.receivers,
+      senders: updates.senders,
+      order_items: updates.order_items,
+      attachments_existing: updates.attachments_existing,
+      gatepass_existing: updates.gatepass_existing,
+    };
+
+    // Debug log (using mapped camelCase)
+    console.log('Order create body (key fields):', updates, { 
+      bookingRef: camelUpdates.bookingRef, 
+      status: camelUpdates.status, 
+      rglBookingNumber: camelUpdates.rglBookingNumber,
+      pointOfOrigin: camelUpdates.pointOfOrigin,
+      placeOfLoading: camelUpdates.placeOfLoading,
+      placeOfDelivery: camelUpdates.placeOfDelivery,
+      finalDestination: camelUpdates.finalDestination,
+      orderRemarks: camelUpdates.orderRemarks,
+      senderType: camelUpdates.senderType,  
+      selectedSenderOwner: camelUpdates.selectedSenderOwner,  
+      transportType: camelUpdates.transportType,
+      dropMethod: camelUpdates.dropMethod,
+      collectionMethod: camelUpdates.collectionMethod,
+      collectionScope: camelUpdates.collectionScope,
+      qtyDelivered: camelUpdates.qtyDelivered,
+      receivers_sample: camelUpdates.receivers ? JSON.parse(camelUpdates.receivers).slice(0,1) : null,  
+      senders_sample: camelUpdates.senders ? JSON.parse(camelUpdates.senders).slice(0,1) : null,
+      order_items_sample: camelUpdates.order_items ? JSON.parse(camelUpdates.order_items).slice(0,1) : null
     });
     console.log('Files received:', Object.keys(files));
-
-    const senderType = updates.senderType || 'sender';
-
-    // Parse shipping parties based on sender_type (updated to handle nested shipping details from UI)
+    const senderType = camelUpdates.senderType || 'sender';
+    // Parse shipping parties based on sender_type
     let parsedShippingParties = [];
     if (senderType === 'sender') {
-      if (updates.receivers) {
+      if (camelUpdates.receivers) {
         try {
-          parsedShippingParties = JSON.parse(updates.receivers);
+          parsedShippingParties = JSON.parse(camelUpdates.receivers);
         } catch (e) {
           console.warn('Failed to parse receivers:', e.message);
         }
       }
     } else {
-      if (updates.senders) {
+      if (camelUpdates.senders) {
         try {
-          parsedShippingParties = JSON.parse(updates.senders);
+          parsedShippingParties = JSON.parse(camelUpdates.senders);
         } catch (e) {
           console.warn('Failed to parse senders:', e.message);
         }
@@ -135,96 +222,90 @@ export async function createOrder(req, res) {
       throw new Error(`Shipping parties (${senderType === 'sender' ? 'receivers' : 'senders'}) is required`);
     }
 
-    // Extract shipping items from nested structure in parties (no separate order_items/sender_items from UI)
-    const parsedShippingItems = parsedShippingParties.map((party, i) => ({
-      item_ref: party.itemRef || `ORDER-ITEM-REF-${i + 1}-${Date.now()}`,
-      pickup_location: party.shippingDetail?.pickupLocation || '',
-      delivery_address: party.shippingDetail?.deliveryAddress || '',
-      category: party.shippingDetail?.category || '',
-      subcategory: party.shippingDetail?.subcategory || '',
-      type: party.shippingDetail?.type || '',
-      total_number: party.shippingDetail?.totalNumber ? parseInt(party.shippingDetail.totalNumber) : null,
-      weight: party.shippingDetail?.weight ? parseFloat(party.shippingDetail.weight) : null,
-      shipping_line: party.shippingLine || ''
-    }));
+    // Parse flat order_items and group by party index extracted from item_ref
+    let parsedShippingItems = [];
+    try {
+      const flatOrderItems = JSON.parse(camelUpdates.order_items || '[]');
+      const itemsByParty = flatOrderItems.reduce((acc, item) => {
+        if (item.item_ref) {
+          const parts = item.item_ref.split('-');
+          if (parts.length >= 6) {
+            const partyIdx = parseInt(parts[3]) - 1;
+            if (!isNaN(partyIdx) && partyIdx >= 0) {
+              if (!acc[partyIdx]) acc[partyIdx] = [];
+              acc[partyIdx].push(item);
+            }
+          }
+        }
+        return acc;
+      }, {});
+      // Initialize for all parties
+      for (let i = 0; i < parsedShippingParties.length; i++) {
+        parsedShippingItems[i] = itemsByParty[i] || [];
+      }
+    } catch (e) {
+      console.warn('Failed to parse order_items:', e.message);
+      parsedShippingItems = parsedShippingParties.map(() => []);
+    }
 
-    if (parsedShippingItems.length !== parsedShippingParties.length) {
-      throw new Error('Mismatch between shipping parties and extracted shipping items');
+    // Ensure each party has at least one shipping detail
+    const hasValidShipping = parsedShippingParties.every((_, i) => parsedShippingItems[i].length > 0);
+    if (!hasValidShipping) {
+      throw new Error('Each shipping party must have at least one shipping detail');
     }
 
     if (parsedShippingParties.length > 1) {
-      console.log(`Multiple shipping parties detected (${parsedShippingParties.length}); inserting all`);
+      console.log(`Multiple shipping parties detected (${parsedShippingParties.length}); inserting all with nested shipping details`);
     }
 
-    // Map to receiver format if sender_type=receiver (swap roles, handle nested)
+    // Map to receiver format if sender_type=receiver (swap roles)
     let parsedReceivers = parsedShippingParties;
     if (senderType === 'receiver') {
       parsedReceivers = parsedShippingParties.map(party => ({
-        receiver_name: party.senderName || '',
-        receiver_contact: party.senderContact || '',
-        receiver_address: party.senderAddress || '',
-        receiver_email: party.senderEmail || '',
-        receiver_ref: party.senderRef || '',
-        remarks: party.remarks || '',
-        containers: party.containers ? (Array.isArray(party.containers) ? party.containers : [party.containers]) : [],
+        receiver_name: party.sender_name || party.senderName || '',
+        receiver_contact: party.sender_contact || party.senderContact || '',
+        receiver_address: party.sender_address || party.senderAddress || '',
+        receiver_email: party.sender_email || party.senderEmail || '',
         status: party.status || 'Created',
-        consignment_vessel: party.consignmentVessel || '',
-        consignment_marks: party.consignmentMarks || '',
-        consignment_number: party.consignmentNumber || '',
-        consignment_voyage: party.consignmentVoyage || '',
-        total_number: party.totalNumber ? parseInt(party.totalNumber) : null,
-        total_weight: party.totalWeight ? parseFloat(party.totalWeight) : null,
-        item_ref: party.itemRef || '',
         eta: party.eta,
         etd: party.etd,
-        shipping_line: party.shippingLine
+        remarks: party.remarks || '',
+        full_partial: party.full_partial || party.fullPartial || 'Full',
+        qty_delivered: party.qty_delivered || party.qtyDelivered || 0,
       }));
     } else {
       parsedReceivers = parsedShippingParties.map(party => ({
-        receiver_name: party.receiverName || '',
-        receiver_contact: party.receiverContact || '',
-        receiver_address: party.receiverAddress || '',
-        receiver_email: party.receiverEmail || '',
-        receiver_ref: party.receiverRef || '',
-        remarks: party.remarks || '',
-        containers: party.containers ? (Array.isArray(party.containers) ? party.containers : [party.containers]) : [],
+        receiver_name: party.receiver_name || party.receiverName || '',
+        receiver_contact: party.receiver_contact || party.receiverContact || '',
+        receiver_address: party.receiver_address || party.receiverAddress || '',
+        receiver_email: party.receiver_email || party.receiverEmail || '',
         status: party.status || 'Created',
-        consignment_vessel: party.consignmentVessel || '',
-        consignment_marks: party.consignmentMarks || '',
-        consignment_number: party.consignmentNumber || '',
-        consignment_voyage: party.consignmentVoyage || '',
-        total_number: party.totalNumber ? parseInt(party.totalNumber) : null,
-        total_weight: party.totalWeight ? parseFloat(party.totalWeight) : null,
-        item_ref: party.itemRef || '',
         eta: party.eta,
         etd: party.etd,
-        shipping_line: party.shippingLine
+        remarks: party.remarks || '',
+        full_partial: party.full_partial || party.fullPartial || 'Full',
+        qty_delivered: party.qty_delivered || party.qtyDelivered || 0,
       }));
     }
 
-    // Normalize containers for each receiver
-    parsedReceivers = parsedReceivers.map(rec => ({
-      ...rec,
-      containers: rec.containers ? (Array.isArray(rec.containers) ? rec.containers : [rec.containers]) : [],
-      remarks: rec.remarks || ''
-    }));
-
-    // Normalize per-receiver totals
+    // Aggregate totals from shipping items per receiver
     parsedReceivers = parsedReceivers.map((rec, i) => {
-      const item = parsedShippingItems[i] || {};
+      const shippingDetails = parsedShippingItems[i] || [];
+      const totalNum = shippingDetails.reduce((sum, item) => sum + (parseInt(item.total_number || 0) || 0), 0);
+      const totalWt = shippingDetails.reduce((sum, item) => sum + (parseFloat(item.weight || 0) || 0), 0);
       return {
         ...rec,
-        total_weight: rec.total_weight || item.weight ? parseFloat(rec.total_weight || item.weight) : null,
-        total_number: rec.total_number || item.total_number ? parseInt(rec.total_number || item.total_number) : null
+        total_number: totalNum > 0 ? totalNum : null,
+        total_weight: totalWt > 0 ? totalWt : null,
       };
     });
 
     // Handle attachments
     let newAttachments = [];
     let existingAttachmentsFromForm = [];
-    if (updates.attachments_existing) {
+    if (camelUpdates.attachments_existing) {
       try {
-        existingAttachmentsFromForm = JSON.parse(updates.attachments_existing);
+        existingAttachmentsFromForm = JSON.parse(camelUpdates.attachments_existing);
       } catch (e) {
         console.warn('Failed to parse attachments_existing:', e.message);
       }
@@ -239,9 +320,9 @@ export async function createOrder(req, res) {
     // Handle gatepass
     let newGatepass = [];
     let existingGatepassFromForm = [];
-    if (updates.gatepass_existing) {
+    if (camelUpdates.gatepass_existing) {
       try {
-        existingGatepassFromForm = JSON.parse(updates.gatepass_existing);
+        existingGatepassFromForm = JSON.parse(camelUpdates.gatepass_existing);
       } catch (e) {
         console.warn('Failed to parse gatepass_existing:', e.message);
       }
@@ -256,59 +337,59 @@ export async function createOrder(req, res) {
     // Map owner fields based on sender_type
     let ownerName, ownerContact, ownerAddress, ownerEmail, ownerRef, ownerRemarks;
     if (senderType === 'sender') {
-      ownerName = updates.senderName || '';
-      ownerContact = updates.senderContact || '';
-      ownerAddress = updates.senderAddress || '';
-      ownerEmail = updates.senderEmail || '';
-      ownerRef = updates.senderRef || '';
-      ownerRemarks = updates.senderRemarks || '';
+      ownerName = camelUpdates.senderName || '';
+      ownerContact = camelUpdates.senderContact || '';
+      ownerAddress = camelUpdates.senderAddress || '';
+      ownerEmail = camelUpdates.senderEmail || '';
+      ownerRef = camelUpdates.senderRef || '';
+      ownerRemarks = camelUpdates.senderRemarks || '';
     } else {
-      ownerName = updates.receiverName || '';
-      ownerContact = updates.receiverContact || '';
-      ownerAddress = updates.receiverAddress || '';
-      ownerEmail = updates.receiverEmail || '';
-      ownerRef = updates.receiverRef || '';
-      ownerRemarks = updates.receiverRemarks || '';
+      ownerName = camelUpdates.receiverName || '';
+      ownerContact = camelUpdates.receiverContact || '';
+      ownerAddress = camelUpdates.receiverAddress || '';
+      ownerEmail = camelUpdates.receiverEmail || '';
+      ownerRef = camelUpdates.receiverRef || '';
+      ownerRemarks = camelUpdates.receiverRemarks || '';
     }
 
-    // Updated fields matching UI (camelCase)
+    // Updated fields matching UI (now using camelUpdates)
     const updatedFields = {
-      bookingRef: updates.bookingRef,
-      status: updates.status || 'Created',
-      rglBookingNumber: updates.rglBookingNumber,
-      placeOfLoading: updates.placeOfLoading,
-      pointOfOrigin: updates.pointOfOrigin,
-      finalDestination: updates.finalDestination,
-      placeOfDelivery: updates.placeOfDelivery,
-      orderRemarks: updates.orderRemarks,
+      bookingRef: camelUpdates.bookingRef,
+      status: camelUpdates.status || 'Created',
+      rglBookingNumber: camelUpdates.rglBookingNumber,
+      placeOfLoading: camelUpdates.placeOfLoading,
+      pointOfOrigin: camelUpdates.pointOfOrigin,
+      finalDestination: camelUpdates.finalDestination,
+      placeOfDelivery: camelUpdates.placeOfDelivery,
+      orderRemarks: camelUpdates.orderRemarks,
       senderName: ownerName,
       senderContact: ownerContact,
       senderAddress: ownerAddress,
       senderEmail: ownerEmail,
       senderRef: ownerRef,
       senderRemarks: ownerRemarks,
-      senderType: updates.senderType || 'sender',
-      selectedSenderOwner: updates.selectedSenderOwner,
-      transportType: updates.transportType || 'Road',
-      thirdPartyTransport: updates.thirdPartyTransport,
-      driverName: updates.driverName,
-      driverContact: updates.driverContact,
-      driverNic: updates.driverNic,
-      driverPickupLocation: updates.driverPickupLocation,
-      truckNumber: updates.truckNumber,
-      dropMethod: updates.dropMethod,
-      dropoffName: updates.dropoffName,
-      dropOffCnic: updates.dropOffCnic,
-      dropOffMobile: updates.dropOffMobile,
-      plateNo: updates.plateNo,
-      dropDate: updates.dropDate,
-      collectionMethod: updates.collectionMethod,
-      collectionScope: updates.collection_scope,
-      qtyDelivered: updates.qtyDelivered,
-      clientReceiverName: updates.clientReceiverName,
-      clientReceiverId: updates.clientReceiverId,
-      clientReceiverMobile: updates.clientReceiverMobile,
-      deliveryDate: updates.deliveryDate,
+      senderType: camelUpdates.senderType || 'sender',
+      selectedSenderOwner: camelUpdates.selectedSenderOwner,
+      transportType: camelUpdates.transportType,
+      thirdPartyTransport: camelUpdates.thirdPartyTransport,
+      driverName: camelUpdates.driverName,
+      driverContact: camelUpdates.driverContact,
+      driverNic: camelUpdates.driverNic,
+      driverPickupLocation: camelUpdates.driverPickupLocation,
+      truckNumber: camelUpdates.truckNumber,
+      dropMethod: camelUpdates.dropMethod,
+      dropoffName: camelUpdates.dropoffName,
+      dropOffCnic: camelUpdates.dropOffCnic,
+      dropOffMobile: camelUpdates.dropOffMobile,
+      plateNo: camelUpdates.plateNo,
+      dropDate: camelUpdates.dropDate,
+      collectionMethod: camelUpdates.collectionMethod,
+      collectionScope: camelUpdates.collectionScope,
+      qtyDelivered: camelUpdates.qtyDelivered,
+      clientReceiverName: camelUpdates.clientReceiverName,
+      clientReceiverId: camelUpdates.clientReceiverId,
+      clientReceiverMobile: camelUpdates.clientReceiverMobile,
+      deliveryDate: camelUpdates.deliveryDate,
     };
 
     const updateErrors = [];
@@ -316,7 +397,7 @@ export async function createOrder(req, res) {
     const mobileRegex = /^\d{10,15}$/;
 
     const requiredFields = [
-      'bookingRef', 'rglBookingNumber', 'senderName', 'pointOfOrigin', 'placeOfLoading', 'placeOfDelivery', 'finalDestination', 'selectedSenderOwner',
+      'bookingRef', 'rglBookingNumber', 'senderName', 'pointOfOrigin', 'placeOfLoading', 'placeOfDelivery', 'finalDestination', 'selectedSenderOwner', 'transportType'
     ];
 
     requiredFields.forEach(camelField => {
@@ -330,6 +411,9 @@ export async function createOrder(req, res) {
     if (updatedFields.senderType !== 'sender' && updatedFields.senderType !== 'receiver') {
       updateErrors.push('sender_type must be "sender" or "receiver"');
     }
+
+    // Owner validation
+    if (!ownerName?.trim()) updateErrors.push('owner_name is required');
 
     // Transport validation (updated based on UI fields)
     if (updatedFields.transportType) {
@@ -367,24 +451,33 @@ export async function createOrder(req, res) {
       updateErrors.push('At least one shipping party is required');
     } else {
       parsedReceivers.forEach((rec, index) => {
-        const item = parsedShippingItems[index] || {};
+        const shippingDetails = parsedShippingItems[index] || [];
         if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for shipping party ${index + 1}`);
-        if (rec.containers.length === 0) updateErrors.push(`At least one container required for shipping party ${index + 1}`);
-        if (!rec.consignment_number?.trim()) updateErrors.push(`consignment_number required for shipping party ${index + 1}`);
-        if (!rec.receiver_ref?.trim()) updateErrors.push(`receiver_ref required for shipping party ${index + 1}`);
-        if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for shipping party ${index + 1}`);
         if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) updateErrors.push(`Invalid shipping party ${index + 1} email format`);
         if (rec.receiver_contact && !mobileRegex.test(rec.receiver_contact.replace(/[\s-]/g, ''))) updateErrors.push(`Invalid shipping party ${index + 1} contact format`);
         if (!rec.eta) updateErrors.push(`eta required for shipping party ${index + 1}`);
         if (!rec.etd) updateErrors.push(`etd required for shipping party ${index + 1}`);
-        if (!rec.shipping_line?.trim()) updateErrors.push(`shipping_line required for shipping party ${index + 1}`);
-        if (!item.pickup_location?.trim()) updateErrors.push(`pickup_location required for shipping party ${index + 1}`);
-        if (!item.category?.trim()) updateErrors.push(`category required for shipping party ${index + 1}`);
-        if (!item.subcategory?.trim()) updateErrors.push(`subcategory required for shipping party ${index + 1}`);
-        if (!item.type?.trim()) updateErrors.push(`type required for shipping party ${index + 1}`);
-        if (!item.delivery_address?.trim()) updateErrors.push(`delivery_address required for shipping party ${index + 1}`);
-        if (!item.total_number || parseInt(item.total_number) <= 0) updateErrors.push(`total_number must be positive for shipping party ${index + 1}`);
-        if (!item.weight || parseFloat(item.weight) <= 0) updateErrors.push(`weight must be positive for shipping party ${index + 1}`);
+
+        // Validate each shipping detail
+        shippingDetails.forEach((item, j) => {
+          if (!item.pickup_location?.trim()) updateErrors.push(`pickup_location required for shipping detail ${j + 1} of party ${index + 1}`);
+          if (!item.category?.trim()) updateErrors.push(`category required for shipping detail ${j + 1} of party ${index + 1}`);
+          if (!item.subcategory?.trim()) updateErrors.push(`subcategory required for shipping detail ${j + 1} of party ${index + 1}`);
+          if (!item.type?.trim()) updateErrors.push(`type required for shipping detail ${j + 1} of party ${index + 1}`);
+          if (!item.delivery_address?.trim()) updateErrors.push(`delivery_address required for shipping detail ${j + 1} of party ${index + 1}`);
+          const num = parseInt(item.total_number || 0);
+          if (!item.total_number || num <= 0) updateErrors.push(`total_number must be positive for shipping detail ${j + 1} of party ${index + 1}`);
+          const wt = parseFloat(item.weight || 0);
+          if (!item.weight || wt <= 0) updateErrors.push(`weight must be positive for shipping detail ${j + 1} of party ${index + 1}`);
+        });
+
+        // Per-party partial validation
+        if (rec.full_partial === 'Partial') {
+          const del = parseInt(rec.qty_delivered || 0);
+          const recTotal = parseInt(rec.total_number || 0);
+          if (del <= 0) updateErrors.push(`qty_delivered must be positive for partial party ${index + 1}`);
+          if (del > recTotal) updateErrors.push(`qty_delivered cannot exceed total_number for party ${index + 1}`);
+        }
       });
     }
 
@@ -439,8 +532,8 @@ export async function createOrder(req, res) {
 
     const sendersQuery = `
       INSERT INTO senders (
-        order_id, sender_name, sender_contact, sender_address, sender_email, sender_ref, sender_remarks,
-        sender_type, selected_sender_owner
+        order_id, sender_name, sender_contact, sender_address, sender_email, sender_ref,
+        sender_remarks, sender_type, selected_sender_owner
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id, sender_name
     `;
@@ -452,7 +545,7 @@ export async function createOrder(req, res) {
     const trackingData = [];
     for (let i = 0; i < parsedReceivers.length; i++) {
       const rec = parsedReceivers[i];
-      const item = parsedShippingItems[i];
+      const shippingDetails = parsedShippingItems[i];
       const recNormEta = rec.eta ? normalizeDate(rec.eta) : null;
       const recNormEtd = rec.etd ? normalizeDate(rec.etd) : null;
 
@@ -460,13 +553,12 @@ export async function createOrder(req, res) {
         INSERT INTO receivers (
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email, eta, etd, shipping_line,
           consignment_vessel, consignment_number, consignment_marks, consignment_voyage,
-          total_number, total_weight, item_ref, receiver_ref, remarks, containers,
-          status
+          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-        RETURNING id, receiver_name, consignment_number
+        RETURNING id, receiver_name
       `;
 
-      const recContainersJson = JSON.stringify(rec.containers);
+      const recContainersJson = JSON.stringify([]);
       const receiversValues = [
         orderId,
         rec.receiver_name || '',
@@ -475,64 +567,54 @@ export async function createOrder(req, res) {
         rec.receiver_email || '',
         recNormEta,
         recNormEtd,
-        rec.shipping_line || '',
-        rec.consignment_vessel || '',
-        rec.consignment_number || '',
-        rec.consignment_marks || '',
-        rec.consignment_voyage || '',
+        '', // shipping_line
+        '', // consignment_vessel
+        '', // consignment_number
+        '', // consignment_marks
+        '', // consignment_voyage
         rec.total_number,
         rec.total_weight,
-        rec.item_ref || '',
-        rec.receiver_ref || '',
         rec.remarks || '',
         recContainersJson,
-        rec.status || 'Created'
+        rec.status || 'Created',
+        rec.full_partial || 'Full',
+        rec.qty_delivered ? parseInt(rec.qty_delivered) : null
       ];
 
       const recResult = await client.query(receiversQuery, receiversValues);
       const receiverId = recResult.rows[0].id;
       receiverIds.push(receiverId);
 
-      const orderItemsQuery = `
-        INSERT INTO order_items (
-          order_id, receiver_id, item_ref, pickup_location, delivery_address, category, subcategory, type,
-          total_number, weight
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      `;
-      const orderItemsValues = [
-        orderId,
-        receiverId,
-        item.item_ref,
-        item.pickup_location,
-        item.delivery_address,
-        item.category,
-        item.subcategory,
-        item.type,
-        item.total_number,
-        item.weight
-      ];
-      await client.query(orderItemsQuery, orderItemsValues);
+      // Insert multiple order_items per receiver
+      for (let j = 0; j < shippingDetails.length; j++) {
+        const item = shippingDetails[j];
+        const orderItemsQuery = `
+          INSERT INTO order_items (
+            order_id, receiver_id, item_ref, pickup_location, delivery_address, category, subcategory, type,
+            total_number, weight
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `;
+        const orderItemsValues = [
+          orderId,
+          receiverId,
+          item.item_ref || '',
+          item.pickup_location || '',
+          item.delivery_address || '',
+          item.category || '',
+          item.subcategory || '',
+          item.type || '',
+          parseInt(item.total_number || 0),
+          parseFloat(item.weight || 0)
+        ];
+        await client.query(orderItemsQuery, orderItemsValues);
+      }
 
       let containerId = null;
-      if (rec.containers && rec.containers.length > 0) {
-        try {
-          const contQuery = await client.query(
-            'SELECT cid FROM container_master WHERE container_number = $1',
-            [rec.containers[0]]
-          );
-          if (contQuery.rowCount > 0) {
-            containerId = contQuery.rows[0].cid;
-          }
-        } catch (contErr) {
-          console.warn(`Container issue for receiver ${i + 1}:`, contErr.message);
-        }
-      }
+      // Skip container lookup since not in UI
       trackingData.push({
         receiverId,
-        receiverRef: rec.receiver_ref || '',
-        consignmentNumber: rec.consignment_number || '',
-        containerId,
-        status: rec.status || updatedFields.status
+        status: rec.status || updatedFields.status,
+        totalShippingDetails: shippingDetails.length
       });
     }
 
@@ -584,8 +666,7 @@ export async function createOrder(req, res) {
     }
   }
 }
-// Now includes status sync for receivers via DB trigger; status added to receivers INSERT
-export async function   updateOrder(req, res) {
+export async function updateOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
@@ -670,16 +751,57 @@ export async function   updateOrder(req, res) {
     }
     const gatepassJson = JSON.stringify(newGatepass);
 
-    // Parse receivers JSON for update (to handle multiple)
-    let parsedReceivers = [];
-    if (updates.receivers) {
-      try {
-        parsedReceivers = JSON.parse(updates.receivers);
-      } catch (e) {
-        console.warn('Failed to parse receivers:', e.message);
+    // Parse shipping parties JSON for update (conditional on senderType)
+    let parsedShippingParties = [];
+    const senderType = updates.sender_type || currentSender.sender_type || 'sender';
+    if (senderType === 'sender') {
+      if (updates.receivers) {
+        try {
+          parsedShippingParties = JSON.parse(updates.receivers);
+        } catch (e) {
+          console.warn('Failed to parse receivers:', e.message);
+        }
+      }
+    } else {
+      if (updates.senders) {
+        try {
+          parsedShippingParties = JSON.parse(updates.senders);
+        } catch (e) {
+          console.warn('Failed to parse senders:', e.message);
+        }
       }
     }
-    const isReplacingReceivers = parsedReceivers.length > 0;
+    const isReplacingShippingParties = parsedShippingParties.length > 0;
+
+    // Map to parsedReceivers with swap if needed
+    let parsedReceivers = parsedShippingParties;
+    if (senderType === 'receiver') {
+      parsedReceivers = parsedShippingParties.map(party => ({
+        receiver_name: party.sender_name || party.senderName || '',
+        receiver_contact: party.sender_contact || party.senderContact || '',
+        receiver_address: party.sender_address || party.senderAddress || '',
+        receiver_email: party.sender_email || party.senderEmail || '',
+        status: party.status || 'Created',
+        eta: party.eta,
+        etd: party.etd,
+        remarks: party.remarks || '',
+        full_partial: party.full_partial || party.fullPartial || 'Full',
+        qty_delivered: party.qty_delivered || party.qtyDelivered || 0,
+      }));
+    } else {
+      parsedReceivers = parsedShippingParties.map(party => ({
+        receiver_name: party.receiver_name || party.receiverName || '',
+        receiver_contact: party.receiver_contact || party.receiverContact || '',
+        receiver_address: party.receiver_address || party.receiverAddress || '',
+        receiver_email: party.receiver_email || party.receiverEmail || '',
+        status: party.status || 'Created',
+        eta: party.eta,
+        etd: party.etd,
+        remarks: party.remarks || '',
+        full_partial: party.full_partial || party.fullPartial || 'Full',
+        qty_delivered: party.qty_delivered || party.qtyDelivered || 0,
+      }));
+    }
 
     // Parse order_items JSON (supports multiple; fallback to single from updates)
     let parsedItems = [];
@@ -704,35 +826,48 @@ export async function   updateOrder(req, res) {
         parsedItems = [];
       }
     }
-    const isReplacingItems = parsedItems.length > 0;
+    const isReplacingItems = hasOrderItemsJson && parsedItems.length > 0;
     if (hasOrderItemsJson && parsedItems.length === 0) {
       throw new Error('order_items JSON is invalid or empty');
     }
-    if (!isReplacingItems) {
-      // Single item fallback from updates or current
-      const currentItemResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
-      const currentItem = currentItemResult.rows[0] || {};
-      parsedItems = [{
-        category: updates.category || currentItem.category || '',
-        subcategory: updates.subcategory || currentItem.subcategory || '',
-        type: updates.type || currentItem.type || '',
-        pickup_location: updates.pickup_location || currentItem.pickup_location || '',
-        delivery_address: updates.delivery_address || currentItem.delivery_address || '',
-        total_number: updates.total_number !== undefined ? updates.total_number : currentItem.total_number || null,
-        weight: updates.weight !== undefined ? updates.weight : currentItem.weight || null,
-        item_ref: updates.item_ref || currentItem.item_ref || '',
-        consignment_status: updates.consignment_status || currentItem.consignment_status || ''
-      }];
-    }
-    if (parsedItems.length === 0 || !parsedItems[0].category || !parsedItems[0].type) {
-      throw new Error('At least one order_item is required (provide category, type, etc.)');
-    }
+
+    // Group parsedItems by party index for aggregate computation and association
+    const itemsByParty = parsedItems.reduce((acc, item) => {
+      if (item.item_ref) {
+        const parts = item.item_ref.split('-');
+        if (parts.length >= 6) {
+          const partyIdx = parseInt(parts[3]) - 1;
+          if (!isNaN(partyIdx) && partyIdx >= 0 && partyIdx < parsedReceivers.length) {
+            if (!acc[partyIdx]) acc[partyIdx] = [];
+            acc[partyIdx].push(item);
+          } else {
+            // Fallback to last party if index invalid
+            const lastIdx = parsedReceivers.length - 1;
+            if (!acc[lastIdx]) acc[lastIdx] = [];
+            acc[lastIdx].push(item);
+          }
+        }
+      }
+      return acc;
+    }, {});
+
+    // Assign aggregates to parsedReceivers
+    parsedReceivers.forEach((rec, i) => {
+      const partyItems = itemsByParty[i] || [];
+      const totalNum = partyItems.reduce((sum, item) => sum + (parseInt(item.total_number || 0) || 0), 0);
+      const totalWt = partyItems.reduce((sum, item) => sum + ((parseFloat(item.weight || 0) || 0) * (parseInt(item.total_number || 0) || 0)), 0);
+      rec.total_number = totalNum > 0 ? totalNum : null;
+      rec.total_weight = totalWt > 0 ? totalWt : null;
+      // Auto-generate consignment_number if missing
+      if (!rec.consignment_number?.trim()) {
+        rec.consignment_number = `CN-${id}-${i + 1}-${Date.now()}`;
+      }
+    });
 
     // Allowed update fields (grouped by table)
     const ordersFields = ['booking_ref', 'status', 'eta', 'etd', 'place_of_loading', 'point_of_origin', 'final_destination', 'place_of_delivery', 'order_remarks', 'shipping_line', 'consignment_marks', 'consignment_remarks', 'rgl_booking_number', 'attachments'];
-    const sendersFields = ['sender_name', 'sender_contact', 'sender_address', 'sender_email', 'sender_ref', 'sender_remarks'];
-    const orderItemsFields = ['category', 'subcategory', 'type', 'pickup_location', 'delivery_address', 'total_number', 'weight', 'item_ref', 'consignment_status'];
-    const transportFields = ['transport_type', 'third_party_transport', 'driver_name', 'driver_contact', 'driver_nic', 'driver_pickup_location', 'truck_number', 'drop_method', 'dropoff_name', 'drop_off_cnic', 'drop_off_mobile', 'plate_no', 'drop_date', 'collection_method', 'full_partial', 'qty_delivered', 'client_receiver_name', 'client_receiver_id', 'client_receiver_mobile', 'delivery_date', 'gatepass'];
+    const sendersFields = ['sender_name', 'sender_contact', 'sender_address', 'sender_email', 'sender_ref'];
+    const transportFields = ['transport_type', 'third_party_transport', 'driver_name', 'driver_contact', 'driver_nic', 'driver_pickup_location', 'truck_number', 'drop_method', 'dropoff_name', 'drop_off_cnic', 'drop_off_mobile', 'plate_no', 'drop_date', 'collection_method', 'qty_delivered', 'client_receiver_name', 'client_receiver_id', 'client_receiver_mobile', 'delivery_date', 'gatepass'];
 
     // Date keys
     const dateKeys = ['eta', 'etd', 'drop_date', 'delivery_date'];
@@ -740,9 +875,9 @@ export async function   updateOrder(req, res) {
     // Numeric fields
     const numericFields = ['weight', 'total_number', 'qty_delivered', 'total_weight'];
 
-    // Validation (similar to create, using effective values: update or current)
+    // Validation using effective values
     const updatedFields = {
-      // Orders
+      // ... (same as before)
       bookingRef: updates.booking_ref !== undefined ? updates.booking_ref : currentOrder.booking_ref,
       status: updates.status !== undefined ? updates.status : currentOrder.status,
       eta: updates.eta !== undefined ? updates.eta : currentOrder.eta,
@@ -756,14 +891,11 @@ export async function   updateOrder(req, res) {
       rglBookingNumber: updates.rgl_booking_number !== undefined ? updates.rgl_booking_number : currentOrder.rgl_booking_number,
       consignmentRemarks: updates.consignment_remarks !== undefined ? updates.consignment_remarks : currentOrder.consignment_remarks,
       consignmentMarks: updates.consignment_marks !== undefined ? updates.consignment_marks : currentOrder.consignment_marks,
-      // Senders
       senderName: updates.sender_name !== undefined ? updates.sender_name : currentSender.sender_name,
       senderContact: updates.sender_contact !== undefined ? updates.sender_contact : currentSender.sender_contact,
       senderAddress: updates.sender_address !== undefined ? updates.sender_address : currentSender.sender_address,
       senderEmail: updates.sender_email !== undefined ? updates.sender_email : currentSender.sender_email,
       senderRef: updates.sender_ref !== undefined ? updates.sender_ref : currentSender.sender_ref,
-      senderRemarks: updates.sender_remarks !== undefined ? updates.sender_remarks : currentSender.sender_remarks,
-      // Transport
       transportType: updates.transport_type !== undefined ? updates.transport_type : currentTransport.transport_type,
       thirdPartyTransport: updates.third_party_transport !== undefined ? updates.third_party_transport : currentTransport.third_party_transport,
       driverName: updates.driver_name !== undefined ? updates.driver_name : currentTransport.driver_name,
@@ -778,7 +910,6 @@ export async function   updateOrder(req, res) {
       plateNo: updates.plate_no !== undefined ? updates.plate_no : currentTransport.plate_no,
       dropDate: updates.drop_date !== undefined ? updates.drop_date : currentTransport.drop_date,
       collectionMethod: updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method,
-      fullPartial: updates.full_partial !== undefined ? updates.full_partial : currentTransport.full_partial,
       qtyDelivered: updates.qty_delivered !== undefined ? updates.qty_delivered : currentTransport.qty_delivered,
       clientReceiverName: updates.client_receiver_name !== undefined ? updates.client_receiver_name : currentTransport.client_receiver_name,
       clientReceiverId: updates.client_receiver_id !== undefined ? updates.client_receiver_id : currentTransport.client_receiver_id,
@@ -789,7 +920,7 @@ export async function   updateOrder(req, res) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const mobileRegex = /^\d{10,15}$/;
 
-    // Required fields (core; effective value from update or current)
+    // Required fields
     const requiredFields = [
       'bookingRef', 'rglBookingNumber', 'senderName', 'placeOfLoading', 'finalDestination'
     ];
@@ -802,97 +933,85 @@ export async function   updateOrder(req, res) {
       }
     });
 
-    // Validate receivers (if replacing or not) - Enhanced with total_number required and partial checks for consistency
-    if (isReplacingReceivers) {
+    // Validate shipping parties - if replacing, validate parsed; else validate existing
+    if (isReplacingShippingParties) {
       if (parsedReceivers.length === 0) {
-        updateErrors.push('At least one receiver is required');
+        updateErrors.push('At least one shipping party is required');
       } else {
         parsedReceivers.forEach((rec, index) => {
-          if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for receiver ${index + 1}`);
-          if (!rec.consignment_number?.trim()) updateErrors.push(`consignment_number required for receiver ${index + 1}`);
-          // NEW: Require total_number positive
-          if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for receiver ${index + 1}`);
-          if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for receiver ${index + 1}`);
+          if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for shipping party ${index + 1}`);
+          if (!rec.consignment_number?.trim()) updateErrors.push(`consignment_number required for shipping party ${index + 1}`);
+          if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for shipping party ${index + 1}`);
+          if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for shipping party ${index + 1}`);
           if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) {
-            updateErrors.push(`Invalid receiver ${index + 1} email format`);
+            updateErrors.push(`Invalid shipping party ${index + 1} email format`);
           }
-          // Optional: Validate status (e.g., must be 'Created', 'Delivered', etc.)
-          if (rec.status && !['Created', 'Delivered', 'In Transit'].includes(rec.status)) {  // Adjust valid statuses as needed
-            updateErrors.push(`Invalid status '${rec.status}' for receiver ${index + 1}`);
+          if (rec.status && !['Created', 'Delivered', 'In Transit'].includes(rec.status)) {
+            updateErrors.push(`Invalid status '${rec.status}' for shipping party ${index + 1}`);
           }
-          // Per-receiver partial validation (existing + new check for total_number > 0)
           if (rec.full_partial === 'Partial') {
             if (!rec.qty_delivered || parseInt(rec.qty_delivered) <= 0) {
-              updateErrors.push(`qty_delivered must be positive for partial receiver ${index + 1}`);
+              updateErrors.push(`qty_delivered must be positive for partial shipping party ${index + 1}`);
             }
             const totalNum = parseInt(rec.total_number || 0);
             if (parseInt(rec.qty_delivered) > totalNum) {
-              updateErrors.push(`qty_delivered cannot exceed total_number for receiver ${index + 1}`);
+              updateErrors.push(`qty_delivered cannot exceed total_number for shipping party ${index + 1}`);
             }
           }
         });
       }
     } else {
-      // Validate existing first receiver if no replace - ENHANCED: Add total_number, partial checks
-      const existingRecResult = await client.query('SELECT * FROM receivers WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
-      const existingRec = existingRecResult.rows[0] || {};
-      if (!existingRec.receiver_name?.trim()) updateErrors.push('receiver_name required');
-      if (!existingRec.consignment_number?.trim()) updateErrors.push('consignment_number required');
-      // NEW: Require total_number positive
-      if (!existingRec.total_number || parseInt(existingRec.total_number) <= 0) updateErrors.push('total_number must be positive');
-      if (!existingRec.total_weight || parseFloat(existingRec.total_weight) <= 0) updateErrors.push('total_weight must be positive');
-      if (existingRec.receiver_email && !emailRegex.test(existingRec.receiver_email)) {
-        updateErrors.push('Invalid receiver email format');
-      }
-      // NEW: Per-receiver partial validation for existing
-      if (existingRec.full_partial === 'Partial') {
-        if (!existingRec.qty_delivered || parseInt(existingRec.qty_delivered) <= 0) {
-          updateErrors.push('qty_delivered must be positive for partial receiver');
+      // Validate existing if no replace
+      const existingRecResult = await client.query('SELECT * FROM receivers WHERE order_id = $1 ORDER BY id', [id]);
+      const existingRecs = existingRecResult.rows;
+      existingRecs.forEach((rec, index) => {
+        const partyNum = index + 1;
+        if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for existing shipping party ${partyNum}`);
+        if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for existing shipping party ${partyNum}`);
+        if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for existing shipping party ${partyNum}`);
+        if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) {
+          updateErrors.push(`Invalid existing shipping party ${partyNum} email format`);
         }
-        const totalNum = parseInt(existingRec.total_number || 0);
-        if (parseInt(existingRec.qty_delivered) > totalNum) {
-          updateErrors.push('qty_delivered cannot exceed total_number');
+        if (rec.status && !['Created', 'Delivered', 'In Transit'].includes(rec.status)) {
+          updateErrors.push(`Invalid status '${rec.status}' for existing shipping party ${partyNum}`);
         }
-      }
-      // TODO: If multiple existing receivers, loop over all and validate (similar to new)
-      // For now, assuming single or first; extend if needed:
-      const allExistingRecResult = await client.query('SELECT * FROM receivers WHERE order_id = $1 ORDER BY id', [id]);
-      allExistingRecResult.rows.slice(1).forEach((rec, idx) => {  // Skip first (already checked)
-        if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for receiver ${idx + 2}`);
         if (rec.full_partial === 'Partial') {
+          if (!rec.qty_delivered || parseInt(rec.qty_delivered) <= 0) {
+            updateErrors.push(`qty_delivered must be positive for partial existing shipping party ${partyNum}`);
+          }
           const totalNum = parseInt(rec.total_number || 0);
-          if (parseInt(rec.qty_delivered) > totalNum) {
-            updateErrors.push(`qty_delivered cannot exceed total_number for receiver ${idx + 2}`);
+          if (parseInt(rec.qty_delivered || 0) > totalNum) {
+            updateErrors.push(`qty_delivered cannot exceed total_number for existing shipping party ${partyNum}`);
           }
         }
       });
     }
 
-    // Validate items - ENHANCED: Add total_number positive check
+    // Validate items - if replacing, validate parsed; else validate existing or single
+    const existingItemsResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [id]);
+    const existingItems = existingItemsResult.rows;
     if (isReplacingItems) {
       parsedItems.forEach((item, index) => {
         if (!item.category?.trim()) updateErrors.push(`category required for order_item ${index + 1}`);
         if (!item.type?.trim()) updateErrors.push(`type required for order_item ${index + 1}`);
-        // NEW: Require total_number positive
         if (!item.total_number || parseInt(item.total_number) <= 0) updateErrors.push(`total_number must be positive for order_item ${index + 1}`);
         if (item.weight && (isNaN(parseFloat(item.weight)) || parseFloat(item.weight) <= 0)) updateErrors.push(`weight must be positive for order_item ${index + 1}`);
       });
     } else {
-      // Single effective
-      const currentItemResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
-      const currentItem = currentItemResult.rows[0] || {};
-      const effCategory = updates.category !== undefined ? updates.category : currentItem.category || '';
-      const effType = updates.type !== undefined ? updates.type : currentItem.type || '';
-      const effTotalNumber = updates.total_number !== undefined ? updates.total_number : currentItem.total_number || null;  // NEW
-      const effWeight = updates.weight !== undefined ? updates.weight : currentItem.weight || 0;
-      if (!effCategory.trim()) updateErrors.push('category required for order_item');
-      if (!effType.trim()) updateErrors.push('type required for order_item');
-      // NEW: Require total_number positive
-      if (!effTotalNumber || parseInt(effTotalNumber) <= 0) updateErrors.push('total_number must be positive for order_item');
-      if (parseFloat(effWeight) <= 0 || isNaN(parseFloat(effWeight))) updateErrors.push('weight must be positive for order_item');
+      existingItems.forEach((item, index) => {
+        const itemNum = index + 1;
+        if (!item.category?.trim()) updateErrors.push(`category required for existing order_item ${itemNum}`);
+        if (!item.type?.trim()) updateErrors.push(`type required for existing order_item ${itemNum}`);
+        if (!item.total_number || parseInt(item.total_number) <= 0) updateErrors.push(`total_number must be positive for existing order_item ${itemNum}`);
+        if (item.weight && (isNaN(parseFloat(item.weight)) || parseFloat(item.weight) <= 0)) updateErrors.push(`weight must be positive for existing order_item ${itemNum}`);
+      });
+      // Single fallback if no items
+      if (existingItems.length === 0 && !updates.category && !updates.type) {
+        updateErrors.push('At least one order_item is required (provide category, type, etc.)');
+      }
     }
 
-    // Conditional validations (using effective values)
+    // Conditional validations (same as before)
     const effectiveFinalDestination = updates.final_destination !== undefined ? updates.final_destination : currentOrder.final_destination;
     const showInbound = effectiveFinalDestination && effectiveFinalDestination.includes('Karachi');
     const effectivePlaceOfLoading = updates.place_of_loading !== undefined ? updates.place_of_loading : currentOrder.place_of_loading;
@@ -907,27 +1026,20 @@ export async function   updateOrder(req, res) {
       const effectiveDropOffMobile = updates.drop_off_mobile !== undefined ? updates.drop_off_mobile : currentTransport.drop_off_mobile;
       if (!effectiveDropOffMobile || !effectiveDropOffMobile.trim()) updateErrors.push('drop_off_mobile required for Drop-Off');
     }
-    if (showInbound) {
-      const effectiveDropDate = updates.drop_date !== undefined ? updates.drop_date : currentTransport.drop_date;
-      if (!effectiveDropDate || !effectiveDropDate.trim()) updateErrors.push('drop_date required');
-    }
 
-    if (showOutbound) {
-      const effectiveDeliveryDate = updates.delivery_date !== undefined ? updates.delivery_date : currentTransport.delivery_date;
-      // MODIFIED: Only require if partial or client collection (adjust based on business logic; removes unconditional error)
-      const effectiveFullPartial = updates.full_partial !== undefined ? updates.full_partial : currentTransport.full_partial;
-      const effectiveCollectionMethod = updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method;
-      const requiresDeliveryDate = effectiveFullPartial === 'Partial' || effectiveCollectionMethod === 'Collected by Client';
-      if (requiresDeliveryDate && (!effectiveDeliveryDate || !effectiveDeliveryDate.trim())) {
-        updateErrors.push('delivery_date required for partial delivery or client collection');
-      }
-    }
-    const effectiveFullPartial = updates.full_partial !== undefined ? updates.full_partial : currentTransport.full_partial;
-    if (showOutbound && effectiveFullPartial === 'Partial') {
-      const effectiveQtyDelivered = updates.qty_delivered !== undefined ? updates.qty_delivered : currentTransport.qty_delivered;
-      if (!effectiveQtyDelivered || !effectiveQtyDelivered.trim()) updateErrors.push('qty_delivered required for Partial delivery');
-    }
+    // Partial validation across all (existing or parsed)
+    let allParties = isReplacingShippingParties ? parsedReceivers : (await client.query('SELECT full_partial, qty_delivered, total_number FROM receivers WHERE order_id = $1', [id])).rows;
+    const hasPartial = allParties.some(r => r.full_partial === 'Partial');
+    const effectiveDeliveryDate = updates.delivery_date !== undefined ? updates.delivery_date : currentTransport.delivery_date;
     const effectiveCollectionMethod = updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method;
+    const requiresDeliveryDate = hasPartial || effectiveCollectionMethod === 'Collected by Client';
+    if (showOutbound && requiresDeliveryDate && (!effectiveDeliveryDate || !effectiveDeliveryDate.trim())) {
+      updateErrors.push('delivery_date required for partial delivery or client collection');
+    }
+    if (showOutbound && hasPartial) {
+      const effectiveQtyDelivered = updates.qty_delivered !== undefined ? updates.qty_delivered : currentTransport.qty_delivered;
+      if (!effectiveQtyDelivered || !effectiveQtyDelivered.trim()) updateErrors.push('qty_delivered required if any Partial delivery');
+    }
     if (showOutbound && effectiveCollectionMethod === 'Collected by Client') {
       const effectiveClientReceiverName = updates.client_receiver_name !== undefined ? updates.client_receiver_name : currentTransport.client_receiver_name;
       if (!effectiveClientReceiverName || !effectiveClientReceiverName.trim()) updateErrors.push('client_receiver_name required for Client Collection');
@@ -937,15 +1049,10 @@ export async function   updateOrder(req, res) {
       if (!effectiveClientReceiverMobile || !effectiveClientReceiverMobile.trim()) updateErrors.push('client_receiver_mobile required for Client Collection');
     }
 
-    // Format validations (only if provided in updates)
+    // Format validations (same)
     for (const [camelField, providedValue] of Object.entries(updates)) {
       if (providedValue !== undefined && providedValue !== null && providedValue.trim() !== '') {
-        let actualField = camelField;
-        if (dateKeys.includes(camelField)) {
-          actualField = camelField;
-        } else {
-          actualField = camelField.toLowerCase().replace(/([A-Z])/g, '_$1').toLowerCase();
-        }
+        let actualField = camelField.toLowerCase().replace(/([A-Z])/g, '_$1').toLowerCase();
         if (dateKeys.includes(actualField) && !isValidDate(providedValue)) {
           updateErrors.push(`${actualField} invalid date format (use YYYY-MM-DD)`);
         } else if (numericFields.includes(actualField) && (isNaN(providedValue) || parseFloat(providedValue) <= 0)) {
@@ -967,7 +1074,7 @@ export async function   updateOrder(req, res) {
       });
     }
 
-    // Normalize dates (only if provided)
+    // Normalize dates
     const normEta = updates.eta !== undefined ? normalizeDate(updates.eta) : currentOrder.eta;
     const normEtd = updates.etd !== undefined ? normalizeDate(updates.etd) : currentOrder.etd;
     const normDropDate = updates.drop_date !== undefined ? normalizeDate(updates.drop_date) : currentTransport.drop_date;
@@ -977,7 +1084,7 @@ export async function   updateOrder(req, res) {
     const statusChanged = updates.status && updates.status !== currentOrder.status;
     const finalStatus = updates.status || currentOrder.status;
 
-    // Update orders
+    // Update orders (same)
     const ordersSet = [];
     const ordersValues = [];
     let ordersParamIndex = 1;
@@ -999,7 +1106,7 @@ export async function   updateOrder(req, res) {
       await client.query(ordersQuery, ordersValues);
     }
 
-    // Update senders (1:1)
+    // Update senders (same)
     const sendersSet = [];
     const sendersValues = [];
     let sendersParamIndex = 1;
@@ -1016,14 +1123,18 @@ export async function   updateOrder(req, res) {
       await client.query(sendersQuery, sendersValues);
     }
 
-    // Handle receivers: delete existing and insert new from parsed JSON if provided
+    // Handle shipping parties: replace if JSON provided
     let receiverIds = [];
     let trackingData = [];
-    if (isReplacingReceivers) {
+    if (isReplacingShippingParties) {
+      // Delete existing receivers and related tracking/items
       await client.query('DELETE FROM receivers WHERE order_id = $1', [id]);
       await client.query('DELETE FROM order_tracking WHERE order_id = $1 AND receiver_id IS NOT NULL', [id]);
-      for (const rec of parsedReceivers) {
-        // Updated INSERT to include status (defaults to finalStatus if not provided)
+      if (isReplacingItems) {
+        await client.query('DELETE FROM order_items WHERE order_id = $1', [id]);
+      }
+      for (let i = 0; i < parsedReceivers.length; i++) {
+        const rec = parsedReceivers[i];
         const receiverStatus = rec.status || finalStatus;
         const receiversQuery = `
           INSERT INTO receivers (
@@ -1032,7 +1143,7 @@ export async function   updateOrder(req, res) {
             total_number, total_weight, assignment, item_ref, receiver_ref, containers, status,
             full_partial, qty_delivered, remarks
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-          RETURNING id, receiver_name, consignment_number
+          RETURNING id
         `;
 
         const recContainersJson = JSON.stringify(rec.containers || []);
@@ -1043,28 +1154,58 @@ export async function   updateOrder(req, res) {
           rec.receiver_address || '',
           rec.receiver_email || '',
           rec.consignment_vessel || '',
-          rec.consignment_number || '',
+          rec.consignment_number,
           rec.consignment_marks || '',
           rec.consignment_voyage || '',
-          rec.total_number || null,
-          rec.total_weight || null,
+          rec.total_number,
+          rec.total_weight,
           rec.assignment || '',
           rec.item_ref || '',
           rec.receiver_ref || '',
           recContainersJson,
-          receiverStatus,  // New: Include status
-          rec.full_partial || '',  // New: per-receiver full_partial
-          rec.qty_delivered ? parseInt(rec.qty_delivered) : null,  // New: per-receiver qty_delivered
-          rec.remarks || ''  // New: remarks
+          receiverStatus,
+          rec.full_partial || 'Full',
+          rec.qty_delivered ? parseInt(rec.qty_delivered) : null,
+          rec.remarks || ''
         ];
 
         const recResult = await client.query(receiversQuery, receiversValues);
         const receiverId = recResult.rows[0].id;
         receiverIds.push(receiverId);
 
-        // Find container_id for tracking (first container) - FIXED to container_master and cid
+        // Insert items for this party if replacing items
+        const partyItems = itemsByParty[i] || [];
+        for (const item of partyItems) {
+          const totalWeightItem = (parseFloat(item.weight) || 0) * (parseInt(item.total_number) || 0);
+          const itemsQuery = `
+            INSERT INTO order_items (
+              order_id, sender_id, receiver_id, category, subcategory, type, pickup_location,
+              delivery_address, total_number, weight, total_weight, item_ref, consignment_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          `;
+
+          const itemsValues = [
+            id,
+            currentSender.id,
+            receiverId,  // Set receiver_id
+            item.category || '',
+            item.subcategory || '',
+            item.type || '',
+            item.pickup_location || '',
+            item.delivery_address || '',
+            item.total_number || null,
+            item.weight || null,
+            totalWeightItem,
+            item.item_ref || '',
+            item.consignment_status || ''
+          ];
+
+          await client.query(itemsQuery, itemsValues);
+        }
+
+        // Container and tracking (same)
         let containerId = null;
-        if (rec.containers && rec.containers.length > 0) {
+        if (rec.containers && rec.containers.length > 0 && rec.containers[0].length > 0) {
           try {
             const contQuery = await client.query(
               'SELECT cid FROM container_master WHERE container_number = $1',
@@ -1072,29 +1213,21 @@ export async function   updateOrder(req, res) {
             );
             if (contQuery.rowCount > 0) {
               containerId = contQuery.rows[0].cid;
-            } else {
-              console.warn(`Container ${rec.containers[0]} not found in container_master; skipping link.`);
             }
           } catch (contErr) {
-            if (contErr.code === '42P01' || contErr.code === '42703') {
-              console.warn('container_master table or column issue; skipping container link. Create/update the table to enable linking.');
-            } else {
-              throw contErr; // Re-throw other errors
-            }
+            console.warn('Container link error:', contErr.message);
           }
         }
         trackingData.push({
           receiverId,
           receiverRef: rec.receiver_ref || '',
-          consignmentNumber: rec.consignment_number || '',
+          consignmentNumber: rec.consignment_number,
           containerId,
-          status: receiverStatus  // Use the same status for tracking (trigger will sync back if needed)
+          status: receiverStatus
         });
       }
-    }
 
-    // Insert tracking for new receivers with final status
-    if (isReplacingReceivers && trackingData.length > 0) {
+      // Insert tracking for all new parties
       for (const track of trackingData) {
         const trackingQuery = `
           INSERT INTO order_tracking (
@@ -1112,75 +1245,100 @@ export async function   updateOrder(req, res) {
           track.receiverRef,
           track.containerId,
           track.consignmentNumber,
-          track.status, // Use per-receiver status (trigger handles sync to receiver)
+          track.status,
           updated_by
         ];
 
         await client.query(trackingQuery, trackingValues);
       }
+    } else if (updates.full_partial !== undefined) {
+      // Update full_partial for all existing if provided without replace
+      await client.query(
+        'UPDATE receivers SET full_partial = $1 WHERE order_id = $2',
+        [updates.full_partial, id]
+      );
     }
 
-    // Handle order_items: replace if JSON provided, else update single
-    if (isReplacingItems) {
-      await client.query('DELETE FROM order_items WHERE order_id = $1', [id]);
-      for (const item of parsedItems) {
-        const totalWeight = (parseFloat(item.weight) || 0) * (parseInt(item.total_number) || 0);
-        const itemsQuery = `
-          INSERT INTO order_items (
-            order_id, sender_id, category, subcategory, type, pickup_location,
-            delivery_address, total_number, weight, total_weight, item_ref, consignment_status
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        `;
-
-        const itemsValues = [
-          id,
-          currentSender.id,
-          item.category || '',
-          item.subcategory || '',
-          item.type || '',
-          item.pickup_location || '',
-          item.delivery_address || '',
-          item.total_number || null,
-          item.weight || null,
-          totalWeight,
-          item.item_ref || '',
-          item.consignment_status || ''
-        ];
-
-        await client.query(itemsQuery, itemsValues);
-      }
-    } else {
-      // Update single first item
-      const currentItemResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
-      const currentItem = currentItemResult.rows[0] || {};
+    // Single item fallback if not replacing items
+    if (!isReplacingItems) {
+      // Update or insert single item (first receiver or global)
+      const firstRecResult = await client.query('SELECT id FROM receivers WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
+      const firstRecId = firstRecResult.rows[0]?.id;
+      const currentItem = existingItems[0] || {};
       const itemsSet = [];
       const itemsValues = [];
       let itemsParamIndex = 1;
-      orderItemsFields.forEach(field => {
+      // orderItemsFields without total_weight as it's calculated
+      const singleFields = ['category', 'subcategory', 'type', 'pickup_location', 'delivery_address', 'item_ref', 'consignment_status'];
+      singleFields.forEach(field => {
         if (updates[field] !== undefined) {
           itemsSet.push(`${field} = $${itemsParamIndex}`);
           itemsValues.push(updates[field]);
           itemsParamIndex++;
         }
       });
-      if (itemsSet.length > 0) {
-        if (updates.total_number !== undefined || updates.weight !== undefined) {
-          const newTotalNum = parseInt(updates.total_number !== undefined ? updates.total_number : currentItem.total_number) || 0;
-          const newWeight = parseFloat(updates.weight !== undefined ? updates.weight : currentItem.weight) || 0;
-          const calcTotalWeight = newTotalNum * newWeight;
-          itemsSet.push('total_weight = $' + itemsParamIndex);
-          itemsValues.push(calcTotalWeight);
+      if (itemsSet.length > 0 || updates.total_number !== undefined || updates.weight !== undefined) {
+        const newTotalNum = parseInt(updates.total_number !== undefined ? updates.total_number : currentItem.total_number || 0);
+        const newWeight = parseFloat(updates.weight !== undefined ? updates.weight : currentItem.weight || 0);
+        const calcTotalWeight = newTotalNum * newWeight;
+        if (updates.total_number !== undefined) {
+          itemsSet.push('total_number = $' + itemsParamIndex);
+          itemsValues.push(newTotalNum);
           itemsParamIndex++;
         }
+        if (updates.weight !== undefined) {
+          itemsSet.push('weight = $' + itemsParamIndex);
+          itemsValues.push(newWeight);
+          itemsParamIndex++;
+        }
+        itemsSet.push('total_weight = $' + itemsParamIndex);
+        itemsValues.push(calcTotalWeight);
+        itemsParamIndex++;
         if (currentItem.id) {
           itemsValues.push(currentItem.id);
           const itemsQuery = `UPDATE order_items SET ${itemsSet.join(', ')} WHERE id = $${itemsParamIndex}`;
           await client.query(itemsQuery, itemsValues);
+          // Update receiver total if changed
+          if (firstRecId) {
+            await client.query(
+              'UPDATE receivers SET total_number = $1, total_weight = $2 WHERE id = $3',
+              [newTotalNum, calcTotalWeight, firstRecId]
+            );
+          }
+        } else if (firstRecId) {
+          // Insert new with receiver_id
+          const itemsQuery = `
+            INSERT INTO order_items (
+              order_id, sender_id, receiver_id, category, subcategory, type, pickup_location,
+              delivery_address, total_number, weight, total_weight, item_ref, consignment_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          `;
+          const itemsValuesInsert = [
+            id,
+            currentSender.id,
+            firstRecId,
+            updates.category || '',
+            updates.subcategory || '',
+            updates.type || '',
+            updates.pickup_location || '',
+            updates.delivery_address || '',
+            newTotalNum,
+            newWeight,
+            calcTotalWeight,
+            updates.item_ref || '',
+            updates.consignment_status || ''
+          ];
+          await client.query(itemsQuery, itemsValuesInsert);
+          // Update receiver total
+          await client.query(
+            'UPDATE receivers SET total_number = $1, total_weight = $2 WHERE id = $3',
+            [newTotalNum, calcTotalWeight, firstRecId]
+          );
         }
       }
     }
 
-    // Update transport_details
+    // Update transport_details (same, without full_partial)
     const transportSet = [];
     const transportValues = [];
     let transportParamIndex = 1;
@@ -1202,31 +1360,25 @@ export async function   updateOrder(req, res) {
       await client.query(transportQuery, transportValues);
     }
 
-    // If status changed and no receiver replace, insert new tracking for existing receivers
-    // (Trigger will sync status to receivers automatically)
-    if (statusChanged && !isReplacingReceivers) {
-      const existingRecResult = await client.query('SELECT id, receiver_ref, consignment_number, containers FROM receivers WHERE order_id = $1', [id]);
-      const receiversToUpdate = existingRecResult.rows;
-      for (const rec of receiversToUpdate) {
+    // If status changed, insert tracking for all receivers (refetch after possible replace)
+    if (statusChanged) {
+      const allRecResult = await client.query('SELECT id, receiver_ref, consignment_number, containers FROM receivers WHERE order_id = $1', [id]);
+      const allReceivers = allRecResult.rows;
+      for (const rec of allReceivers) {
         let containerId = null;
+        // Parse containers (same logic as before)
         const containersJson = rec.containers;
         let contNums = [];
         if (typeof containersJson === 'string') {
           try {
             contNums = JSON.parse(containersJson);
           } catch (e) {
-            console.warn('Failed to parse containers JSON:', e.message);
-            // If parse fails, treat as single string if non-empty
             if (containersJson.trim() && containersJson.trim() !== '[]') {
               contNums = [containersJson.trim()];
             }
           }
         } else if (Array.isArray(containersJson)) {
           contNums = containersJson;
-        } else if (containersJson && typeof containersJson === 'string') {
-          if (containersJson.trim() && containersJson.trim() !== '[]') {
-            contNums = [containersJson.trim()];
-          }
         }
         if (contNums.length > 0) {
           try {
@@ -1235,11 +1387,7 @@ export async function   updateOrder(req, res) {
               containerId = contQuery.rows[0].cid;
             }
           } catch (contErr) {
-            if (contErr.code === '42P01' || contErr.code === '42703') {
-              console.warn('container_master issue; skipping container link.');
-            } else {
-              throw contErr;
-            }
+            console.warn('Container link error:', contErr.message);
           }
         }
 
@@ -1259,7 +1407,7 @@ export async function   updateOrder(req, res) {
           rec.receiver_ref,
           containerId,
           rec.consignment_number,
-          updates.status,  // Insert new status; trigger syncs to receiver
+          updates.status,
           updated_by
         ];
 
@@ -1269,36 +1417,30 @@ export async function   updateOrder(req, res) {
 
     await client.query('COMMIT');
 
-    // Refetch updated records after commit to ensure fresh data
+    // Refetch (same)
     const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
     const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [id]);
 
-    // Fetch updated summary for response (fallback to manual JOIN if view is missing; enhanced to align with getOrders fields)
-    // Updated to include receiver status in summary
     let orderSummary = [];
     try {
-      // Try the view first
       const summaryQuery = 'SELECT * FROM order_summary WHERE order_id = $1';
       const summaryResult = await client.query(summaryQuery, [id]);
       orderSummary = summaryResult.rows;
-      console.log('Fetched summary from view:', orderSummary.length > 0 ? 'success' : 'empty');
     } catch (summaryErr) {
-      console.warn('order_summary view fetch failed (likely missing):', summaryErr.message);
-      // Fallback: Manual JOIN for basic summary (enhanced with containers, tracking status, etc. to align with getOrders)
-      // Added receiver status aggregation
+      console.warn('order_summary view fetch failed:', summaryErr.message);
       const fallbackQuery = `
         SELECT 
           o.id as order_id, o.booking_ref, o.status, o.created_at, o.eta, o.etd, o.shipping_line,
-          s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks,
+          s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
           t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
           t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
-          t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.full_partial,
+          t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
           t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
           t.gatepass,
           ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
           cm.container_number,
           rs.receiver_summary,
-          rss.receiver_status_summary,  -- New: Aggregated statuses
+          rss.receiver_status_summary,
           rc.receiver_containers_json,
           rt.total_items,
           rt.remaining_items,
@@ -1364,7 +1506,6 @@ export async function   updateOrder(req, res) {
       `;
       const fallbackResult = await client.query(fallbackQuery, [id]);
       orderSummary = fallbackResult.rows;
-      console.log('Fetched fallback summary:', orderSummary.length > 0 ? 'success' : 'empty');
     }
 
     console.log("Updated order:", id);
@@ -1379,7 +1520,6 @@ export async function   updateOrder(req, res) {
       await client.query('ROLLBACK');
     }
     console.error('Error updating order:', error);
-    // Enhanced error handling (PostgreSQL codes)
     if (error.code === '23505') {
       return res.status(409).json({ error: 'Booking reference already exists' });
     }
@@ -1389,11 +1529,8 @@ export async function   updateOrder(req, res) {
     if (error.code === '22007' || error.code === '22008') {
       return res.status(400).json({ error: 'Invalid date format' });
     }
-    if (error.code === '42P01' || error.code === '42703') { // Table/column does not exist
+    if (error.code === '42P01' || error.code === '42703') {
       return res.status(500).json({ error: 'Database schema mismatch. Run migrations.' });
-    }
-    if (error.message.includes('receivers is required') || error.message.includes('order_item is required')) {
-      return res.status(400).json({ error: 'Invalid update fields', details: error.message });
     }
     res.status(500).json({ error: 'Failed to update order', details: error.message });
   } finally {
@@ -1403,16 +1540,392 @@ export async function   updateOrder(req, res) {
   }
 }
 
-// Helper function (Multer already saves files; just return relative paths)
-async function uploadFiles(files, type) {
-  console.log('Controller execution', files, type);
-  const paths = [];
-  for (const file of files) {
-    const relativePath = `/uploads/${type}/${file.filename}`;
-    paths.push(relativePath);
+export async function getOrderById(req, res) {
+  try {
+    const { id } = req.params;
+    const { includeContainer = 'true' } = req.query;
+
+    // Build SELECT fields dynamically (aligned with new schema: orders core + senders + transport_details)
+    let selectFields = [
+      'o.*',  // Core orders: booking_ref, status, rgl_booking_number, etc. (no eta, etd, shipping_line, consignment_marks)
+      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',  // From senders
+      't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',  // From transport_details
+      't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
+      't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',  // From transport_details
+      't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
+      't.gatepass',  // From transport_details
+      'ot.status AS tracking_status, ot.created_time AS tracking_created_time',  // Latest tracking
+      'ot.container_id',  // Explicit for join
+      'cm.container_number'  // From container_master
+    ].join(', ');
+
+    // Build joins as array for easier extension
+    let joinsArray = [
+      'LEFT JOIN senders s ON o.id = s.order_id',
+      'LEFT JOIN transport_details t ON o.id = t.order_id',
+      'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true',  // Latest tracking
+      'LEFT JOIN container_master cm ON ot.container_id = cm.cid'  // Join to container_master on cid
+    ];
+
+    if (includeContainer === 'true') {
+      selectFields += `,
+        cs.location AS container_location,
+        cs.availability AS container_availability,
+        CASE 
+          WHEN cs.availability = 'Cleared' THEN 'Cleared'
+          ELSE cs.availability
+        END AS container_derived_status
+      `;
+      joinsArray.push(
+        'LEFT JOIN LATERAL (SELECT css.location, css.availability FROM container_status css WHERE css.cid = cm.cid ORDER BY css.sid DESC LIMIT 1) cs ON true'
+      );
+    }
+
+    const joins = joinsArray.join('\n      ');
+
+    const query = `
+      SELECT ${selectFields}
+      FROM orders o
+      ${joins}
+      WHERE o.id = $1
+    `;
+
+    const orderResult = await pool.query(query, [id]);
+    if (orderResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const orderRow = orderResult.rows[0];
+
+    // Updated: Receivers query without category/subcategory/type (now from order_items)
+    const receiversQuery = `
+      SELECT id, order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
+             total_number, total_weight, receiver_ref, remarks, containers,
+             status,
+             eta, etd, shipping_line, consignment_vessel, consignment_number, 
+             consignment_marks, consignment_voyage
+      FROM receivers WHERE order_id = $1 ORDER BY id
+    `;
+    const receiversResult = await pool.query(receiversQuery, [id]);
+    
+    console.log(`[getOrderById ${id}] Receivers fetched: ${receiversResult.rowCount} rows`);
+    
+    // Fetch all order_items for the order (multiple per receiver)
+    const itemsQuery = `
+      SELECT * FROM order_items WHERE order_id = $1 ORDER BY receiver_id, id
+    `;
+    const itemsResult = await pool.query(itemsQuery, [id]);
+    const orderItems = itemsResult.rows;
+    
+    console.log(`[getOrderById ${id}] Order items fetched: ${orderItems.length} rows`);
+    if (orderItems.length > 0) {
+      console.log('[getOrderById] Sample item receiver_id:', orderItems[0]?.receiver_id);
+    }
+
+    // Group order_items by receiver_id
+    const itemsByReceiver = orderItems.reduce((acc, item) => {
+      const rid = item.receiver_id;
+      if (!acc[rid]) acc[rid] = [];
+      acc[rid].push(item);
+      return acc;
+    }, {});
+
+    let receivers = receiversResult.rows.map(row => {
+      // Parse containers (enhanced: if single string and looks like container ID, treat as array with one item)
+      let parsedContainers = [];
+      if (row.containers) {
+        try {
+          parsedContainers = JSON.parse(row.containers);
+          if (!Array.isArray(parsedContainers)) {
+            parsedContainers = [parsedContainers];
+          }
+        } catch (e) {
+          console.warn(`[getOrderById ${id}] Invalid JSON in containers for receiver ${row.id}: ${e.message}. Treating as single container: "${row.containers}"`);
+          parsedContainers = [row.containers];  // Fallback to array with the string
+        }
+      }
+
+      // Updated: shippingDetails as array from grouped order_items
+      const receiverItems = itemsByReceiver[row.id] || [];
+      const shippingDetails = receiverItems.map(item => ({
+        pickupLocation: item.pickup_location || '',
+        deliveryAddress: item.delivery_address || '',
+        category: item.category || '',
+        subcategory: item.subcategory || '',
+        type: item.type || '',
+        totalNumber: item.total_number || '',
+        weight: item.weight || '',
+        itemRef: item.item_ref || '',
+      }));
+
+      // New log for debugging (optional, extended for new fields)
+      console.log(`[getOrderById ${id}] Shipping for receiver ${row.id}: eta=${row.eta || 'EMPTY'}, etd=${row.etd || 'EMPTY'}, shippingDetails count=${shippingDetails.length}`);
+
+      // Format dates safely (now from row)
+      const getFormattedDate = (dateStr) => {
+        if (!dateStr) return '';
+        const date = new Date(dateStr);
+        return isNaN(date.getTime()) ? '' : date.toISOString().split('T')[0];
+      };
+
+      const formattedRow = {
+        ...row,
+        eta: getFormattedDate(row.eta),  // From row
+        etd: getFormattedDate(row.etd),  // From row
+        shipping_line: row.shipping_line || '',  // From row
+        consignment_vessel: row.consignment_vessel || '',  // From row
+        consignment_number: row.consignment_number || '',  // From row
+        consignment_marks: row.consignment_marks || '',  // From row
+        consignment_voyage: row.consignment_voyage || '',  // From row
+        containers: parsedContainers,
+        shippingDetails,  // Array of shipping details
+        // remainingItems: row.total_number || 0  // Remove or adjust; not per receiver in DB
+      };
+      return formattedRow;
+    });
+
+    // Parse attachments (from orders)
+    let parsedAttachments = orderRow.attachments || [];
+    if (typeof orderRow.attachments === 'string') {
+      if (orderRow.attachments.trim() === '') {
+        parsedAttachments = [];
+      } else {
+        try {
+          parsedAttachments = JSON.parse(orderRow.attachments);
+        } catch (parseErr) {
+          console.warn('Invalid JSON in attachments for order', id, '- treating as single path');
+          parsedAttachments = [orderRow.attachments];
+        }
+      }
+    }
+
+    // Parse gatepass (from transport_details via t.gatepass)
+    let parsedGatepass = orderRow.gatepass || [];
+    if (typeof orderRow.gatepass === 'string') {
+      if (orderRow.gatepass.trim() === '') {
+        parsedGatepass = [];
+      } else {
+        try {
+          parsedGatepass = JSON.parse(orderRow.gatepass);
+        } catch (parseErr) {
+          console.warn('Invalid JSON in gatepass for order', id, '- treating as single path');
+          parsedGatepass = [orderRow.gatepass];
+        }
+      }
+    }
+
+    // Format dates to YYYY-MM-DD for frontend (from transport_details)
+    const formattedOrderRow = {
+      ...orderRow,
+      drop_date: orderRow.drop_date ? new Date(orderRow.drop_date).toISOString().split('T')[0] : '',
+      delivery_date: orderRow.delivery_date ? new Date(orderRow.delivery_date).toISOString().split('T')[0] : ''
+    };
+
+    // Derive overall order status based on receivers' statuses
+    let overallStatus = 'Created'; // Default if no receivers
+    if (receivers.length > 0) {
+      const receiverStatuses = receivers.map(r => r.status || 'Created');
+      if (receiverStatuses.includes('Cancelled')) {
+        overallStatus = 'Cancelled';  // Override: if any cancelled, whole order is
+      } else {
+        const statusOrder = { 'Created': 0, 'In Transit': 1, 'Delivered': 2, 'Completed': 3 };
+        const maxStatusIndex = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
+        overallStatus = Object.keys(statusOrder).find(key => statusOrder[key] === maxStatusIndex) || 'Created';
+      }
+    }
+
+    const orderData = {
+      ...formattedOrderRow,
+      overall_status: overallStatus, // New field for derived status
+      status: overallStatus, // Override for backward compatibility
+      attachments: Array.isArray(parsedAttachments) ? parsedAttachments : [],
+      gatepass: Array.isArray(parsedGatepass) ? parsedGatepass : [],
+      collection_scope: orderRow.collection_scope,
+      qty_delivered: orderRow.qty_delivered,
+      receivers,  // With parsed containers, nested shippingDetails array, and formatted dates
+      color: getOrderStatusColor(overallStatus)  // Assumes this function is defined elsewhere
+    };
+
+    console.log(`[getOrderById ${id}] Final response structure: receivers=${orderData.receivers.length}`);
+
+    res.json(orderData);
+  } catch (err) {
+    console.error("Error fetching order by ID:", err.message, "Params:", req.params);
+    if (err.code === '23514') {
+      return res.status(400).json({ error: 'Invalid value for constrained field' });
+    }
+    if (err.code === '42P01' || err.code === '42703') {
+      return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
+    }
+    if (err.code === '42601') {  // Syntax error code
+      return res.status(500).json({ error: 'SQL syntax error in query. Check logs for details.' });
+    }
+    res.status(500).json({ error: 'Failed to fetch order', details: err.message });
   }
-  return paths;
 }
+export async function assignContainersToOrders(req, res) {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const { order_ids, container_id } = req.body || {};
+    const created_by = 'system'; // Or from auth
+
+    // Debug log
+    console.log('Assign containers request:', { 
+      orderIds: order_ids, 
+      containerId: container_id,
+      numOrders: order_ids ? order_ids.length : 0
+    });
+
+    // Validation
+    const updateErrors = [];
+    if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+      updateErrors.push('order_ids array is required and must not be empty');
+    }
+    if (!container_id || isNaN(parseInt(container_id))) {
+      updateErrors.push('valid container_id is required');
+    }
+
+    if (updateErrors.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Invalid request fields',
+        details: updateErrors.join('; ')
+      });
+    }
+
+    // Fetch container details (number)
+    const containerQuery = `
+      SELECT cid, container_number FROM container_master 
+      WHERE cid = $1 AND derived_status = 'Available'
+    `;
+    const containerResult = await client.query(containerQuery, [parseInt(container_id)]);
+    if (containerResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Container not found or not available' });
+    }
+    const { container_number } = containerResult.rows[0];
+
+    // Track updates
+    const updatedOrders = [];
+    const trackingData = [];
+
+    for (const orderId of order_ids) {
+      if (isNaN(parseInt(orderId))) {
+        console.warn(`Invalid order_id: ${orderId}`);
+        continue;
+      }
+
+      // Fetch order and its receivers
+      const orderQuery = `
+        SELECT o.id, o.booking_ref, o.status as overall_status 
+        FROM orders o 
+        WHERE o.id = $1
+      `;
+      const orderResult = await client.query(orderQuery, [parseInt(orderId)]);
+      if (orderResult.rowCount === 0) {
+        console.warn(`Order not found: ${orderId}`);
+        continue;
+      }
+      const order = orderResult.rows[0];
+
+      // Fetch receivers for this order
+      const receiversQuery = `
+        SELECT id, receiver_name, containers 
+        FROM receivers 
+        WHERE order_id = $1
+      `;
+      const receiversResult = await client.query(receiversQuery, [order.id]);
+      const receivers = receiversResult.rows;
+
+      if (receivers.length === 0) {
+        console.warn(`No receivers for order: ${orderId}`);
+        updatedOrders.push({ orderId: order.id, bookingRef: order.booking_ref, assigned: 0 });
+        continue;
+      }
+
+      let assignedCount = 0;
+      for (const receiver of receivers) {
+        try {
+          // Parse current containers (JSON array of strings)
+          let currentContainers = [];
+          if (receiver.containers) {
+            try {
+              currentContainers = JSON.parse(receiver.containers);
+              if (!Array.isArray(currentContainers)) {
+                currentContainers = [];
+              }
+            } catch (parseErr) {
+              console.warn(`Failed to parse containers for receiver ${receiver.id}:`, parseErr.message);
+              currentContainers = [];
+            }
+          }
+
+          // Append new container if not already assigned
+          if (!currentContainers.includes(container_number)) {
+            currentContainers.push(container_number);
+            const updatedContainersJson = JSON.stringify(currentContainers);
+
+            // Update receiver
+            const updateReceiverQuery = `
+              UPDATE receivers 
+              SET containers = $1, updated_at = CURRENT_TIMESTAMP 
+              WHERE id = $2
+              RETURNING id
+            `;
+            await client.query(updateReceiverQuery, [updatedContainersJson, receiver.id]);
+            assignedCount++;
+            trackingData.push({
+              receiverId: receiver.id,
+              receiverName: receiver.receiver_name,
+              orderId: order.id,
+              bookingRef: order.booking_ref,
+              containerNumber: container_number,
+              status: order.overall_status
+            });
+          }
+        } catch (recErr) {
+          console.error(`Error assigning to receiver ${receiver.id}:`, recErr.message);
+        }
+      }
+
+      updatedOrders.push({ 
+        orderId: order.id, 
+        bookingRef: order.booking_ref, 
+        assignedReceivers: assignedCount 
+      });
+    }
+
+    await client.query('COMMIT');
+    res.status(200).json({ 
+      success: true, 
+      message: `Assigned container to ${trackingData.length} receivers across ${updatedOrders.length} orders`,
+      updatedOrders,
+      tracking: trackingData 
+    });
+
+  } catch (error) {
+    console.error('Error assigning containers:', error);
+    if (client) await client.query('ROLLBACK');
+    return res.status(500).json({ error: 'Internal server error', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+}
+// Helper function (Multer already saves files; just return relative paths)
+// async function uploadFiles(files, type) {
+//   console.log('Controller execution', files, type);
+//   const paths = [];
+//   for (const file of files) {
+//     const relativePath = `/uploads/${type}/${file.filename}`;
+//     paths.push(relativePath);
+//   }
+//   return paths;
+// }
 
 // For receiver-facing tracking page (limit sensitive fields if needed, e.g., hide full sender address)
 export async function getOrderByTrackingId(req, res) {
@@ -1615,6 +2128,7 @@ export async function getOrderByItemRef(req, res) {
     res.status(500).json({ error: 'Failed to track order', details: err.message });
   }
 }
+
 export async function getOrders(req, res) {
   try {
     const { page = 1, limit = 10, status } = req.query;
@@ -1630,7 +2144,7 @@ export async function getOrders(req, res) {
     // Build SELECT fields dynamically (aligned with schema)
     let selectFields = [
       'o.*',  // Core orders
-      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',  // From senders
+      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner',  // From senders
       't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',  // From transport_details
       't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
       't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',  // From transport_details
@@ -1638,10 +2152,14 @@ export async function getOrders(req, res) {
       't.gatepass',  // From transport_details
       'ot.status AS tracking_status, ot.created_time AS tracking_created_time',  // Latest tracking
       'ot.container_id',  // Explicit for join
-      'cm.container_number'  // From container_master
+      'cm.container_number',  // From container_master
+      // Subquery for aggregated containers from all receivers (comma-separated JSON strings)
+      'COALESCE((SELECT string_agg(DISTINCT r3.containers::text, \', \') FROM receivers r3 WHERE r3.order_id = o.id), \'\') AS receiver_containers_json',
+      // Subquery for full receivers as JSON array per order
+      '(SELECT COALESCE(json_agg(row_to_json(r2)), \'[]\') FROM receivers r2 WHERE r2.order_id = o.id) AS receivers'
     ].join(', ');
 
-    // Build joins as array for easier extension
+    // Build joins as array for easier extension (removed receivers join, now in subquery)
     let joinsArray = [
       'LEFT JOIN senders s ON o.id = s.order_id',
       'LEFT JOIN transport_details t ON o.id = t.order_id',
@@ -1651,13 +2169,18 @@ export async function getOrders(req, res) {
 
     const joins = joinsArray.join('\n      ');
 
+    // For count, no need for subqueries or receivers join
     const countQuery = `
-      SELECT COUNT(*) OVER() as total_count
+      SELECT COUNT(DISTINCT o.id) as total_count
       FROM orders o
-      ${joins}
+      LEFT JOIN senders s ON o.id = s.order_id
+      LEFT JOIN transport_details t ON o.id = t.order_id
+      LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true
+      LEFT JOIN container_master cm ON ot.container_id = cm.cid
       ${whereClause}
     `;
 
+    // Main query (no GROUP BY needed now with subqueries)
     const query = `
       SELECT ${selectFields}
       FROM orders o
@@ -1693,232 +2216,8 @@ export async function getOrders(req, res) {
     }
     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
   }
-}
-export async function getOrderById(req, res) {
-  try {
-    const { id } = req.params;
-    const { includeContainer = 'true' } = req.query;
+}   
 
-    // Build SELECT fields dynamically (aligned with new schema: orders core + senders + transport_details)
-    let selectFields = [
-      'o.*',  // Core orders: booking_ref, status, rgl_booking_number, etc. (no eta, etd, shipping_line, consignment_marks)
-      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',  // From senders
-      't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',  // From transport_details
-      't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
-      't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',  // From transport_details
-      't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
-      't.gatepass',  // From transport_details
-      'ot.status AS tracking_status, ot.created_time AS tracking_created_time',  // Latest tracking
-      'ot.container_id',  // Explicit for join
-      'cm.container_number'  // From container_master
-    ].join(', ');
-
-    // Build joins as array for easier extension
-    let joinsArray = [
-      'LEFT JOIN senders s ON o.id = s.order_id',
-      'LEFT JOIN transport_details t ON o.id = t.order_id',
-      'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true',  // Latest tracking
-      'LEFT JOIN container_master cm ON ot.container_id = cm.cid'  // Join to container_master on cid
-    ];
-
-    if (includeContainer === 'true') {
-      selectFields += `,
-        cs.location AS container_location,
-        cs.availability AS container_availability,
-        CASE 
-          WHEN cs.availability = 'Cleared' THEN 'Cleared'
-          ELSE cs.availability
-        END AS container_derived_status
-      `;
-      joinsArray.push(
-        'LEFT JOIN LATERAL (SELECT css.location, css.availability FROM container_status css WHERE css.cid = cm.cid ORDER BY css.sid DESC LIMIT 1) cs ON true'
-      );
-    }
-
-    const joins = joinsArray.join('\n      ');
-
-    const query = `
-      SELECT ${selectFields}
-      FROM orders o
-      ${joins}
-      WHERE o.id = $1
-    `;
-
-    const orderResult = await pool.query(query, [id]);
-    if (orderResult.rowCount === 0) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-
-    const orderRow = orderResult.rows[0];
-
-    // Updated: Include new shipping columns in receivers query (added category, subcategory, type)
-    const receiversQuery = `
-      SELECT id, order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
-             total_number, total_weight, item_ref, receiver_ref, remarks, containers,
-             status,
-             eta, etd, shipping_line, consignment_vessel, consignment_number, 
-             consignment_marks, consignment_voyage,
-             category, subcategory, type  -- New: Direct from receivers
-      FROM receivers WHERE order_id = $1 ORDER BY id
-    `;
-    const receiversResult = await pool.query(receiversQuery, [id]);
-    
-    console.log(`[getOrderById ${id}] Receivers fetched: ${receiversResult.rowCount} rows`);
-    
-    // Keep order_items if needed for remaining shippingDetail fields (e.g., pickup_location); otherwise, remove this block
-    const itemsQuery = `
-      SELECT * FROM order_items WHERE order_id = $1 ORDER BY id
-    `;
-    const itemsResult = await pool.query(itemsQuery, [id]);
-    const orderItems = itemsResult.rows;
-    
-    console.log(`[getOrderById ${id}] Order items fetched: ${orderItems.length} rows`);
-    if (orderItems.length > 0) {
-      console.log('[getOrderById] Sample item receiver_id:', orderItems[0]?.receiver_id);
-    }
-
-    let receivers = receiversResult.rows.map(row => {
-      // Parse containers (enhanced: if single string and looks like container ID, treat as array with one item)
-      let parsedContainers = [];
-      if (row.containers) {
-        try {
-          parsedContainers = JSON.parse(row.containers);
-          if (!Array.isArray(parsedContainers)) {
-            parsedContainers = [parsedContainers];
-          }
-        } catch (e) {
-          console.warn(`[getOrderById ${id}] Invalid JSON in containers for receiver ${row.id}: ${e.message}. Treating as single container: "${row.containers}"`);
-          parsedContainers = [row.containers];  // Fallback to array with the string
-        }
-      }
-
-      // Updated: shippingDetail from order_items (removed category, subcategory, type as now direct on receiver)
-      const item = orderItems.find(oi => oi.receiver_id === row.id);
-      if (!item) {
-        console.warn(`[getOrderById ${id}] No matching order_item found for receiver ${row.id} (items have receiver_id: ${orderItems.map(oi => oi.receiver_id).join(', ')}). shippingDetail will be empty.`);
-      }
-      const shippingDetail = item ? {
-        pickupLocation: item.pickup_location || '',
-        deliveryAddress: item.delivery_address || '',
-        // category, subcategory, type removed - now direct on receiver
-        totalNumber: item.total_number || row.total_number || '',  // Fallback to receiver's total_number
-        weight: item.weight || row.total_weight || '',  // Fallback to receiver's total_weight
-      } : {
-        // Default empty if no match
-        pickupLocation: '',
-        deliveryAddress: '',
-        totalNumber: row.total_number || '',
-        weight: row.total_weight || '',
-      };
-
-      // New log for debugging (optional, extended for new fields)
-      console.log(`[getOrderById ${id}] Shipping for receiver ${row.id}: eta=${row.eta || 'EMPTY'}, etd=${row.etd || 'EMPTY'}, category=${row.category || 'EMPTY'}, subcategory=${row.subcategory || 'EMPTY'}, type=${row.type || 'EMPTY'}`);
-
-      // Format dates safely (now from row)
-      const getFormattedDate = (dateStr) => {
-        if (!dateStr) return '';
-        const date = new Date(dateStr);
-        return isNaN(date.getTime()) ? '' : date.toISOString().split('T')[0];
-      };
-
-      const formattedRow = {
-        ...row,
-        eta: getFormattedDate(row.eta),  // From row
-        etd: getFormattedDate(row.etd),  // From row
-        shipping_line: row.shipping_line || '',  // From row
-        consignment_vessel: row.consignment_vessel || '',  // From row
-        consignment_number: row.consignment_number || '',  // From row
-        consignment_marks: row.consignment_marks || '',  // From row
-        consignment_voyage: row.consignment_voyage || '',  // From row
-        category: row.category || '',  // New: Direct from row
-        subcategory: row.subcategory || '',  // New: Direct from row
-        type: row.type || '',  // New: Direct from row
-        containers: parsedContainers,
-        shippingDetail,  // Updated: Without category/subcategory/type, with fallback if no item
-        remainingItems: row.total_number || 0
-      };
-      return formattedRow;
-    });
-
-    // Parse attachments (from orders)
-    let parsedAttachments = orderRow.attachments || [];
-    if (typeof orderRow.attachments === 'string') {
-      if (orderRow.attachments.trim() === '') {
-        parsedAttachments = [];
-      } else {
-        try {
-          parsedAttachments = JSON.parse(orderRow.attachments);
-        } catch (parseErr) {
-          console.warn('Invalid JSON in attachments for order', id, '- treating as single path');
-          parsedAttachments = [orderRow.attachments];
-        }
-      }
-    }
-
-    // Parse gatepass (from transport_details via t.gatepass)
-    let parsedGatepass = orderRow.gatepass || [];
-    if (typeof orderRow.gatepass === 'string') {
-      if (orderRow.gatepass.trim() === '') {
-        parsedGatepass = [];
-      } else {
-        try {
-          parsedGatepass = JSON.parse(orderRow.gatepass);
-        } catch (parseErr) {
-          console.warn('Invalid JSON in gatepass for order', id, '- treating as single path');
-          parsedGatepass = [orderRow.gatepass];
-        }
-      }
-    }
-
-    // Format dates to YYYY-MM-DD for frontend (from transport_details)
-    const formattedOrderRow = {
-      ...orderRow,
-      drop_date: orderRow.drop_date ? new Date(orderRow.drop_date).toISOString().split('T')[0] : '',
-      delivery_date: orderRow.delivery_date ? new Date(orderRow.delivery_date).toISOString().split('T')[0] : ''
-    };
-
-    // Derive overall order status based on receivers' statuses
-    let overallStatus = 'Created'; // Default if no receivers
-    if (receivers.length > 0) {
-      const receiverStatuses = receivers.map(r => r.status || 'Created');
-      if (receiverStatuses.includes('Cancelled')) {
-        overallStatus = 'Cancelled';  // Override: if any cancelled, whole order is
-      } else {
-        const statusOrder = { 'Created': 0, 'In Transit': 1, 'Delivered': 2, 'Completed': 3 };
-        const maxStatusIndex = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
-        overallStatus = Object.keys(statusOrder).find(key => statusOrder[key] === maxStatusIndex) || 'Created';
-      }
-    }
-
-    const orderData = {
-      ...formattedOrderRow,
-      overall_status: overallStatus, // New field for derived status
-      status: overallStatus, // Override for backward compatibility
-      attachments: Array.isArray(parsedAttachments) ? parsedAttachments : [],
-      gatepass: Array.isArray(parsedGatepass) ? parsedGatepass : [],
-      collection_scope: orderRow.collection_scope,
-      qty_delivered: orderRow.qty_delivered,
-      receivers,  // With parsed containers, nested shippingDetail, and formatted dates
-      color: getOrderStatusColor(overallStatus)  // Assumes this function is defined elsewhere
-    };
-
-    console.log(`[getOrderById ${id}] Final response structure: receivers=${orderData.receivers.length}`);
-
-    res.json(orderData);
-  } catch (err) {
-    console.error("Error fetching order by ID:", err.message, "Params:", req.params);
-    if (err.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value for constrained field' });
-    }
-    if (err.code === '42P01' || err.code === '42703') {
-      return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
-    }
-    if (err.code === '42601') {  // Syntax error code
-      return res.status(500).json({ error: 'SQL syntax error in query. Check logs for details.' });
-    }
-    res.status(500).json({ error: 'Failed to fetch order', details: err.message });
-  }
-}
 // getOrderStatuses: Updated to fetch from order_tracking (merged statuses); group by order_id for history
 export async function getOrderStatuses(req, res) {
   try {
