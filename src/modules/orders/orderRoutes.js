@@ -1,7 +1,15 @@
 import express from "express";
-import { createOrder, updateOrder, getOrders, getOrderById,getOrderByTrackingId, getOrderByItemRef, assignContainersToOrders } from './order.controller.js'
-// import express from "express";
-import multer from "multer"
+import { 
+  createOrder, 
+  updateOrder, 
+  getOrders, 
+  getOrderById, 
+  getOrderByTrackingId, 
+  getOrderByItemRef, 
+  assignContainersToOrders,
+  updateOrderStatus  // New: Import for status update
+} from './order.controller.js';
+import multer from "multer";
 import upload from "../../middleware/upload.js";
 import path from "path"; // Add this import for path.extname
 
@@ -22,19 +30,22 @@ const storage = multer.diskStorage({
 router.post('/', upload.fields([
   { name: 'attachments', maxCount: 10 },
   { name: 'gatepass', maxCount: 10 }
-]),createOrder);
+]), createOrder);
 
 // PUT /api/orders/:id - Update an existing order
 router.put('/:id', upload.fields([
   { name: 'attachments', maxCount: 10 },
   { name: 'gatepass', maxCount: 10 }
-]), updateOrder)
+]), updateOrder);
 
 // PUT /api/orders/:id/shipping - Update shipping details for an existing order (receivers and order_items)
 router.put('/:id/shipping', upload.fields([
   { name: 'attachments', maxCount: 10 },
   { name: 'gatepass', maxCount: 10 }
-]), updateOrder)
+]), updateOrder);
+
+// PUT /api/orders/:id/status - Update order status with notifications
+router.put('/:id/status', updateOrderStatus);
 
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);
