@@ -41,100 +41,93 @@ export async function getZohoAccessToken() {
     throw err;
   }
 }
+let isSyncRunning = false; // ✅ global flag
+
 export async function getCustomers(req, res) {
-try {
-  const token = await getZohoAccessToken();
-  console.log("Fetched Zoho access token:", {
-    access_token: token,
-    scope: "ZohoBooks.fullaccess.all",
-  });
-
-  const zohoRes = await axios.get(
-    "https://www.zohoapis.com/books/v3/contacts",
-    {
-      headers: {
-        Authorization: `Zoho-oauthtoken ${token}`,
-        "Content-Type": "application/json",
-      },
-      params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-    }
-  );
-
-  console.log("Zoho Books response:", zohoRes.data);
-
-  const contacts = zohoRes.data.contacts || [];
-
-  if (contacts.length === 0) {
-    console.warn("No contacts found in Zoho Books response");
-  }
-
-  // Split contacts
- 
-  const customers = contacts.filter(c => c.contact_type === "customer");
-
-  // Insert/Update customers
-  for (const c of customers) {
-    if (!c.contact_id) {
-      console.warn("Skipping customer without contact_id:", c);
-      continue;
+  try {
+    // If sync already running, just return cached DB data
+    if (isSyncRunning) {
+      console.log("Customer sync already running, returning cached data...");
+      const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
+      return res.json(rows);
     }
 
-    await pool.query(
-      `INSERT INTO customers 
-        (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-         system_notes, contact_type, status, created_by, modified_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (zoho_id) DO UPDATE SET
-         contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-         email = COALESCE(EXCLUDED.email, customers.email),
-         address = COALESCE(customers.address, EXCLUDED.address),
-         zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-         associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
-         system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
-         contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
-         status = COALESCE(EXCLUDED.status, customers.status),
-         created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-         modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)`,
-      [
-        c.contact_id,
-        c.contact_name || null,
-        c.email || null,
-        null,
-        c.notes || null,
-        null,
-        null,
-        c.contact_type || null, // ✅ now using contact_type
-        c.status === "active",
-        c.created_by_name || null,
-        c.custom_fields?.cf_updated_by_name || c.updated_by_name || null,
-      ]
+    // Begin sync
+    isSyncRunning = true;
+    console.log("🔄 Starting Zoho Books customer sync...");
+
+    const token = await getZohoAccessToken();
+    console.log("Fetched Zoho access token:", { access_token: token });
+
+    const zohoRes = await axios.get(
+      "https://www.zohoapis.com/books/v3/contacts",
+      {
+        headers: {
+          Authorization: `Zoho-oauthtoken ${token}`,
+          "Content-Type": "application/json",
+        },
+        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
+      }
     );
+
+    const contacts = zohoRes.data.contacts || [];
+    const customers = contacts.filter(c => c.contact_type === "customer");
+
+    for (const c of customers) {
+      if (!c.contact_id) continue;
+      await pool.query(
+        `INSERT INTO customers 
+          (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
+           system_notes, contact_type, status, created_by, modified_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (zoho_id) DO UPDATE SET
+           contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
+           email = COALESCE(EXCLUDED.email, customers.email),
+           address = COALESCE(customers.address, EXCLUDED.address),
+           zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
+           associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
+           system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
+           contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
+           status = COALESCE(EXCLUDED.status, customers.status),
+           created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
+           modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)`,
+        [
+          c.contact_id,
+          c.contact_name || null,
+          c.email || null,
+          null,
+          c.notes || null,
+          null,
+          null,
+          c.contact_type || null,
+          c.status === "active",
+          c.created_by_name || null,
+          c.custom_fields?.cf_updated_by_name || c.updated_by_name || null,
+        ]
+      );
+    }
+
+    // ✅ After sync, return all from DB
+    const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
+    res.json(rows);
+
+  } catch (err) {
+    console.error("Zoho Books sync error:", {
+      message: err.message,
+      response: err.response?.data,
+      status: err.response?.status,
+    });
+    const errorMessage = err.response?.data?.message || err.message;
+    const statusCode = err.response?.status || 500;
+    res.status(statusCode).json({
+      error: `Failed to fetch contacts: ${errorMessage}`,
+    });
+  } finally {
+    isSyncRunning = false; // ✅ always release lock
+    console.log("✅ Customer sync finished");
   }
-
-
-
-  const { rows } = await pool.query(
-    "SELECT * FROM customers ORDER BY created_time DESC"
-  );
-
- 
-  res.json(rows );
-  console.log("Sent customers and vendors response:", rows);  
-  return
-} catch (err) {
-  console.error("Zoho Books sync error:", {
-    message: err.message,
-    response: err.response?.data,
-    status: err.response?.status,
-  });
-  const errorMessage = err.response?.data?.message || err.message;
-  const statusCode = err.response?.status || 500;
-  res.status(statusCode).json({
-    error: `Failed to fetch contacts: ${errorMessage}`,
-  });
 }
 
-}
 export async function deleteCustomer(req, res) {
   const { zoho_id } = req.params; // we only need zoho_id for contacts
   const token = await getZohoAccessToken();
