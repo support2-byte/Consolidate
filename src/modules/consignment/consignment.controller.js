@@ -15,29 +15,29 @@ function normalizeDate(dateString) {
 
 // Validate core consignment fields (required checks with error messages)
 function validateConsignmentFields({
-  consignmentNumber, status, remarks, shipper, consignee, origin, destination,
-  eform, eformDate, bank, consignmentValue, paymentType, vessel, voyage,
-  eta, shippingLine, sealNo, netWeight, grossWeight, containers, orders
+  consignment_number, status, remarks, shipper, consignee, origin, destination,
+  eform, eform_date, bank, consignment_value, paymentType, vessel, voyage,
+  eta, shippingLine, seal_no, netWeight, gross_weight, containers, orders
 }) {
   const errors = [];
-  if (!consignmentNumber) errors.push('consignmentNumber');
+  if (!consignment_number) errors.push('consignment_number');
   if (!status) errors.push('status');
   if (!shipper) errors.push('shipper');
   if (!consignee) errors.push('consignee');
   if (!origin) errors.push('origin');
   if (!destination) errors.push('destination');
   if (!eform || !eform.match(/^[A-Z]{3}-\d{6}$/)) errors.push(`eform (invalid format, got: "${eform}")`);
-  if (!isValidDate(eformDate)) errors.push(`eformDate (got: "${eformDate}")`);
-  if (!bank) errors.push('bank');
-  if (consignmentValue === undefined || consignmentValue < 0 || isNaN(consignmentValue)) errors.push('consignmentValue (must be non-negative number)');
+  if (!isValidDate(eform_date)) errors.push(`eform_date (got: "${eform_date}")`);
+  // if (!bank) errors.push('bank');
+  if (consignment_value === undefined || consignment_value < 0 || isNaN(consignment_value)) errors.push('consignment_value (must be non-negative number)');
   if (!paymentType) errors.push('paymentType');
-  if (!vessel) errors.push('vessel');
+  // if (!vessel) errors.push('vessel');
   if (!voyage || voyage.length < 3) errors.push(`voyage (min 3 chars, got: "${voyage}")`);
   if (eta && !isValidDate(eta)) errors.push(`eta (got: "${eta}")`);
   if (!shippingLine) errors.push('shippingLine');  // Optional? Adjust if needed
-  if (sealNo && sealNo.length < 3) errors.push(`sealNo (min 3 chars, got: "${sealNo}")`);  // Optional validation
+  if (seal_no && seal_no.length < 3) errors.push(`seal_no (min 3 chars, got: "${seal_no}")`);  // Optional validation
   if (netWeight === undefined || netWeight < 0 || isNaN(netWeight)) errors.push('netWeight (must be non-negative number)');
-  if (grossWeight === undefined || grossWeight < 0 || isNaN(grossWeight)) errors.push('grossWeight (must be non-negative number)');
+  if (gross_weight === undefined || gross_weight < 0 || isNaN(gross_weight)) errors.push('gross_weight (must be non-negative number)');
   if (!Array.isArray(containers) || containers.length < 1) errors.push('containers (at least one required)');
   if (!Array.isArray(orders) || orders.length < 1) errors.push('orders (at least one required)');  // Adjust if optional
   return errors;
@@ -58,13 +58,11 @@ function validateContainers(containers) {
 
 // Validate orders array items
 function validateOrders(orders) {
+  console.log('Validating orders:', orders);  
   return orders.map((order, index) => {
     const errors = [];
-    if (order.quantity === undefined || order.quantity < 1 || isNaN(order.quantity)) {
+    if (order === undefined || order <= 0) {
       errors.push(`orders[${index}].quantity (must be positive integer)`);
-    }
-    if (order.price === undefined || order.price < 0 || isNaN(order.price)) {
-      errors.push(`orders[${index}].price (must be non-negative number)`);
     }
     return { index, errors };
   }).filter(item => item.errors.length > 0);
@@ -121,49 +119,88 @@ export async function getStatuses(req, res) {
     res.status(500).json({ error: 'Failed to fetch statuses' });
   }
 }
-
 // Additional exported functions for full CRUD (extend as needed for routes)
 export async function getConsignments(req, res) {
   try {
-    const { page = 1, limit = 10, status } = req.query;
-    const offset = (page - 1) * limit;
-    let query = `
-      SELECT id, consignment_number, status, remarks, shipper_name, consignee_name, 
-             origin, destination, eform, eform_date, consignment_value, currency_code,
-             payment_type, vessel, eta, voyage, shipping_line, delivered, pending,
-             seal_no, net_weight, gross_weight, created_at, updated_at
-      FROM consignments
-      WHERE status = 1  -- Active only; adjust as needed
-      ORDER BY created_at DESC
-      LIMIT $1 OFFSET $2
-    `;
-    const params = [limit, offset];
+    const {
+      page = 1,
+      limit = 10,
+      order_by = 'created_at',
+      order = 'desc',
+      consignment_id = '',
+      status = ''
+    } = req.query;
 
-    if (status) {
-      query = query.replace('WHERE status = 1', `WHERE status = 1 AND status = $${params.length + 1}`);
-      params.push(status);
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const validOrderBys = [
+      'id', 'consignment_number', 'status', 's.name', 'c.name',  // Updated: Use joined aliases for sorting
+      'eta', 'created_at', 'gross_weight', 'delivered', 'pending'
+    ];
+    const safeOrderBy = validOrderBys.includes(order_by) ? 
+      (order_by === 'shipper' ? 's.name' : order_by === 'consignee' ? 'c.name' : order_by) : 
+      'created_at';  // Map frontend keys to joined fields
+    const safeOrder = order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    let baseQuery = `
+      SELECT 
+        cons.id, 
+        cons.consignment_number, 
+        cons.status, 
+        COALESCE(s.name, cons.shipper) AS shipper,  -- Prefer joined name, fallback to denormalized
+        COALESCE(c.name, cons.consignee) AS consignee, 
+        cons.eta, 
+        cons.created_at,
+        cons.gross_weight, 
+        cons.orders, 
+        cons.delivered, 
+        cons.pending
+      FROM consignments cons
+      LEFT JOIN shippers s ON cons.shipper_id = s.id  -- LEFT JOIN to handle missing refs
+      LEFT JOIN consignees c ON cons.consignee_id = c.id
+    `;
+    let whereClauses = [];
+    let queryParams = [];
+
+    if (consignment_id.trim()) {
+      whereClauses.push(`cons.consignment_number ILIKE $${queryParams.length + 1}`);
+      queryParams.push(`%${consignment_id.trim()}%`);
     }
 
-    const { rows } = await pool.query(query, params);
+    if (status.trim()) {
+      whereClauses.push(`cons.status = $${queryParams.length + 1}`);
+      queryParams.push(status.trim());
+    }
 
-    // Count for pagination
+    let whereClause = '';
+    if (whereClauses.length > 0) {
+      whereClause = ` WHERE ${whereClauses.join(' AND ')}`;
+    }
+
+    const orderByClause = ` ORDER BY ${safeOrderBy} ${safeOrder}`;
+    const limitOffset = ` LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+    queryParams.push(parseInt(limit), offset);
+
+    const fullQuery = baseQuery + whereClause + orderByClause + limitOffset;
+
+    const { rows } = await pool.query(fullQuery, queryParams);
+
+    // Count for pagination (reuse where clause params, no JOIN needed for count)
     const countQuery = `
       SELECT COUNT(*) as total
-      FROM consignments
-      WHERE status = 1 ${status ? `AND status = $${params.length}` : ''}
+      FROM consignments cons
+      ${whereClause}
     `;
-    const countParams = status ? [status] : [];
-    const countResult = await pool.query(countQuery, countParams);
+    const countResult = await pool.query(countQuery, queryParams.slice(0, -2)); // Exclude limit/offset
     const total = parseInt(countResult.rows[0].total);
 
-    res.json({ data: rows, pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) } });
+    res.json({ data: rows, total });
   } catch (err) {
     console.error("Error fetching consignments:", err);
     res.status(500).json({ error: 'Failed to fetch consignments' });
   }
 }
-
 export async function getConsignmentById(req, res) {
+  // console.log('asasa',req,res)
   try {
     const { id } = req.params;
     const query = `
@@ -185,88 +222,214 @@ export async function getConsignmentById(req, res) {
     res.status(500).json({ error: 'Failed to fetch consignment' });
   }
 }
-
 export async function createConsignment(req, res) {
-    console.log("Create Consignment Request Body:", req.body);
+  console.log("Create Consignment Request Body:", req.body);
   try {
     const data = req.body;
-    const validationErrors = validateConsignmentFields(data);
+    
+    // Map mixed-case input to consistent snake_case for validation and DB
+    const normalizedInput = {
+      consignment_number: data.consignment_number || data.consignmentNumber,
+      status: data.status,
+      remarks: data.remarks,
+      shipper: data.shipper,
+      consignee: data.consignee,
+      origin: data.origin,
+      destination: data.destination,
+      eform: data.eform,
+      eform_date: data.eform_date || data.eformDate,
+      bank: data.bank,
+      consignment_value: data.consignment_value || data.consignmentValue,
+      paymentType: data.paymentType || data.payment_type,
+      vessel: data.vessel,
+      voyage: data.voyage,
+      eta: data.eta,
+      shippingLine: data.shippingLine || data.shipping_line,
+      seal_no: data.seal_no || data.sealNo,
+      netWeight: data.netWeight || data.net_weight,
+      gross_weight: data.gross_weight || data.grossWeight,
+      currency_code: data.currency_code || data.currencyCode,
+      delivered: data.delivered || 0,
+      pending: data.pending || 0,
+      containers: data.containers || [],
+      orders: data.orders || []
+    };
+
+    const validationErrors = validateConsignmentFields(normalizedInput);
     if (validationErrors.length > 0) {
       return res.status(400).json({ error: 'Validation failed', details: validationErrors });
     }
 
-    const containerErrors = validateContainers(data.containers || []);
-    const orderErrors = validateOrders(data.orders || []);
+    const containerErrors = validateContainers(normalizedInput.containers);
+    const orderErrors = validateOrders(normalizedInput.orders);
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({ error: 'Array validation failed', details: [...containerErrors, ...orderErrors] });
     }
 
-    // Normalize dates
+    // Normalize dates and stringify JSON fields - use snake_case keys
     const normalizedData = {
-      ...data,
-      eformDate: normalizeDate(data.eformDate),
-      eta: normalizeDate(data.eta)
+      consignment_number: normalizedInput.consignment_number,
+      status: normalizedInput.status,
+      remarks: normalizedInput.remarks,
+      shipper: normalizedInput.shipper,
+      consignee: normalizedInput.consignee,
+      origin: normalizedInput.origin,
+      destination: normalizedInput.destination,
+      eform: normalizedInput.eform,
+      eform_date: normalizeDate(normalizedInput.eform_date),
+      bank: normalizedInput.bank,
+      consignment_value: normalizedInput.consignment_value,
+      payment_type: normalizedInput.paymentType,
+      vessel: normalizedInput.vessel,
+      voyage: normalizedInput.voyage,
+      eta: normalizeDate(normalizedInput.eta),
+      shipping_line: normalizedInput.shippingLine,
+      seal_no: normalizedInput.seal_no,
+      net_weight: normalizedInput.netWeight,
+      gross_weight: normalizedInput.gross_weight,
+      currency_code: normalizedInput.currency_code,
+      delivered: normalizedInput.delivered,
+      pending: normalizedInput.pending,
+      containers: JSON.stringify(normalizedInput.containers),
+      orders: JSON.stringify(normalizedInput.orders)
     };
 
-    // Dynamic insert (similar to previous backend)
+    // Dynamic insert (snake_case already, but keep the converter for safety)
     const fields = Object.keys(normalizedData).map(key => key.replace(/([A-Z])/g, '_$1').toLowerCase());
     const values = Object.values(normalizedData);
     const placeholders = fields.map((_, i) => `$${i + 1}`).join(', ');
     const query = `INSERT INTO consignments (${fields.join(', ')}) VALUES (${placeholders}) RETURNING *`;
 
     const result = await pool.query(query, values);
+    console.log("Consignment created with ID:", result);
     res.status(201).json({ message: 'Consignment created', data: result.rows[0] });
   } catch (err) {
     console.error("Error creating consignment:", err);
     res.status(500).json({ error: 'Failed to create consignment' });
   }
 }
-
 export async function updateConsignment(req, res) {
+  const { id } = req.params; // Assume ID from params
+  // console.log("Update Consignment Request Body:", req.body);
   try {
-    const { id } = req.params;
     const data = req.body;
-    const validationErrors = validateConsignmentFields({ ...data, id });  // Include ID if needed
+    
+    // Map mixed-case input to consistent snake_case for validation and DB
+    // Exclude non-DB/computed fields like status_color, created_at, updated_at
+    const normalizedInput = {
+      consignment_number: data.consignment_number || data.consignmentNumber,
+      status: data.status,
+      remarks: data.remarks,
+      shipper: data.shipper,
+      shipper_address: data.shipper_address || data.shipperAddress,
+      consignee: data.consignee,
+      consignee_address: data.consignee_address || data.consigneeAddress,
+      origin: data.origin,
+      destination: data.destination,
+      eform: data.eform,
+      eform_date: data.eform_date || data.eformDate,
+      bank: data.bank,
+      consignment_value: data.consignment_value || data.consignmentValue,
+      paymentType: data.paymentType || data.payment_type,
+      vessel: data.vessel,
+      voyage: data.voyage,
+      eta: data.eta,
+      shippingLine: data.shippingLine || data.shipping_line,
+      seal_no: data.seal_no || data.sealNo,
+      netWeight: data.netWeight || data.net_weight,
+      gross_weight: data.gross_weight || data.grossWeight,
+      currency_code: data.currency_code || data.currencyCode,
+      delivered: data.delivered || 0,
+      pending: data.pending || 0,
+      containers: data.containers || [],
+      orders: data.orders || []
+      // Do NOT include status_color, created_at, or updated_at here
+    };
+
+    const validationErrors = validateConsignmentFields(normalizedInput);
     if (validationErrors.length > 0) {
       return res.status(400).json({ error: 'Validation failed', details: validationErrors });
     }
 
-    // Similar array validations...
-    const containerErrors = validateContainers(data.containers || []);
-    const orderErrors = validateOrders(data.orders || []);
+    const containerErrors = validateContainers(normalizedInput.containers);
+    const orderErrors = validateOrders(normalizedInput.orders);
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({ error: 'Array validation failed', details: [...containerErrors, ...orderErrors] });
     }
 
-    // Normalize dates
+    // Normalize dates and stringify JSON fields - use snake_case keys only
+    // Explicitly define to avoid any inheritance or duplicates
     const normalizedData = {
-      ...data,
-      eformDate: normalizeDate(data.eformDate),
-      eta: normalizeDate(data.eta)
+      consignment_number: normalizedInput.consignment_number,
+      status: normalizedInput.status,
+      remarks: normalizedInput.remarks,
+      shipper: normalizedInput.shipper,
+      shipper_address: normalizedInput.shipper_address,
+      consignee: normalizedInput.consignee,
+      consignee_address: normalizedInput.consignee_address,
+      origin: normalizedInput.origin,
+      destination: normalizedInput.destination,
+      eform: normalizedInput.eform,
+      eform_date: normalizeDate(normalizedInput.eform_date),
+      bank: normalizedInput.bank,
+      consignment_value: normalizedInput.consignment_value,
+      payment_type: normalizedInput.paymentType,
+      vessel: normalizedInput.vessel,
+      voyage: normalizedInput.voyage,
+      eta: normalizeDate(normalizedInput.eta),
+      shipping_line: normalizedInput.shippingLine,
+      seal_no: normalizedInput.seal_no,
+      net_weight: normalizedInput.netWeight,
+      gross_weight: normalizedInput.gross_weight,
+      currency_code: normalizedInput.currency_code,
+      delivered: normalizedInput.delivered,
+      pending: normalizedInput.pending,
+      containers: JSON.stringify(normalizedInput.containers),
+      orders: JSON.stringify(normalizedInput.orders)
+      // Explicitly NO status_color, created_at, or updated_at
     };
 
-    // Dynamic update
-    const updates = Object.keys(normalizedData).map(key => {
+    // Build SET clause carefully: use only keys from normalizedData, skip timestamps and non-DB fields
+    const updateFields = Object.keys(normalizedData)
+      .filter(key => !['id', 'created_at', 'updated_at', 'status_color'].includes(key)); // Explicit exclude
+    const setClauseParts = updateFields.map((key, index) => {
+      // Since keys are already snake_case, no need for replace, but keep for safety
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-      return `${dbKey} = $${Object.keys(normalizedData).indexOf(key) + 1}`;
-    }).join(', ');
-    const values = Object.values(normalizedData);
-    values.push(id);
-    const query = `UPDATE consignments SET ${updates}, updated_at = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING *`;
+      return `${dbKey} = $${index + 2}`; // $1 is ID
+    });
+    const setClause = setClauseParts.join(', ');
+    const values = [id, ...updateFields.map(key => normalizedData[key])];
+    const query = `UPDATE consignments SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
+
+    console.log('Update query:', query); // Debug log
+    console.log('Update values:', values); // Debug log
 
     const result = await pool.query(query, values);
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Consignment not found' });
     }
 
-    res.json({ message: 'Consignment updated', data: result.rows[0] });
+    // Compute and add client-side fields to response (e.g., statusColor based on status)
+    const responseData = {
+      ...result.rows[0],
+      statusColor: getStatusColor(result.rows[0].status), // Assume you have a function getStatusColor
+      shipperAddress: result.rows[0].shipper_address || '',
+      consigneeAddress: result.rows[0].consignee_address || '',
+      paymentType: result.rows[0].payment_type || '',
+      shippingLine: parseInt(result.rows[0].shipping_line, 10) || null,
+      netWeight: result.rows[0].net_weight || '0.00'
+      // Add other computed fields as needed
+    };
+
+    console.log("Consignment updated with ID:", result.rows[0].id);
+    res.status(200).json({ message: 'Consignment updated', data: responseData });
   } catch (err) {
     console.error("Error updating consignment:", err);
-    res.status(500).json({ error: 'Failed to update consignment' });
+    res.status(500).json({ error: 'Failed to update consignment', details: err.message });
   }
 }
-
 export async function advanceStatus(req, res) {
+  console.log("Advance Status Request Params:", req.params);    
   try {
     const { id } = req.params;
     const { rows } = await pool.query('SELECT status FROM consignments WHERE id = $1', [id]);

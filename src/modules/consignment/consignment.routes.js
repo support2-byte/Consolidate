@@ -19,7 +19,7 @@ router.get('/', getConsignments);
 
 // GET /api/consignments/:id - Fetch single consignment by ID
 router.get('/:id', getConsignmentById);
-
+  
 // POST /api/consignments - Create new consignment
 router.post('/', createConsignment);
 
@@ -30,7 +30,7 @@ router.put('/:id', updateConsignment);
 router.patch('/:id', updateConsignment); // Reuse update for partial; adjust if separate needed
 
 // PATCH /api/consignments/:id/next - Advance status (workflow)
-router.patch('/:id/next', advanceStatus);
+router.put('/:id/next', advanceStatus);
 
 // DELETE /api/consignments/:id - Delete consignment
 router.delete('/:id', deleteConsignment);

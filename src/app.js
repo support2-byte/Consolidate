@@ -9,7 +9,11 @@ import vendorRoutes from "./modules/vendors/vendorRoutes.js";
 import containerRoutes from "./modules/containers/container.routes.js";
 import orderRoutes from './modules/orders/orderRoutes.js'
 import consignmentRoutes from './modules/consignment/consignment.routes.js';
-dotenv.config();
+import optionsRoutes from './modules/options/options.routes.js';
+
+
+// After other middleware
+  dotenv.config();
 
 const app = express();
 app.use(express.json());
@@ -37,6 +41,8 @@ app.use("/api/vendors", vendorRoutes);
 app.use("/api/containers", containerRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/consignments", consignmentRoutes);
+app.use('/api/options', optionsRoutes);
+
 // Serve uploads folder statically on /uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.get("/health", (_req, res) => {
