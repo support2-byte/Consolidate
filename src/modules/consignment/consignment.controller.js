@@ -200,7 +200,7 @@ export async function getConsignments(req, res) {
   }
 }
 export async function getConsignmentById(req, res) {
-  // console.log('asasa',req,res)
+  console.log('asasa',res)
   try {
     const { id } = req.params;
     const query = `
