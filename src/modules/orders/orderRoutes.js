@@ -7,7 +7,8 @@ import {
   getOrderByTrackingId, 
   getOrderByItemRef, 
   assignContainersToOrders,
-  updateOrderStatus  // New: Import for status update
+  // updateOrderStatus,
+  updateReceiverStatus  // New: Import for status update
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -45,7 +46,7 @@ router.put('/:id/shipping', upload.fields([
 ]), updateOrder);
 
 // PUT /api/orders/:id/status - Update order status with notifications
-router.put('/:id/status', updateOrderStatus);
+router.put('/:orderId/receivers/:id/status', updateReceiverStatus);
 
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);

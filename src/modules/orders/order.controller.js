@@ -2058,13 +2058,16 @@ export async function assignContainersToOrders(req, res) {
 // Backend: PUT /api/orders/:id/status
 // Handles status update with notifications based on Royal Gulf Freight System mapping
 // Assumes: pg pool, nodemailer or similar for emails, twilio for SMS (pseudo-functions here)
-
-export async function updateOrderStatus(req, res) {
+export async function updateReceiverStatus(req, res) {
   let client;
   try {
-    const { id } = req.params;
+    // Fixed: Extract params correctly based on route /api/orders/:orderId/receivers/:id/status
+    const orderId = req.params.orderId; // :orderId from route
+    const receiverId = req.params.id;   // :id from route (for receiver)
     const { status, notifyClient = true, notifyParties = false } = req.body || {};
-    // const updatedBy = req.user?.id || 'system'; // From auth middleware - removed since column doesn't exist
+    
+    // Log for debugging
+    console.log('Received request to update receiver status:', { orderId, receiverId }, { status, notifyClient, notifyParties });
 
     // Validation
     const validStatuses = [
@@ -2086,8 +2089,11 @@ export async function updateOrderStatus(req, res) {
       'Delivered'
     ];
 
-    if (!id || isNaN(parseInt(id))) {
+    if (!orderId || isNaN(parseInt(orderId))) {
       return res.status(400).json({ error: 'Valid order ID is required' });
+    }
+    if (!receiverId || isNaN(parseInt(receiverId))) {
+      return res.status(400).json({ error: 'Valid receiver ID is required' });
     }
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({ 
@@ -2099,50 +2105,51 @@ export async function updateOrderStatus(req, res) {
     client = await pool.connect();
     await client.query('BEGIN');
 
-    // Fetch order details (for notifications)
-    const orderQuery = `
-      SELECT o.*, s.sender_email, s.sender_contact, r.receiver_email, r.receiver_contact
+    // Fetch order and receiver details (for notifications)
+    const detailsQuery = `
+      SELECT o.*, s.sender_email, s.sender_contact, 
+             r.id as receiver_id, r.receiver_name, r.receiver_email, r.receiver_contact, r.status as receiver_status
       FROM orders o
       LEFT JOIN senders s ON o.id = s.order_id
-      LEFT JOIN receivers r ON o.id = r.order_id  -- Assume one primary receiver; extend for multiple
+      LEFT JOIN receivers r ON o.id = r.order_id AND r.id = $2
       WHERE o.id = $1
     `;
-    const orderResult = await client.query(orderQuery, [parseInt(id)]);
-    if (orderResult.rowCount === 0) {
+    const detailsResult = await client.query(detailsQuery, [parseInt(orderId), parseInt(receiverId)]);
+    if (detailsResult.rowCount === 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order not found' });
+      return res.status(404).json({ error: 'Order or Receiver not found' });
     }
-    const order = orderResult.rows[0];
+    const order = detailsResult.rows[0];
 
-    // Update status - REMOVED updated_by to avoid column error
+    // Update receiver status - REMOVED updated_by to avoid column error
     const updateQuery = `
-      UPDATE orders 
+      UPDATE receivers 
       SET status = $1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
+      WHERE id = $2 AND order_id = $3
       RETURNING id, status
     `;
-    const updateResult = await client.query(updateQuery, [status, parseInt(id)]);
+    const updateResult = await client.query(updateQuery, [status, parseInt(receiverId), parseInt(orderId)]);
     if (updateResult.rowCount === 0) {
       await client.query('ROLLBACK');
-      return res.status(500).json({ error: 'Failed to update status' });
+      return res.status(500).json({ error: 'Failed to update receiver status' });
     }
+
+    // Optionally, update overall order status based on receivers (e.g., all delivered → Delivered)
+    await updateOrderOverallStatus(client, parseInt(orderId));
 
     await client.query('COMMIT');
 
-    // Trigger Notifications based on Mapping
-    await triggerNotifications(order, status, notifyClient, notifyParties);
-
-    // Auto-transition Logic (e.g., both auth confirmed → In Process)
-    await handleAutoTransitions(client, order.id, status);
+    // Trigger Notifications based on Mapping (pass receiver details)
+    await triggerNotifications(order, status, notifyClient, notifyParties, { receiver: updateResult.rows[0] });
 
     res.status(200).json({ 
       success: true, 
-      message: `Status updated to "${status}". Notifications triggered as per rules.`,
-      updatedOrder: { id: updateResult.rows[0].id, status: updateResult.rows[0].status }
+      message: `Receiver status updated to "${status}". Notifications triggered as per rules.`,
+      updatedReceiver: { id: updateResult.rows[0].id, status: updateResult.rows[0].status }
     });
 
   } catch (error) {
-    console.error('Error updating order status:', error);
+    console.error('Error updating receiver status:', error);
     if (client) {
       try {
         await client.query('ROLLBACK');
@@ -2156,7 +2163,44 @@ export async function updateOrderStatus(req, res) {
   }
 }
 
-// Helper: Trigger Emails/SMS based on Status Mapping
+// Helper function to update overall order status based on receiver statuses
+async function updateOrderOverallStatus(client, orderId) {
+  try {
+    // Fetch all receivers for the order
+    const receiversQuery = `
+      SELECT status FROM receivers WHERE order_id = $1
+    `;
+    const receiversResult = await client.query(receiversQuery, [orderId]);
+    const receiverStatuses = receiversResult.rows.map(r => r.status);
+
+    // Determine overall status logic (customize as needed)
+    // Example: If all receivers are 'Delivered', set order to 'Delivered'
+    // Or use the min/max status, etc.
+    let overallStatus = 'In Process'; // Default
+    if (receiverStatuses.every(s => s === 'Delivered')) {
+      overallStatus = 'Delivered';
+    } else if (receiverStatuses.every(s => ['Delivered', 'Cancelled'].includes(s))) {
+      overallStatus = 'Cancelled';
+    } else if (receiverStatuses.some(s => s === 'Hold')) {
+      overallStatus = 'Hold';
+    }
+    // Add more logic as per business rules
+
+    // Update order status
+    const orderUpdateQuery = `
+      UPDATE orders 
+      SET status = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING id, status
+    `;
+    await client.query(orderUpdateQuery, [overallStatus, orderId]);
+    console.log(`Overall order status updated to: ${overallStatus}`);
+  } catch (err) {
+    console.error('Error updating overall order status:', err);
+    // Don't throw - optional update
+  }
+}
+
 async function triggerNotifications(order, status, notifyClient, notifyParties) {
   const { booking_ref, sender_email, sender_contact, receiver_email, receiver_contact } = order;
   const clientEmail = 'client@royalgulf.com'; // Assume from order or auth
