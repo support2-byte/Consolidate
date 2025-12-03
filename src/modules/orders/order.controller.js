@@ -55,30 +55,6 @@ export function getContainerAvailability(orderStatus) {
   }
 }
 
-// function normalizeDate(dateStr) {
-//   if (!dateStr || dateStr === '') return null;
-
-//   // Try strict YYYY-MM-DD first
-//   let parsed = new Date(dateStr);
-//   if (isNaN(parsed.getTime())) {
-//     // Fallback: Try parsing as MM/DD/YYYY (common US format)
-//     const parts = dateStr.split('/');
-//     if (parts.length === 3 && parts[0].length <= 2 && parts[1].length <= 2) {
-//       // Assume MM/DD/YYYY
-//       parsed = new Date(`${parts[2]}-${String(parseInt(parts[0])).padStart(2, '0')}-${String(parseInt(parts[1])).padStart(2, '0')}`);
-//     }
-//   }
-
-//   if (isNaN(parsed.getTime())) return null;
-
-//   return parsed.toISOString().split('T')[0]; // Always normalize to YYYY-MM-DD
-// }
-
-// Also update isValidDate if it exists, to match:
-// function isValidDate(dateStr) {
-//   return normalizeDate(dateStr) !== null;
-// }
-
 
 
 
@@ -109,17 +85,14 @@ async function uploadFiles(files, type) {
   // Implementation for uploading files
   return files.map(f => `/uploads/${type}/${Date.now()}-${f.originalname}`);
 }
-
 export async function createOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
-
     const updates = req.body || {};
     const files = req.files || {}; // Assuming multer .fields() or .any()
     const created_by = 'system';
-
     // Map incoming snake_case to camelCase for consistency
     const camelUpdates = {
       bookingRef: updates.booking_ref,
@@ -175,25 +148,24 @@ export async function createOrder(req, res) {
       attachments_existing: updates.attachments_existing,
       gatepass_existing: updates.gatepass_existing,
     };
-
     // Debug log (using mapped camelCase)
-    console.log('Order create body (key fields):', updates, { 
-      bookingRef: camelUpdates.bookingRef, 
-      status: camelUpdates.status, 
+    console.log('Order create body (key fields):', updates, {
+      bookingRef: camelUpdates.bookingRef,
+      status: camelUpdates.status,
       rglBookingNumber: camelUpdates.rglBookingNumber,
       pointOfOrigin: camelUpdates.pointOfOrigin,
       placeOfLoading: camelUpdates.placeOfLoading,
       placeOfDelivery: camelUpdates.placeOfDelivery,
       finalDestination: camelUpdates.finalDestination,
       orderRemarks: camelUpdates.orderRemarks,
-      senderType: camelUpdates.senderType,  
-      selectedSenderOwner: camelUpdates.selectedSenderOwner,  
+      senderType: camelUpdates.senderType,
+      selectedSenderOwner: camelUpdates.selectedSenderOwner,
       transportType: camelUpdates.transportType,
       dropMethod: camelUpdates.dropMethod,
       collectionMethod: camelUpdates.collectionMethod,
       collectionScope: camelUpdates.collectionScope,
       qtyDelivered: camelUpdates.qtyDelivered,
-      receivers_sample: camelUpdates.receivers ? JSON.parse(camelUpdates.receivers).slice(0,1) : null,  
+      receivers_sample: camelUpdates.receivers ? JSON.parse(camelUpdates.receivers).slice(0,1) : null,
       senders_sample: camelUpdates.senders ? JSON.parse(camelUpdates.senders).slice(0,1) : null,
       order_items_sample: camelUpdates.order_items ? JSON.parse(camelUpdates.order_items).slice(0,1) : null
     });
@@ -221,7 +193,6 @@ export async function createOrder(req, res) {
     if (parsedShippingParties.length === 0) {
       throw new Error(`Shipping parties (${senderType === 'sender' ? 'receivers' : 'senders'}) is required`);
     }
-
     // Parse flat order_items and group by party index extracted from item_ref
     let parsedShippingItems = [];
     try {
@@ -235,7 +206,17 @@ export async function createOrder(req, res) {
               if (!acc[partyIdx]) acc[partyIdx] = [];
               acc[partyIdx].push(item);
             }
+          } else {
+            // MODIFICATION: Fallback - assign to first party (index 0) if item_ref is invalid/short
+            console.warn(`Unparseable item_ref "${item.item_ref}" for item; assigning to party 0`);
+            if (!acc[0]) acc[0] = [];
+            acc[0].push(item);
           }
+        } else {
+          // MODIFICATION: If no item_ref at all, still assign to party 0
+          console.warn(`No item_ref for item; assigning to party 0`);
+          if (!acc[0]) acc[0] = [];
+          acc[0].push(item);
         }
         return acc;
       }, {});
@@ -247,17 +228,14 @@ export async function createOrder(req, res) {
       console.warn('Failed to parse order_items:', e.message);
       parsedShippingItems = parsedShippingParties.map(() => []);
     }
-
-    // Ensure each party has at least one shipping detail
-    const hasValidShipping = parsedShippingParties.every((_, i) => parsedShippingItems[i].length > 0);
-    if (!hasValidShipping) {
-      throw new Error('Each shipping party must have at least one shipping detail');
-    }
-
+    // MODIFICATION: Remove strict "hasValidShipping" check - allow parties with 0 items (treat as optional)
+    // const hasValidShipping = parsedShippingParties.every((_, i) => parsedShippingItems[i].length > 0);
+    // if (!hasValidShipping) {
+    //   throw new Error('Each shipping party must have at least one shipping detail');
+    // }
     if (parsedShippingParties.length > 1) {
       console.log(`Multiple shipping parties detected (${parsedShippingParties.length}); inserting all with nested shipping details`);
     }
-
     // Map to receiver format if sender_type=receiver (swap roles)
     let parsedReceivers = parsedShippingParties;
     if (senderType === 'receiver') {
@@ -287,7 +265,6 @@ export async function createOrder(req, res) {
         qty_delivered: party.qty_delivered || party.qtyDelivered || 0,
       }));
     }
-
     // Aggregate totals from shipping items per receiver
     parsedReceivers = parsedReceivers.map((rec, i) => {
       const shippingDetails = parsedShippingItems[i] || [];
@@ -299,7 +276,6 @@ export async function createOrder(req, res) {
         total_weight: totalWt > 0 ? totalWt : null,
       };
     });
-
     // Handle attachments
     let newAttachments = [];
     let existingAttachmentsFromForm = [];
@@ -316,7 +292,6 @@ export async function createOrder(req, res) {
       newAttachments = [...newAttachments, ...uploadedPaths];
     }
     const attachmentsJson = JSON.stringify(newAttachments);
-
     // Handle gatepass
     let newGatepass = [];
     let existingGatepassFromForm = [];
@@ -333,7 +308,6 @@ export async function createOrder(req, res) {
       newGatepass = [...newGatepass, ...uploadedPaths];
     }
     const gatepassJson = JSON.stringify(newGatepass);
-
     // Map owner fields based on sender_type
     let ownerName, ownerContact, ownerAddress, ownerEmail, ownerRef, ownerRemarks;
     if (senderType === 'sender') {
@@ -351,7 +325,6 @@ export async function createOrder(req, res) {
       ownerRef = camelUpdates.receiverRef || '';
       ownerRemarks = camelUpdates.receiverRemarks || '';
     }
-
     // Updated fields matching UI (now using camelUpdates)
     const updatedFields = {
       bookingRef: camelUpdates.bookingRef,
@@ -391,15 +364,13 @@ export async function createOrder(req, res) {
       clientReceiverMobile: camelUpdates.clientReceiverMobile,
       deliveryDate: camelUpdates.deliveryDate,
     };
-
     const updateErrors = [];
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const mobileRegex = /^\d{10,15}$/;
-
+    // MODIFICATION: Reduce required fields to bare minimum (e.g., drop pointOfOrigin, etc., if you want even looser)
     const requiredFields = [
-      'bookingRef', 'rglBookingNumber', 'senderName', 'pointOfOrigin', 'placeOfLoading', 'placeOfDelivery', 'finalDestination', 'selectedSenderOwner', 'transportType'
+      'rglBookingNumber', 'senderType'  // Only these two as truly required for your sample
     ];
-
     requiredFields.forEach(camelField => {
       const value = updatedFields[camelField];
       if (!value || !value.trim()) {
@@ -407,80 +378,56 @@ export async function createOrder(req, res) {
         updateErrors.push(`${actualField} is required`);
       }
     });
-
     if (updatedFields.senderType !== 'sender' && updatedFields.senderType !== 'receiver') {
       updateErrors.push('sender_type must be "sender" or "receiver"');
     }
-
-    // Owner validation
-    if (!ownerName?.trim()) updateErrors.push('owner_name is required');
-
-    // Transport validation (updated based on UI fields)
-    if (updatedFields.transportType) {
-      if (updatedFields.transportType === 'Drop Off') {
-        if (!updatedFields.dropMethod) updateErrors.push('dropMethod is required');
-        if (updatedFields.dropMethod === 'Drop-Off') {
-          if (!updatedFields.dropoffName?.trim()) updateErrors.push('dropoffName is required');
-          if (!updatedFields.dropOffCnic?.trim()) updateErrors.push('dropOffCnic is required');
-          if (!updatedFields.dropOffMobile?.trim()) updateErrors.push('dropOffMobile is required');
-        }
-        if (!updatedFields.dropDate) updateErrors.push('dropDate is required');
-      } else if (updatedFields.transportType === 'Collection') {
-        if (!updatedFields.collectionMethod) updateErrors.push('collectionMethod is required');
-        if (!updatedFields.collectionScope) updateErrors.push('collectionScope is required');
-        if (updatedFields.collectionScope === 'Partial') {
-          if (!updatedFields.qtyDelivered || parseInt(updatedFields.qtyDelivered) <= 0) updateErrors.push('qtyDelivered must be positive for partial collection');
-        }
-        if (updatedFields.collectionMethod === 'Collected by Client') {
-          if (!updatedFields.clientReceiverName?.trim()) updateErrors.push('clientReceiverName is required');
-          if (!updatedFields.clientReceiverId?.trim()) updateErrors.push('clientReceiverId is required');
-          if (!updatedFields.clientReceiverMobile?.trim()) updateErrors.push('clientReceiverMobile is required');
-        }
-        if (!updatedFields.deliveryDate) updateErrors.push('deliveryDate is required');
-      } else if (updatedFields.transportType === 'Third Party') {
-        if (!updatedFields.thirdPartyTransport) updateErrors.push('thirdPartyTransport is required');
-        if (!updatedFields.driverName?.trim()) updateErrors.push('driverName is required');
-        if (!updatedFields.driverContact?.trim()) updateErrors.push('driverContact is required');
-        if (!updatedFields.driverNic?.trim()) updateErrors.push('driverNic is required');
-        if (!updatedFields.driverPickupLocation?.trim()) updateErrors.push('driverPickupLocation is required');
-        if (!updatedFields.truckNumber?.trim()) updateErrors.push('truckNumber is required');
-      }
-    }
-
+    // MODIFICATION: Make owner fields optional (no errors if empty)
+    // if (!ownerName?.trim()) updateErrors.push('owner_name is required');
+    // if (!ownerContact?.trim()) updateErrors.push('owner_contact is required');
+    // if (!ownerAddress?.trim()) updateErrors.push('owner_address is required');
+    if (ownerEmail && !emailRegex.test(ownerEmail)) updateErrors.push('Invalid owner email format');
     if (parsedReceivers.length === 0) {
       updateErrors.push('At least one shipping party is required');
     } else {
       parsedReceivers.forEach((rec, index) => {
         const shippingDetails = parsedShippingItems[index] || [];
-        if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for shipping party ${index + 1}`);
+        // MODIFICATION: Make receiver basics optional (allow empty for minimal create)
+        // if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for shipping party ${index + 1}`);
+        // if (!rec.receiver_contact?.trim()) updateErrors.push(`receiver_contact required for shipping party ${index + 1}`);
+        // if (!rec.receiver_address?.trim()) updateErrors.push(`receiver_address required for shipping party ${index + 1}`);
         if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) updateErrors.push(`Invalid shipping party ${index + 1} email format`);
-        if (rec.receiver_contact && !mobileRegex.test(rec.receiver_contact.replace(/[\s-]/g, ''))) updateErrors.push(`Invalid shipping party ${index + 1} contact format`);
-        if (!rec.eta) updateErrors.push(`eta required for shipping party ${index + 1}`);
-        if (!rec.etd) updateErrors.push(`etd required for shipping party ${index + 1}`);
-
-        // Validate each shipping detail
-        shippingDetails.forEach((item, j) => {
-          if (!item.pickup_location?.trim()) updateErrors.push(`pickup_location required for shipping detail ${j + 1} of party ${index + 1}`);
-          if (!item.category?.trim()) updateErrors.push(`category required for shipping detail ${j + 1} of party ${index + 1}`);
-          if (!item.subcategory?.trim()) updateErrors.push(`subcategory required for shipping detail ${j + 1} of party ${index + 1}`);
-          if (!item.type?.trim()) updateErrors.push(`type required for shipping detail ${j + 1} of party ${index + 1}`);
-          if (!item.delivery_address?.trim()) updateErrors.push(`delivery_address required for shipping detail ${j + 1} of party ${index + 1}`);
-          const num = parseInt(item.total_number || 0);
-          if (!item.total_number || num <= 0) updateErrors.push(`total_number must be positive for shipping detail ${j + 1} of party ${index + 1}`);
-          const wt = parseFloat(item.weight || 0);
-          if (!item.weight || wt <= 0) updateErrors.push(`weight must be positive for shipping detail ${j + 1} of party ${index + 1}`);
-        });
-
-        // Per-party partial validation
+        if (rec.receiver_contact && !mobileRegex.test(rec.receiver_contact.replace(/\D/g, ''))) updateErrors.push(`Invalid shipping party ${index + 1} contact format`);
+        // MODIFICATION: Make eta/etd optional
+        // if (!rec.eta) updateErrors.push(`eta required for shipping party ${index + 1}`);
+        // if (!rec.etd) updateErrors.push(`etd required for shipping party ${index + 1}`);
+        // MODIFICATION: Remove strict shipping details requirement - allow 0 items per party
+        // if (shippingDetails.length === 0) {
+        //   updateErrors.push(`At least one shipping detail is required for shipping party ${index + 1}`);
+        // } else {
+        if (shippingDetails.length > 0) {
+          shippingDetails.forEach((item, j) => {
+            // MODIFICATION: Make item fields optional (warn but don't error)
+            if (!item.pickup_location?.trim()) console.warn(`pickup_location missing for shipping detail ${j + 1} of party ${index + 1}`);
+            if (!item.category?.trim()) console.warn(`category missing for shipping detail ${j + 1} of party ${index + 1}`);
+            if (!item.subcategory?.trim()) console.warn(`subcategory missing for shipping detail ${j + 1} of party ${index + 1}`);
+            if (!item.type?.trim()) console.warn(`type missing for shipping detail ${j + 1} of party ${index + 1}`);
+            if (!item.delivery_address?.trim()) console.warn(`delivery_address missing for shipping detail ${j + 1} of party ${index + 1}`);
+            const num = parseInt(item.total_number || 0);
+            if (!item.total_number || num <= 0) console.warn(`total_number must be positive for shipping detail ${j + 1} of party ${index + 1}`);
+            const wt = parseFloat(item.weight || 0);
+            if (!item.weight || wt <= 0) console.warn(`weight must be positive for shipping detail ${j + 1} of party ${index + 1}`);
+          });
+        }
+        // }
+        // MODIFICATION: Relax partial validation - allow empty qty_delivered even for 'Partial'
         if (rec.full_partial === 'Partial') {
           const del = parseInt(rec.qty_delivered || 0);
           const recTotal = parseInt(rec.total_number || 0);
-          if (del <= 0) updateErrors.push(`qty_delivered must be positive for partial party ${index + 1}`);
-          if (del > recTotal) updateErrors.push(`qty_delivered cannot exceed total_number for party ${index + 1}`);
+          if (del > recTotal && recTotal > 0) updateErrors.push(`qty_delivered cannot exceed total_number for party ${index + 1}`);
+          // Removed: if (!rec.qty_delivered?.trim() || del <= 0) updateErrors.push(...);
         }
       });
     }
-
     if (updateErrors.length > 0) {
       console.warn('Create validation failed:', updateErrors);
       await client.query('ROLLBACK');
@@ -489,10 +436,8 @@ export async function createOrder(req, res) {
         details: updateErrors.join('; ')
       });
     }
-
     const normDropDate = updatedFields.dropDate ? normalizeDate(updatedFields.dropDate) : null;
     const normDeliveryDate = updatedFields.deliveryDate ? normalizeDate(updatedFields.deliveryDate) : null;
-
     const ordersValues = [
       updatedFields.bookingRef,
       updatedFields.status,
@@ -505,19 +450,16 @@ export async function createOrder(req, res) {
       attachmentsJson,
       created_by
     ];
-
     const ordersQuery = `
       INSERT INTO orders (
-        booking_ref, status, rgl_booking_number, place_of_loading, point_of_origin, 
+        booking_ref, status, rgl_booking_number, place_of_loading, point_of_origin,
         final_destination, place_of_delivery, order_remarks, attachments, created_by
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING id, booking_ref, status, created_at
     `;
-
     const ordersResult = await client.query(ordersQuery, ordersValues);
     const orderId = ordersResult.rows[0].id;
     const newOrder = ordersResult.rows[0];
-
     const sendersValues = [
       orderId,
       updatedFields.senderName,
@@ -529,7 +471,6 @@ export async function createOrder(req, res) {
       updatedFields.senderType,
       updatedFields.selectedSenderOwner || ''
     ];
-
     const sendersQuery = `
       INSERT INTO senders (
         order_id, sender_name, sender_contact, sender_address, sender_email, sender_ref,
@@ -537,10 +478,8 @@ export async function createOrder(req, res) {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id, sender_name
     `;
-
     const sendersResult = await client.query(sendersQuery, sendersValues);
     const senderId = sendersResult.rows[0].id;
-
     const receiverIds = [];
     const trackingData = [];
     for (let i = 0; i < parsedReceivers.length; i++) {
@@ -548,7 +487,6 @@ export async function createOrder(req, res) {
       const shippingDetails = parsedShippingItems[i];
       const recNormEta = rec.eta ? normalizeDate(rec.eta) : null;
       const recNormEtd = rec.etd ? normalizeDate(rec.etd) : null;
-
       const receiversQuery = `
         INSERT INTO receivers (
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email, eta, etd, shipping_line,
@@ -557,7 +495,6 @@ export async function createOrder(req, res) {
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         RETURNING id, receiver_name
       `;
-
       const recContainersJson = JSON.stringify([]);
       const receiversValues = [
         orderId,
@@ -580,11 +517,9 @@ export async function createOrder(req, res) {
         rec.full_partial || 'Full',
         rec.qty_delivered ? parseInt(rec.qty_delivered) : null
       ];
-
       const recResult = await client.query(receiversQuery, receiversValues);
       const receiverId = recResult.rows[0].id;
       receiverIds.push(receiverId);
-
       // Insert multiple order_items per receiver
       for (let j = 0; j < shippingDetails.length; j++) {
         const item = shippingDetails[j];
@@ -608,7 +543,6 @@ export async function createOrder(req, res) {
         ];
         await client.query(orderItemsQuery, orderItemsValues);
       }
-
       let containerId = null;
       // Skip container lookup since not in UI
       trackingData.push({
@@ -617,7 +551,6 @@ export async function createOrder(req, res) {
         totalShippingDetails: shippingDetails.length
       });
     }
-
     // Insert transport details (updated based on UI fields)
     const transportQuery = `
       INSERT INTO transport_details (
@@ -652,10 +585,8 @@ export async function createOrder(req, res) {
       updatedFields.truckNumber || null
     ];
     await client.query(transportQuery, transportValues);
-
     await client.query('COMMIT');
     res.status(201).json({ success: true, order: newOrder, tracking: trackingData });
-
   } catch (error) {
     console.error('Error processing order:', error);
     if (client) await client.query('ROLLBACK');
@@ -666,6 +597,7 @@ export async function createOrder(req, res) {
     }
   }
 }
+
 export async function updateOrder(req, res) {
   let client;
   try {
@@ -825,28 +757,52 @@ export async function updateOrder(req, res) {
         console.warn('Failed to parse order_items:', e.message);
         parsedItems = [];
       }
+    } else {
+      // NEW: Extract items from shippingDetails in parsedShippingParties if no separate order_items
+      parsedShippingParties.forEach((party, partyIdx) => {
+        (party.shippingDetails || []).forEach((sd, sdIdx) => {
+          // Standardize item_ref to REF-{partyIdx+1}-{sdIdx+1} for consistent grouping
+          const itemRef = `REF-${partyIdx + 1}-${sdIdx + 1}`;
+          parsedItems.push({
+            category: sd.category || '',
+            subcategory: sd.subcategory || '',
+            type: sd.type || '',
+            pickup_location: sd.pickupLocation || '',
+            delivery_address: sd.deliveryAddress || '',
+            total_number: sd.totalNumber || null,
+            weight: sd.weight || null,
+            item_ref: itemRef,
+            consignment_status: sd.consignment_status || ''
+          });
+        });
+      });
     }
-    const isReplacingItems = hasOrderItemsJson && parsedItems.length > 0;
+    const isReplacingItems = parsedItems.length > 0;
     if (hasOrderItemsJson && parsedItems.length === 0) {
       throw new Error('order_items JSON is invalid or empty');
     }
 
     // Group parsedItems by party index for aggregate computation and association
+    // UPDATED: Improved parsing for item_ref format REF-{recIdx}-{shipIdx}[-timestamp?]
     const itemsByParty = parsedItems.reduce((acc, item) => {
+      let partyIdx = -1;
       if (item.item_ref) {
         const parts = item.item_ref.split('-');
-        if (parts.length >= 6) {
-          const partyIdx = parseInt(parts[3]) - 1;
-          if (!isNaN(partyIdx) && partyIdx >= 0 && partyIdx < parsedReceivers.length) {
-            if (!acc[partyIdx]) acc[partyIdx] = [];
-            acc[partyIdx].push(item);
-          } else {
-            // Fallback to last party if index invalid
-            const lastIdx = parsedReceivers.length - 1;
-            if (!acc[lastIdx]) acc[lastIdx] = [];
-            acc[lastIdx].push(item);
+        if (parts.length >= 3 && parts[0] === 'REF') {
+          const potentialIdx = parseInt(parts[1]);
+          if (!isNaN(potentialIdx)) {
+            partyIdx = potentialIdx - 1;
           }
         }
+      }
+      if (partyIdx >= 0 && partyIdx < parsedReceivers.length) {
+        if (!acc[partyIdx]) acc[partyIdx] = [];
+        acc[partyIdx].push(item);
+      } else {
+        // Fallback to last party if index invalid
+        const lastIdx = parsedReceivers.length - 1;
+        if (!acc[lastIdx]) acc[lastIdx] = [];
+        acc[lastIdx].push(item);
       }
       return acc;
     }, {});
@@ -920,9 +876,9 @@ export async function updateOrder(req, res) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const mobileRegex = /^\d{10,15}$/;
 
-    // Required fields
+    // Required fields (core and owner)
     const requiredFields = [
-      'bookingRef', 'rglBookingNumber', 'senderName', 'placeOfLoading', 'finalDestination'
+      'rglBookingNumber', 'pointOfOrigin', 'placeOfLoading', 'placeOfDelivery', 'finalDestination'
     ];
 
     requiredFields.forEach(camelField => {
@@ -933,120 +889,164 @@ export async function updateOrder(req, res) {
       }
     });
 
+    // Owner validation on effective fields
+    const ownerName = senderType === 'sender' ? updatedFields.senderName : (updates.receiver_name !== undefined ? updates.receiver_name : currentSender.sender_name || '');
+    const ownerContact = senderType === 'sender' ? updatedFields.senderContact : (updates.receiver_contact !== undefined ? updates.receiver_contact : currentSender.sender_contact || '');
+    const ownerAddress = senderType === 'sender' ? updatedFields.senderAddress : (updates.receiver_address !== undefined ? updates.receiver_address : currentSender.sender_address || '');
+    const ownerEmail = senderType === 'sender' ? updatedFields.senderEmail : (updates.receiver_email !== undefined ? updates.receiver_email : currentSender.sender_email || '');
+    if (!ownerName?.trim()) updateErrors.push('owner_name is required');
+    if (!ownerContact?.trim()) updateErrors.push('owner_contact is required');
+    if (!ownerAddress?.trim()) updateErrors.push('owner_address is required');
+    if (ownerEmail && !emailRegex.test(ownerEmail)) updateErrors.push('Invalid owner email format');
+
     // Validate shipping parties - if replacing, validate parsed; else validate existing
     if (isReplacingShippingParties) {
       if (parsedReceivers.length === 0) {
         updateErrors.push('At least one shipping party is required');
       } else {
         parsedReceivers.forEach((rec, index) => {
+          const shippingDetails = itemsByParty[index] || [];
           if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for shipping party ${index + 1}`);
-          if (!rec.consignment_number?.trim()) updateErrors.push(`consignment_number required for shipping party ${index + 1}`);
-          if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for shipping party ${index + 1}`);
-          if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for shipping party ${index + 1}`);
-          if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) {
-            updateErrors.push(`Invalid shipping party ${index + 1} email format`);
+          if (!rec.receiver_contact?.trim()) updateErrors.push(`receiver_contact required for shipping party ${index + 1}`);
+          if (!rec.receiver_address?.trim()) updateErrors.push(`receiver_address required for shipping party ${index + 1}`);
+          if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) updateErrors.push(`Invalid shipping party ${index + 1} email format`);
+          if (rec.receiver_contact && !mobileRegex.test(rec.receiver_contact.replace(/\D/g, ''))) updateErrors.push(`Invalid shipping party ${index + 1} contact format`);
+          if (!rec.eta?.trim()) updateErrors.push(`eta required for shipping party ${index + 1}`);
+          if (!rec.etd?.trim()) updateErrors.push(`etd required for shipping party ${index + 1}`);
+
+          // Validate each shipping detail
+          if (shippingDetails.length === 0) {
+            updateErrors.push(`At least one shipping detail is required for shipping party ${index + 1}`);
+          } else {
+            shippingDetails.forEach((sd, j) => {
+              if (!sd.pickup_location?.trim()) updateErrors.push(`pickup_location required for shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.category?.trim()) updateErrors.push(`category required for shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.subcategory?.trim()) updateErrors.push(`subcategory required for shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.type?.trim()) updateErrors.push(`type required for shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.delivery_address?.trim()) updateErrors.push(`delivery_address required for shipping detail ${j + 1} of party ${index + 1}`);
+              const totalNum = parseInt(sd.total_number);
+              if (isNaN(totalNum) || totalNum <= 0) updateErrors.push(`total_number must be a positive number for shipping detail ${j + 1} of party ${index + 1}`);
+              if (sd.weight && (isNaN(parseFloat(sd.weight)) || parseFloat(sd.weight) <= 0)) updateErrors.push(`weight must be a positive number for shipping detail ${j + 1} of party ${index + 1}`);
+            });
           }
-          if (rec.status && !['Created', 'Delivered', 'In Transit'].includes(rec.status)) {
-            updateErrors.push(`Invalid status '${rec.status}' for shipping party ${index + 1}`);
-          }
+          // Validate full/partial
           if (rec.full_partial === 'Partial') {
-            if (!rec.qty_delivered || parseInt(rec.qty_delivered) <= 0) {
-              updateErrors.push(`qty_delivered must be positive for partial shipping party ${index + 1}`);
-            }
-            const totalNum = parseInt(rec.total_number || 0);
-            if (parseInt(rec.qty_delivered) > totalNum) {
-              updateErrors.push(`qty_delivered cannot exceed total_number for shipping party ${index + 1}`);
+            if (!rec.qty_delivered?.trim()) {
+              updateErrors.push(`qty_delivered required for partial shipping party ${index + 1}`);
+            } else {
+              const del = parseInt(rec.qty_delivered);
+              const recTotal = parseInt(rec.total_number || 0) || 0;
+              if (isNaN(del) || del <= 0) {
+                updateErrors.push(`qty_delivered must be a positive number for shipping party ${index + 1}`);
+              } else if (del > recTotal) {
+                updateErrors.push(`qty_delivered (${del}) cannot exceed total_number (${recTotal}) for shipping party ${index + 1}`);
+              }
             }
           }
         });
       }
     } else {
-      // Validate existing if no replace
+      // Validate existing receivers if no replace
       const existingRecResult = await client.query('SELECT * FROM receivers WHERE order_id = $1 ORDER BY id', [id]);
       const existingRecs = existingRecResult.rows;
-      existingRecs.forEach((rec, index) => {
-        const partyNum = index + 1;
-        if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for existing shipping party ${partyNum}`);
-        if (!rec.total_number || parseInt(rec.total_number) <= 0) updateErrors.push(`total_number must be positive for existing shipping party ${partyNum}`);
-        if (!rec.total_weight || parseFloat(rec.total_weight) <= 0) updateErrors.push(`total_weight must be positive for existing shipping party ${partyNum}`);
-        if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) {
-          updateErrors.push(`Invalid existing shipping party ${partyNum} email format`);
-        }
-        if (rec.status && !['Created', 'Delivered', 'In Transit'].includes(rec.status)) {
-          updateErrors.push(`Invalid status '${rec.status}' for existing shipping party ${partyNum}`);
-        }
-        if (rec.full_partial === 'Partial') {
-          if (!rec.qty_delivered || parseInt(rec.qty_delivered) <= 0) {
-            updateErrors.push(`qty_delivered must be positive for partial existing shipping party ${partyNum}`);
-          }
-          const totalNum = parseInt(rec.total_number || 0);
-          if (parseInt(rec.qty_delivered || 0) > totalNum) {
-            updateErrors.push(`qty_delivered cannot exceed total_number for existing shipping party ${partyNum}`);
-          }
-        }
-      });
-    }
+      if (existingRecs.length === 0) {
+        updateErrors.push('At least one shipping party is required');
+      } else {
+        for (const [index, rec] of existingRecs.entries()) {
+          const shippingDetailsResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 AND receiver_id = $2 ORDER BY id', [id, rec.id]);
+          const shippingDetails = shippingDetailsResult.rows;
+          if (!rec.receiver_name?.trim()) updateErrors.push(`receiver_name required for existing shipping party ${index + 1}`);
+          if (!rec.receiver_contact?.trim()) updateErrors.push(`receiver_contact required for existing shipping party ${index + 1}`);
+          if (!rec.receiver_address?.trim()) updateErrors.push(`receiver_address required for existing shipping party ${index + 1}`);
+          if (rec.receiver_email && !emailRegex.test(rec.receiver_email)) updateErrors.push(`Invalid existing shipping party ${index + 1} email format`);
+          if (rec.receiver_contact && !mobileRegex.test(rec.receiver_contact.replace(/\D/g, ''))) updateErrors.push(`Invalid existing shipping party ${index + 1} contact format`);
+          if (!rec.eta?.trim()) updateErrors.push(`eta required for existing shipping party ${index + 1}`);
+          if (!rec.etd?.trim()) updateErrors.push(`etd required for existing shipping party ${index + 1}`);
 
-    // Validate items - if replacing, validate parsed; else validate existing or single
-    const existingItemsResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [id]);
-    const existingItems = existingItemsResult.rows;
-    if (isReplacingItems) {
-      parsedItems.forEach((item, index) => {
-        if (!item.category?.trim()) updateErrors.push(`category required for order_item ${index + 1}`);
-        if (!item.type?.trim()) updateErrors.push(`type required for order_item ${index + 1}`);
-        if (!item.total_number || parseInt(item.total_number) <= 0) updateErrors.push(`total_number must be positive for order_item ${index + 1}`);
-        if (item.weight && (isNaN(parseFloat(item.weight)) || parseFloat(item.weight) <= 0)) updateErrors.push(`weight must be positive for order_item ${index + 1}`);
-      });
-    } else {
-      existingItems.forEach((item, index) => {
-        const itemNum = index + 1;
-        if (!item.category?.trim()) updateErrors.push(`category required for existing order_item ${itemNum}`);
-        if (!item.type?.trim()) updateErrors.push(`type required for existing order_item ${itemNum}`);
-        if (!item.total_number || parseInt(item.total_number) <= 0) updateErrors.push(`total_number must be positive for existing order_item ${itemNum}`);
-        if (item.weight && (isNaN(parseFloat(item.weight)) || parseFloat(item.weight) <= 0)) updateErrors.push(`weight must be positive for existing order_item ${itemNum}`);
-      });
-      // Single fallback if no items
-      if (existingItems.length === 0 && !updates.category && !updates.type) {
-        updateErrors.push('At least one order_item is required (provide category, type, etc.)');
+          // Validate each existing shipping detail
+          if (shippingDetails.length === 0) {
+            updateErrors.push(`At least one shipping detail is required for existing shipping party ${index + 1}`);
+          } else {
+            shippingDetails.forEach((sd, j) => {
+              if (!sd.pickup_location?.trim()) updateErrors.push(`pickup_location required for existing shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.category?.trim()) updateErrors.push(`category required for existing shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.subcategory?.trim()) updateErrors.push(`subcategory required for existing shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.type?.trim()) updateErrors.push(`type required for existing shipping detail ${j + 1} of party ${index + 1}`);
+              if (!sd.delivery_address?.trim()) updateErrors.push(`delivery_address required for existing shipping detail ${j + 1} of party ${index + 1}`);
+              const totalNum = parseInt(sd.total_number);
+              if (isNaN(totalNum) || totalNum <= 0) updateErrors.push(`total_number must be a positive number for existing shipping detail ${j + 1} of party ${index + 1}`);
+              if (sd.weight && (isNaN(parseFloat(sd.weight)) || parseFloat(sd.weight) <= 0)) updateErrors.push(`weight must be a positive number for existing shipping detail ${j + 1} of party ${index + 1}`);
+            });
+          }
+          // Validate full/partial
+          if (rec.full_partial === 'Partial') {
+            if (!rec.qty_delivered?.toString().trim()) {
+              updateErrors.push(`qty_delivered required for partial existing shipping party ${index + 1}`);
+            } else {
+              const del = parseInt(rec.qty_delivered);
+              const recTotal = parseInt(rec.total_number || 0) || 0;
+              if (isNaN(del) || del <= 0) {
+                updateErrors.push(`qty_delivered must be a positive number for existing shipping party ${index + 1}`);
+              } else if (del > recTotal) {
+                updateErrors.push(`qty_delivered (${del}) cannot exceed total_number (${recTotal}) for existing shipping party ${index + 1}`);
+              }
+            }
+          }
+        }
       }
     }
 
-    // Conditional validations (same as before)
-    const effectiveFinalDestination = updates.final_destination !== undefined ? updates.final_destination : currentOrder.final_destination;
-    const showInbound = effectiveFinalDestination && effectiveFinalDestination.includes('Karachi');
-    const effectivePlaceOfLoading = updates.place_of_loading !== undefined ? updates.place_of_loading : currentOrder.place_of_loading;
-    const showOutbound = effectivePlaceOfLoading && effectivePlaceOfLoading.includes('Dubai');
-
-    const effectiveDropMethod = updates.drop_method !== undefined ? updates.drop_method : currentTransport.drop_method;
-    if (showInbound && effectiveDropMethod === 'Drop-Off') {
-      const effectiveDropoffName = updates.dropoff_name !== undefined ? updates.dropoff_name : currentTransport.dropoff_name;
-      if (!effectiveDropoffName || !effectiveDropoffName.trim()) updateErrors.push('dropoff_name required for Drop-Off');
-      const effectiveDropOffCnic = updates.drop_off_cnic !== undefined ? updates.drop_off_cnic : currentTransport.drop_off_cnic;
-      if (!effectiveDropOffCnic || !effectiveDropOffCnic.trim()) updateErrors.push('drop_off_cnic required for Drop-Off');
-      const effectiveDropOffMobile = updates.drop_off_mobile !== undefined ? updates.drop_off_mobile : currentTransport.drop_off_mobile;
-      if (!effectiveDropOffMobile || !effectiveDropOffMobile.trim()) updateErrors.push('drop_off_mobile required for Drop-Off');
+    // Conditional transport validations on effective values
+    const effectiveTransportType = updates.transport_type !== undefined ? updates.transport_type : currentTransport.transport_type;
+    const anyPartial = isReplacingShippingParties 
+      ? parsedReceivers.some(rec => rec.full_partial === 'Partial') 
+      : (await client.query('SELECT full_partial FROM receivers WHERE order_id = $1', [id])).rows.some(r => r.full_partial === 'Partial');
+    const showInbound = updatedFields.finalDestination?.includes('Karachi') || currentOrder.final_destination?.includes('Karachi');
+    const showOutbound = updatedFields.placeOfLoading?.includes('Dubai') || currentOrder.place_of_loading?.includes('Dubai');
+    if (showInbound && effectiveTransportType === 'Drop Off') {
+      const effectiveDropDate = updates.drop_date !== undefined ? updates.drop_date : currentTransport.drop_date;
+      if (!effectiveDropDate?.trim()) {
+        updateErrors.push('drop_date is required');
+      }
+      const effectiveDropMethod = updates.drop_method !== undefined ? updates.drop_method : currentTransport.drop_method;
+      if (effectiveDropMethod === 'Drop-Off') {
+        const effectiveDropoffName = updates.dropoff_name !== undefined ? updates.dropoff_name : currentTransport.dropoff_name;
+        if (!effectiveDropoffName?.trim()) updateErrors.push('dropoff_name is required');
+        const effectiveDropOffCnic = updates.drop_off_cnic !== undefined ? updates.drop_off_cnic : currentTransport.drop_off_cnic;
+        if (!effectiveDropOffCnic?.trim()) updateErrors.push('drop_off_cnic is required');
+        const effectiveDropOffMobile = updates.drop_off_mobile !== undefined ? updates.drop_off_mobile : currentTransport.drop_off_mobile;
+        if (!effectiveDropOffMobile?.trim()) updateErrors.push('drop_off_mobile is required');
+      }
     }
-
-    // Partial validation across all (existing or parsed)
-    let allParties = isReplacingShippingParties ? parsedReceivers : (await client.query('SELECT full_partial, qty_delivered, total_number FROM receivers WHERE order_id = $1', [id])).rows;
-    const hasPartial = allParties.some(r => r.full_partial === 'Partial');
-    const effectiveDeliveryDate = updates.delivery_date !== undefined ? updates.delivery_date : currentTransport.delivery_date;
-    const effectiveCollectionMethod = updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method;
-    const requiresDeliveryDate = hasPartial || effectiveCollectionMethod === 'Collected by Client';
-    if (showOutbound && requiresDeliveryDate && (!effectiveDeliveryDate || !effectiveDeliveryDate.trim())) {
-      updateErrors.push('delivery_date required for partial delivery or client collection');
+    if (showOutbound && effectiveTransportType === 'Collection') {
+      const effectiveDeliveryDate = updates.delivery_date !== undefined ? updates.delivery_date : currentTransport.delivery_date;
+      const requiresDeliveryDate = anyPartial || (updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method) === 'Collected by Client';
+      if (requiresDeliveryDate && !effectiveDeliveryDate?.trim()) {
+        updateErrors.push('delivery_date is required for partial delivery or client collection');
+      }
+      const effectiveCollectionMethod = updates.collection_method !== undefined ? updates.collection_method : currentTransport.collection_method;
+      if (effectiveCollectionMethod === 'Collected by Client') {
+        const effectiveClientReceiverName = updates.client_receiver_name !== undefined ? updates.client_receiver_name : currentTransport.client_receiver_name;
+        if (!effectiveClientReceiverName?.trim()) updateErrors.push('client_receiver_name is required');
+        const effectiveClientReceiverId = updates.client_receiver_id !== undefined ? updates.client_receiver_id : currentTransport.client_receiver_id;
+        if (!effectiveClientReceiverId?.trim()) updateErrors.push('client_receiver_id is required');
+        const effectiveClientReceiverMobile = updates.client_receiver_mobile !== undefined ? updates.client_receiver_mobile : currentTransport.client_receiver_mobile;
+        if (!effectiveClientReceiverMobile?.trim()) updateErrors.push('client_receiver_mobile is required');
+      }
     }
-    if (showOutbound && hasPartial) {
-      const effectiveQtyDelivered = updates.qty_delivered !== undefined ? updates.qty_delivered : currentTransport.qty_delivered;
-      if (!effectiveQtyDelivered || !effectiveQtyDelivered.trim()) updateErrors.push('qty_delivered required if any Partial delivery');
-    }
-    if (showOutbound && effectiveCollectionMethod === 'Collected by Client') {
-      const effectiveClientReceiverName = updates.client_receiver_name !== undefined ? updates.client_receiver_name : currentTransport.client_receiver_name;
-      if (!effectiveClientReceiverName || !effectiveClientReceiverName.trim()) updateErrors.push('client_receiver_name required for Client Collection');
-      const effectiveClientReceiverId = updates.client_receiver_id !== undefined ? updates.client_receiver_id : currentTransport.client_receiver_id;
-      if (!effectiveClientReceiverId || !effectiveClientReceiverId.trim()) updateErrors.push('client_receiver_id required for Client Collection');
-      const effectiveClientReceiverMobile = updates.client_receiver_mobile !== undefined ? updates.client_receiver_mobile : currentTransport.client_receiver_mobile;
-      if (!effectiveClientReceiverMobile || !effectiveClientReceiverMobile.trim()) updateErrors.push('client_receiver_mobile required for Client Collection');
+    if (effectiveTransportType === 'Third Party') {
+      const effectiveThirdPartyTransport = updates.third_party_transport !== undefined ? updates.third_party_transport : currentTransport.third_party_transport;
+      if (!effectiveThirdPartyTransport?.trim()) updateErrors.push('third_party_transport is required');
+      const effectiveDriverName = updates.driver_name !== undefined ? updates.driver_name : currentTransport.driver_name;
+      if (!effectiveDriverName?.trim()) updateErrors.push('driver_name is required');
+      const effectiveDriverContact = updates.driver_contact !== undefined ? updates.driver_contact : currentTransport.driver_contact;
+      if (!effectiveDriverContact?.trim()) updateErrors.push('driver_contact is required');
+      const effectiveDriverNic = updates.driver_nic !== undefined ? updates.driver_nic : currentTransport.driver_nic;
+      if (!effectiveDriverNic?.trim()) updateErrors.push('driver_nic is required');
+      const effectiveDriverPickupLocation = updates.driver_pickup_location !== undefined ? updates.driver_pickup_location : currentTransport.driver_pickup_location;
+      if (!effectiveDriverPickupLocation?.trim()) updateErrors.push('driver_pickup_location is required');
+      const effectiveTruckNumber = updates.truck_number !== undefined ? updates.truck_number : currentTransport.truck_number;
+      if (!effectiveTruckNumber?.trim()) updateErrors.push('truck_number is required');
     }
 
     // Format validations (same)
@@ -1140,13 +1140,16 @@ export async function updateOrder(req, res) {
           INSERT INTO receivers (
             order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
             consignment_vessel, consignment_number, consignment_marks, consignment_voyage,
+            eta, etd,
             total_number, total_weight, assignment, item_ref, receiver_ref, containers, status,
             full_partial, qty_delivered, remarks
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
           RETURNING id
         `;
 
         const recContainersJson = JSON.stringify(rec.containers || []);
+        const normRecEta = rec.eta ? normalizeDate(rec.eta) : null;
+        const normRecEtd = rec.etd ? normalizeDate(rec.etd) : null;
         const receiversValues = [
           id,
           rec.receiver_name || '',
@@ -1157,6 +1160,8 @@ export async function updateOrder(req, res) {
           rec.consignment_number,
           rec.consignment_marks || '',
           rec.consignment_voyage || '',
+          normRecEta,
+          normRecEtd,
           rec.total_number,
           rec.total_weight,
           rec.assignment || '',
@@ -1261,6 +1266,10 @@ export async function updateOrder(req, res) {
 
     // Single item fallback if not replacing items
     if (!isReplacingItems) {
+      // Fetch existing items for fallback
+      const existingItemsResult = await client.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
+      const existingItems = existingItemsResult.rows;
+
       // Update or insert single item (first receiver or global)
       const firstRecResult = await client.query('SELECT id FROM receivers WHERE order_id = $1 ORDER BY id LIMIT 1', [id]);
       const firstRecId = firstRecResult.rows[0]?.id;
@@ -1539,7 +1548,6 @@ export async function updateOrder(req, res) {
     }
   }
 }
-
 export async function getOrderById(req, res) {
   try {
     const { id } = req.params;
@@ -2473,16 +2481,86 @@ export async function getOrderByItemRef(req, res) {
   }
 }
 
+
 export async function getOrders(req, res) {
   try {
-    const { page = 1, limit = 10, status } = req.query;
+    const { page = 1, limit = 10, status, booking_ref, container_id } = req.query;
 
     let whereClause = 'WHERE 1=1';
     let params = [];
 
     if (status) {
-      whereClause += ' AND o.status = $' + params.length + 1;
+      whereClause += ' AND o.status = $' + (params.length + 1);
       params.push(status);
+    }
+
+    if (booking_ref) {
+      whereClause += ' AND o.booking_ref ILIKE $' + (params.length + 1);
+      params.push(`%${booking_ref}%`);
+    }
+
+    let containerNumbers = [];  // To store looked-up container numbers
+
+    if (container_id) {
+      const containerIds = container_id.split(',').map(id => id.trim()).filter(Boolean);
+      if (containerIds.length > 0) {
+        // First, fetch container numbers for these CIDs
+        const idArray = containerIds.map(id => parseInt(id));
+        const containerQuery = {
+          text: 'SELECT container_number FROM container_master WHERE cid = ANY($1::int[])',
+          values: [idArray]
+        };
+        const containerResult = await pool.query(containerQuery);
+        containerNumbers = containerResult.rows.map(row => row.container_number).filter(Boolean);
+
+        if (containerNumbers.length === 0) {
+          // No containers found, early return empty
+          return res.json({
+            data: [],
+            pagination: {
+              page: parseInt(page),
+              limit: parseInt(limit),
+              total: 0,
+              totalPages: 0
+            }
+          });
+        }
+
+        // Conditions for ot.container_id (exact numeric match on CIDs)
+        const otConditions = containerIds.map((idStr) => {
+          const paramIdx = params.length + 1;
+          params.push(parseInt(idStr));
+          return `ot.container_id = $${paramIdx}`;
+        }).join(' OR ');
+
+        // Conditions for cm.container_number (partial ILIKE on looked-up numbers)
+        const cmConditions = containerNumbers.map((num) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `cm.container_number ILIKE $${paramIdx}`;
+        }).join(' OR ');
+
+        // Conditions for receivers JSONB (partial ILIKE on looked-up numbers in unnested elements)
+        const receiverExists = containerNumbers.map((num) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont 
+            WHERE cont ILIKE $${paramIdx}
+          )`;
+        }).join(' OR ');
+
+        whereClause += ` AND (
+          (${otConditions}) OR
+          (${cmConditions}) OR
+          EXISTS (
+            SELECT 1 FROM receivers r 
+            WHERE r.order_id = o.id 
+            AND r.containers IS NOT NULL 
+            AND (${receiverExists})
+          )
+        )`;
+      }
     }
 
     // Build SELECT fields dynamically (aligned with schema)
@@ -2513,14 +2591,11 @@ export async function getOrders(req, res) {
 
     const joins = joinsArray.join('\n      ');
 
-    // For count, no need for subqueries or receivers join
+    // For count, no need for subqueries or receivers join, but conditions on ot/cm/r are handled via the whereClause (which includes subqueries for r)
     const countQuery = `
       SELECT COUNT(DISTINCT o.id) as total_count
       FROM orders o
-      LEFT JOIN senders s ON o.id = s.order_id
-      LEFT JOIN transport_details t ON o.id = t.order_id
-      LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true
-      LEFT JOIN container_master cm ON ot.container_id = cm.cid
+      ${joins}
       ${whereClause}
     `;
 
@@ -2561,6 +2636,7 @@ export async function getOrders(req, res) {
     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
   }
 }
+
 // getOrderStatuses: Updated to fetch from order_tracking (merged statuses); group by order_id for history
 export async function getOrderStatuses(req, res) {
   try {
