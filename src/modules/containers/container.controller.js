@@ -769,10 +769,9 @@ export async function getContainers(req, res) {
     res.status(500).json({ error: 'Failed to fetch containers' });
   }
 }
-
 export async function getAllContainers(req, res) {
   try {
-    const { container_number, container_size, container_type, owner_type, status, location, page = 1, limit = 10, includeOrder = 'false' } = req.query;
+    const { container_number, container_size, container_type, owner_type, status = 'Available', location, page = 1, limit = 10, includeOrder = 'false' } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let whereClause = 'cm.status = 1';
@@ -848,44 +847,40 @@ export async function getAllContainers(req, res) {
       baseFrom += orderJoin;
     }
 
-    const baseFromFinal = baseFrom + ` WHERE ${whereClause}`;
+    // Use CTE to compute derived_status, then filter on it (default to 'Available')
+    const statusFilter = status || 'Available';
+    const statusParamIndex = values.length + 1;  // For derived_status filter
+    const limitParamIndex = statusParamIndex + 1;
+    const offsetParamIndex = limitParamIndex + 1;
 
-    const orderBy = ' ORDER BY cm.container_number ';
-    const outerOrderBy = ' ORDER BY sub.container_number ';  // Use sub alias for outer query
+    // Main query with CTE
+    const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
+    const fullQuery = `
+      WITH container_summary AS (${innerQuery})
+      SELECT * FROM container_summary 
+      WHERE derived_status = $${statusParamIndex}
+      ORDER BY container_number 
+      LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+    `;
+    values.push(statusFilter, parseInt(limit), offset);
 
-    let query, countQuery;
-    let countValues = [...values];
+    // Count query with CTE (fixed: no duplicate param)
+    const fullCountQuery = `
+      WITH container_summary AS (${innerQuery})
+      SELECT COUNT(*) as total FROM container_summary 
+      WHERE derived_status = $${statusParamIndex}
+    `;
+    const countValues = [...values.slice(0, -2)];  // Up to statusFilter only (no limit/offset, no duplicate)
 
-    if (status) {
-      const innerQuery = `${selectClause} ${baseFromFinal} ${orderBy}`;
-      const statusIndex = values.length + 1;
-      const limitIndex = statusIndex + 1;
-      const offsetIndex = limitIndex + 1;
-      query = `SELECT * FROM (${innerQuery}) AS sub WHERE derived_status = $${statusIndex} ${outerOrderBy} LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
-      values.push(status, parseInt(limit), offset);
+    console.log("Generated Query:", fullQuery);  // Add logging for debugging
+    console.log("Generated Count Query:", fullCountQuery);
 
-      const innerCountQuery = `${selectClause} ${baseFromFinal}`;
-      const countStatusIndex = countValues.length + 1;
-      countQuery = `SELECT COUNT(*) as total FROM (${innerCountQuery}) AS sub WHERE derived_status = $${countStatusIndex}`;
-      countValues.push(status);
-    } else {
-      const limitIndex = values.length + 1;
-      const offsetIndex = limitIndex + 1;
-      query = `${selectClause} ${baseFromFinal} ${orderBy} LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
-      values.push(parseInt(limit), offset);
-
-      countQuery = `SELECT COUNT(*) as total ${baseFrom} WHERE ${whereClause}`;
-    }
-
-    console.log("Generated Query:", query);  // Add logging for debugging
-    console.log("Generated Count Query:", countQuery);
-
-    const rowsResult = await pool.query(query, values);
-    const countResult = await pool.query(countQuery, countValues);
+    const rowsResult = await pool.query(fullQuery, values);
+    const countResult = await pool.query(fullCountQuery, countValues);
 
     const rows = rowsResult.rows;
 
-    console.log("Fetched containers:", rows.length, "Total:", parseInt(countResult.rows[0].total), "Filters:", req.query);
+    console.log("Fetched containers:", rows.length, "Total:", parseInt(countResult.rows[0].total), "Filters:", { ...req.query, status: statusFilter });
     res.json({
       data: rows,
       total: parseInt(countResult.rows[0].total),

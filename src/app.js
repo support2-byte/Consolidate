@@ -10,7 +10,7 @@ import containerRoutes from "./modules/containers/container.routes.js";
 import orderRoutes from './modules/orders/orderRoutes.js'
 import consignmentRoutes from './modules/consignment/consignment.routes.js';
 import optionsRoutes from './modules/options/options.routes.js';
-
+import sendOrderEmail from "./middleware/nodeMailer.js";
 
 // After other middleware
   dotenv.config();
