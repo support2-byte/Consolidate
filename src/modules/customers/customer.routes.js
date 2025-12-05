@@ -12,7 +12,8 @@ import {
   getDocuments,
   downloadDocument,
   updateDocument,
-  deleteCustomer
+  deleteCustomer,
+  getCustomersPanel
 } from "./customer.controller.js"; // Adjust path as needed
 import upload from "../../middleware/upload.js";
 const router = express.Router();
@@ -21,6 +22,8 @@ const router = express.Router();
 router.post("/", createCustomer);
 router.get("/:id", getCustomerById);
 router.get("/", getCustomers);
+router.get("/Panal", getCustomersPanel);
+
 router.put("/:zoho_id", updateCustomer);
 router.delete("/:zoho_id", deleteCustomer);
 // Contact routes

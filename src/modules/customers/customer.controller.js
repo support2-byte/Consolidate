@@ -43,14 +43,15 @@ export async function getZohoAccessToken() {
 }
 let isSyncRunning = false; // ✅ global flag
 
-export async function getCustomers(req, res) {
+export async function getCustomersPanel(req, res) {
+  console.log("Received request for customer panel sync");
   try {
-    // If sync already running, just return cached DB data
-    if (isSyncRunning) {
-      console.log("Customer sync already running, returning cached data...");
-      const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
-      return res.json(rows);
-    }
+    // // If sync already running, just return cached DB data
+    // if (isSyncRunning) {
+    //   console.log("Customer sync already running, returning cached data...");
+    //   const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
+    //   return res.json(rows);
+    // }
 
     // Begin sync
     isSyncRunning = true;
@@ -60,7 +61,7 @@ export async function getCustomers(req, res) {
     console.log("Fetched Zoho access token:", { access_token: token });
 
     const zohoRes = await axios.get(
-      "https://www.zohoapis.com/books/v3/contacts",
+      "https://www.zohoapis.com/books/v3/customers",
       {
         headers: {
           Authorization: `Zoho-oauthtoken ${token}`,
@@ -125,6 +126,29 @@ export async function getCustomers(req, res) {
   } finally {
     isSyncRunning = false; // ✅ always release lock
     console.log("✅ Customer sync finished");
+  }
+}
+
+export async function getCustomers(req, res) {
+  try {
+    const { search = '', limit = 100 } = req.query; // Optional search and limit for dropdown efficiency
+
+    let query = "SELECT * FROM customers WHERE 1=1";
+    let params = [];
+
+    if (search.trim()) {
+      query += " AND (contact_name ILIKE $1 OR email ILIKE $1)";
+      params.push(`%${search.trim()}%`);
+    }
+
+    query += " ORDER BY created_time DESC LIMIT $2";
+    params.push(parseInt(limit));
+
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error("Error fetching customers:", err);
+    res.status(500).json({ error: 'Failed to fetch customers' });
   }
 }
 
