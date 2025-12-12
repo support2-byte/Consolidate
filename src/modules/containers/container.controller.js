@@ -94,7 +94,7 @@ export async function getStatuses(req, res) {
     }));
 
 //     // Hardcode full list if query returns < 5 (or always, for consistency)
-    if (statuses.length < 5) {
+    if (statuses.length < 5 ) {
       statuses = [
         { value: 'Available', label: 'Available', color: getStatusColor('Available') },
         { value: 'Hired', label: 'Hired', color: getStatusColor('Hired') },
@@ -106,6 +106,8 @@ export async function getStatuses(req, res) {
         { value: 'De-Linked', label: 'De-Linked', color: getStatusColor('De-Linked') },
         { value: 'Under Repair', label: 'Under Repair', color: getStatusColor('Under Repair') },
         { value: 'Returned', label: 'Returned', color: getStatusColor('Returned') },
+        { value: 'Cleared', label: 'Cleared', color: getStatusColor('Cleared') },
+
         // Add more if needed
       ];
     }
@@ -646,156 +648,34 @@ export async function updateContainer(req, res) {
   }
 }
 
-export async function getContainers(req, res) {
-  try {
-    const { page = 1, limit = 50, ...filters } = req.query;
-
-    // Build dynamic WHERE clause for base filters (non-computed)
-    let baseWhereClause = 'WHERE cm.status = 1';
-    const baseParams = [];
-    let paramIndex = 1;
-
-    if (filters.container_number) {
-      baseWhereClause += ` AND cm.container_number ILIKE $${paramIndex}`;
-      baseParams.push(`%${filters.container_number}%`);
-      paramIndex++;
-    }
-    if (filters.container_size) {
-      baseWhereClause += ` AND cm.container_size = $${paramIndex}`;
-      baseParams.push(filters.container_size);
-      paramIndex++;
-    }
-    if (filters.container_type) {
-      baseWhereClause += ` AND cm.container_type = $${paramIndex}`;
-      baseParams.push(filters.container_type);
-      paramIndex++;
-    }
-    if (filters.owner_type) {
-      baseWhereClause += ` AND cm.owner_type = $${paramIndex}`;
-      baseParams.push(filters.owner_type);
-      paramIndex++;
-    }
-    if (filters.location) {
-      baseWhereClause += ` AND cs.location = $${paramIndex}`;
-      baseParams.push(filters.location);
-      paramIndex++;
-    }
-
-    // For status (derived_status) filter, we'll handle in CTE
-    const statusFilter = filters.status ? filters.status : null;
-
-    // Main query with CTE for computed derived_status
-    const query = `
-      WITH computed_containers AS (
-        SELECT 
-          cm.*,
-          COALESCE(cm.manual_derived_status, 
-            CASE 
-              WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-              WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-              WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-              WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-              WHEN cs.availability = 'Arrived' THEN 'Arrived'
-              WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-              WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-              WHEN cs.availability = 'Returned' THEN 'Returned'
-              ELSE 'Available'
-            END
-          ) AS derived_status,
-          cs.location,
-          cs.availability,
-          chd.associated_booking_ref  -- Adjust field names as per your schema
-        FROM container_master cm
-        LEFT JOIN LATERAL (
-          SELECT location, availability
-          FROM container_status css
-          WHERE css.cid = cm.cid
-          ORDER BY css.sid DESC NULLS LAST
-          LIMIT 1
-        ) cs ON true
-        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-        ${baseWhereClause}
-      )
-      SELECT * FROM computed_containers
-      ${statusFilter ? `WHERE derived_status = $${paramIndex}` : ''}
-      ORDER BY created_time DESC
-      LIMIT $${paramIndex + (statusFilter ? 1 : 0)} OFFSET $${paramIndex + (statusFilter ? 2 : 1)}
-    `;
-
-    // Build full params
-    let fullParams = [...baseParams];
-    if (statusFilter) {
-      fullParams.push(statusFilter);
-    }
-    fullParams.push(parseInt(limit));
-    fullParams.push((parseInt(page) - 1) * parseInt(limit));
-
-    console.log('Full Query:', query); // Debug log
-    console.log('Full Params:', fullParams); // Debug log
-
-    const result = await pool.query(query, fullParams);
-
-    // Count query (simplified, without status for accuracy; adjust if needed)
-    const countQuery = `
-      WITH computed_containers AS (
-        SELECT COUNT(*) as total
-        FROM container_master cm
-        LEFT JOIN LATERAL (
-          SELECT location, availability
-          FROM container_status css
-          WHERE css.cid = cm.cid
-          ORDER BY css.sid DESC NULLS LAST
-          LIMIT 1
-        ) cs ON true
-        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-        ${baseWhereClause}
-      )
-      SELECT total FROM computed_containers
-      ${statusFilter ? `WHERE derived_status = $${paramIndex}` : ''}
-    `;
-    const countParams = [...baseParams];
-    if (statusFilter) {
-      countParams.push(statusFilter);
-    }
-    const countResult = await pool.query(countQuery, countParams);
-    const total = parseInt(countResult.rows[0]?.total || 0);
-
-    res.json({
-      data: result.rows,
-      total
-    });
-  } catch (err) {
-    console.error("Error fetching containers:", err);
-    res.status(500).json({ error: 'Failed to fetch containers' });
-  }
-}
 export async function getAllContainers(req, res) {
+  console.log("getAllContainers called with query:", req.query);
   try {
-    const { container_number, container_size, container_type, owner_type, status = 'Available', location, page = 1, limit = 10, includeOrder = 'false' } = req.query;
+    const { container_number, container_size, container_type, owner_type, status = '', location, page = 1, limit = 100, includeOrder = 'false' } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let whereClause = 'cm.status = 1';
-    let values = [];
+    let baseValues = [];
 
     if (container_number) {
-      whereClause += ' AND cm.container_number ILIKE $' + (values.length + 1);
-      values.push(`%${container_number}%`);
+      whereClause += ' AND cm.container_number ILIKE $' + (baseValues.length + 1);
+      baseValues.push(`%${container_number}%`);
     }
     if (container_size) {
-      whereClause += ' AND cm.container_size = $' + (values.length + 1);
-      values.push(container_size);
+      whereClause += ' AND cm.container_size = $' + (baseValues.length + 1);
+      baseValues.push(container_size);
     }
     if (container_type) {
-      whereClause += ' AND cm.container_type = $' + (values.length + 1);
-      values.push(container_type);
+      whereClause += ' AND cm.container_type = $' + (baseValues.length + 1);
+      baseValues.push(container_type);
     }
     if (owner_type) {
-      whereClause += ' AND cm.owner_type = $' + (values.length + 1);
-      values.push(owner_type);
+      whereClause += ' AND cm.owner_type = $' + (baseValues.length + 1);
+      baseValues.push(owner_type);
     }
     if (location) {
-      whereClause += ' AND cs.location ILIKE $' + (values.length + 1);
-      values.push(`%${location}%`);
+      whereClause += ' AND cs.location ILIKE $' + (baseValues.length + 1);
+      baseValues.push(`%${location}%`);
     }
 
     let baseFrom = `
@@ -847,43 +727,74 @@ export async function getAllContainers(req, res) {
       baseFrom += orderJoin;
     }
 
-    // Use CTE to compute derived_status, then filter on it (default to 'Available')
-    const statusFilter = status || 'Available';
-    const statusParamIndex = values.length + 1;  // For derived_status filter
-    const limitParamIndex = statusParamIndex + 1;
-    const offsetParamIndex = limitParamIndex + 1;
-
-    // Main query with CTE
+    // Use CTE to compute derived_status
     const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
-    const fullQuery = `
-      WITH container_summary AS (${innerQuery})
-      SELECT * FROM container_summary 
-      WHERE derived_status = $${statusParamIndex}
-      ORDER BY container_number 
-      LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-    `;
-    values.push(statusFilter, parseInt(limit), offset);
 
-    // Count query with CTE (fixed: no duplicate param)
-    const fullCountQuery = `
-      WITH container_summary AS (${innerQuery})
-      SELECT COUNT(*) as total FROM container_summary 
-      WHERE derived_status = $${statusParamIndex}
+    // Prepare params for limit/offset (always added)
+    let fullParams = [...baseValues];
+    let statusParamIndex = null;
+    let statusWhere = '';
+
+    if (status && status !== '') {
+      // Filter by specific status
+      statusParamIndex = baseValues.length + 1;
+      statusWhere = `WHERE derived_status = $${statusParamIndex}`;
+      fullParams.push(status);
+    }
+
+    // Add limit and offset
+    const limitParamIndex = fullParams.length + 1;
+    const offsetParamIndex = limitParamIndex + 1;
+    fullParams.push(parseInt(limit), offset);
+
+    let fullQuery;
+    if (status && status !== '') {
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ${statusWhere}
+        ORDER BY container_number 
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    } else {
+      // No status filter: show all
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ORDER BY container_number 
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    }
+
+    // Count query
+    let countWhere = whereClause;
+    let countParams = [...baseValues];
+    if (status && status !== '') {
+      const countStatusIndex = baseValues.length + 1;
+      countWhere += ` AND derived_status = $${countStatusIndex}`;
+      countParams.push(status);
+    }
+
+    const countInnerQuery = `${selectClause} ${baseFrom} WHERE ${countWhere}`;
+    const countQuery = `
+      WITH container_summary AS (${countInnerQuery})
+      SELECT COUNT(*) as total FROM container_summary
     `;
-    const countValues = [...values.slice(0, -2)];  // Up to statusFilter only (no limit/offset, no duplicate)
 
     console.log("Generated Query:", fullQuery);  // Add logging for debugging
-    console.log("Generated Count Query:", fullCountQuery);
+    console.log("Generated Count Query:", countQuery);
+    console.log("Full Params:", fullParams);
+    console.log("Count Params:", countParams);
 
-    const rowsResult = await pool.query(fullQuery, values);
-    const countResult = await pool.query(fullCountQuery, countValues);
+    const rowsResult = await pool.query(fullQuery, fullParams);
+    const countResult = await pool.query(countQuery, countParams);
 
     const rows = rowsResult.rows;
 
-    console.log("Fetched containers:", rows.length, "Total:", parseInt(countResult.rows[0].total), "Filters:", { ...req.query, status: statusFilter });
+    console.log("Fetched containers:", rows.length, "Total:", parseInt(countResult.rows[0].total), "Filters:", { ...req.query, status });
     res.json({
       data: rows,
-      total: parseInt(countResult.rows[0].total),
+      total: parseInt(countResult.rows[0].total || 0),
       page: parseInt(page),
       limit: parseInt(limit),
     });

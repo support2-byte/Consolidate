@@ -16,13 +16,14 @@ import {
   getCustomersPanel
 } from "./customer.controller.js"; // Adjust path as needed
 import upload from "../../middleware/upload.js";
+import { get } from "http";
 const router = express.Router();
 // const upload = multer({ storage: multer.memoryStorage() });
 
 router.post("/", createCustomer);
 router.get("/:id", getCustomerById);
 router.get("/", getCustomers);
-router.get("/Panal", getCustomersPanel);
+router.get("/panel", getCustomersPanel);
 
 router.put("/:zoho_id", updateCustomer);
 router.delete("/:zoho_id", deleteCustomer);

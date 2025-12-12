@@ -4,14 +4,15 @@ import fs from "fs"
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
-let zohoAccessToken = null
-const ORG_ID = process.env.ZOHO_BOOKS_ORG_ID;
+let zohoAccessToken = null;
+const ORG_ID = process.env.ZOHO_BOOKS_ORG_ID;  // Unused—consider removing or use in params
+
 export async function getZohoAccessToken() {
   if (zohoAccessToken) return zohoAccessToken;
 
   try {
     const res = await axios.post(
-      "https://accounts.zoho.com/oauth/v2/token", // or .uk depending on org
+      "https://accounts.zoho.com/oauth/v2/token",  // Adjust to .eu/.in if non-US
       null,
       {
         params: {
@@ -41,75 +42,119 @@ export async function getZohoAccessToken() {
     throw err;
   }
 }
-let isSyncRunning = false; // ✅ global flag
+
+// Global sync flag (module-level)
+let isSyncRunning = false;
 
 export async function getCustomersPanel(req, res) {
   console.log("Received request for customer panel sync");
   try {
-    // // If sync already running, just return cached DB data
-    // if (isSyncRunning) {
-    //   console.log("Customer sync already running, returning cached data...");
-    //   const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
-    //   return res.json(rows);
-    // }
+    const { search = 'All', limit = 5000 } = req.query;
 
-    // Begin sync
+    if (isSyncRunning) {
+      console.log("Customer sync already running, returning cached data...");
+      const { rows } = await pool.query(
+        "SELECT * FROM customers ORDER BY created_time DESC LIMIT $1", 
+        [parseInt(limit)]
+      );
+      return res.json(rows);
+    }
+
     isSyncRunning = true;
-    console.log("🔄 Starting Zoho Books customer sync...");
+    console.log("🔄 Starting Zoho Books customer sync with pagination...");
 
     const token = await getZohoAccessToken();
     console.log("Fetched Zoho access token:", { access_token: token });
 
-    const zohoRes = await axios.get(
-      "https://www.zohoapis.com/books/v3/customers",
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          "Content-Type": "application/json",
-        },
-        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-      }
-    );
+    let page = 1;
+    const per_page = 200;
+    let allCustomers = [];
 
-    const contacts = zohoRes.data.contacts || [];
-    const customers = contacts.filter(c => c.contact_type === "customer");
+    let pageContext;
+    do {
+      console.log(`Fetching page ${page}...`);
+      const zohoRes = await axios.get(
+        "https://www.zohoapis.com/books/v3/customers",  // Adjust to .euapis/.inapis if non-US
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            "Content-Type": "application/json",
+          },
+          params: { 
+            organization_id: process.env.ZOHO_BOOKS_ORG_ID,
+            page: page,
+            per_page: per_page 
+          },
+        }
+      );
 
-    for (const c of customers) {
+      // No need to filter—endpoint returns only customers
+      const contacts = zohoRes.data.contacts || [];
+      allCustomers.push(...contacts);
+
+      pageContext = zohoRes.data.page_context;
+      console.log(`Page ${page}: Fetched ${contacts.length} customers. Has more: ${pageContext?.has_more_page}`);
+      
+      page++;
+      // Optional: Rate limit delay (Zoho ~100 calls/min)
+      // await new Promise(r => setTimeout(r, 600));
+    } while (pageContext?.has_more_page === true);
+
+    console.log(`Total customers fetched from Zoho: ${allCustomers.length}`);
+
+    // Sync all to DB
+    for (const c of allCustomers) {
       if (!c.contact_id) continue;
+      
+      // Stringify billing_address (primary); adjust if you want full address or shipping
+      const addressStr = c.billing_address ? JSON.stringify(c.billing_address) : null;
+      
+      // Use Zoho times for accurate ordering (ISO to TIMESTAMPTZ)
+      const createdTime = c.created_time ? new Date(c.created_time).toISOString() : null;
+      const modifiedTime = c.last_modified_time ? new Date(c.last_modified_time).toISOString() : null;
+
       await pool.query(
         `INSERT INTO customers 
           (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-           system_notes, contact_type, status, created_by, modified_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           system_notes, contact_type, status, created_by, modified_by, created_time, modified_time)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (zoho_id) DO UPDATE SET
            contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
            email = COALESCE(EXCLUDED.email, customers.email),
-           address = COALESCE(customers.address, EXCLUDED.address),
+           address = COALESCE(EXCLUDED.address, customers.address),
            zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-           associated_by = COALESCE(customers.associated_by, EXCLUDED.associated_by),
-           system_notes = COALESCE(customers.system_notes, EXCLUDED.system_notes),
+           associated_by = COALESCE(EXCLUDED.associated_by, customers.associated_by),
+           system_notes = COALESCE(EXCLUDED.system_notes, customers.system_notes),
            contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
            status = COALESCE(EXCLUDED.status, customers.status),
            created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-           modified_by = COALESCE(customers.modified_by, EXCLUDED.modified_by)`,
+           modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by),
+           created_time = COALESCE(EXCLUDED.created_time, customers.created_time),
+           modified_time = COALESCE(EXCLUDED.modified_time, customers.modified_time)`,
         [
           c.contact_id,
           c.contact_name || null,
           c.email || null,
-          null,
+          addressStr,  // Fixed: Stringified billing_address
           c.notes || null,
-          null,
-          null,
-          c.contact_type || null,
-          c.status === "active",
-          c.created_by_name || null,
-          c.custom_fields?.cf_updated_by_name || c.updated_by_name || null,
+          null,  // associated_by (add if available, e.g., c.owner_id)
+          null,  // system_notes
+          c.contact_type || null,  // Always "customer"
+          c.status === "active",  // Boolean
+          c.created_by_name || null,  // Null from list; consider single fetch if needed
+          c.custom_fields?.find(cf => cf.label === "Updated By")?.value || c.updated_by_name || null,  // Better: Search custom_fields by label
+          createdTime,
+          modifiedTime,
         ]
       );
     }
 
-    // ✅ After sync, return all from DB
-    const { rows } = await pool.query("SELECT * FROM customers ORDER BY created_time DESC");
+    // Return from DB (ORDER BY zoho created_time for accuracy)
+    const limitQuery = parseInt(limit) > 0 ? `LIMIT $${1}` : '';
+    const { rows } = await pool.query(
+      `SELECT * FROM customers ORDER BY created_time DESC ${limitQuery}`, 
+      limitQuery ? [parseInt(limit)] : []
+    );
     res.json(rows);
 
   } catch (err) {
@@ -124,24 +169,24 @@ export async function getCustomersPanel(req, res) {
       error: `Failed to fetch contacts: ${errorMessage}`,
     });
   } finally {
-    isSyncRunning = false; // ✅ always release lock
+    isSyncRunning = false;
     console.log("✅ Customer sync finished");
   }
 }
-
+// getCustomers remains the same (DB query with search/limit for efficiency)
 export async function getCustomers(req, res) {
   try {
-    const { search = '', limit = 100 } = req.query; // Optional search and limit for dropdown efficiency
+    const { search = '', limit = 50 } = req.query;
 
     let query = "SELECT * FROM customers WHERE 1=1";
     let params = [];
 
-    if (search.trim()) {
+    if (search.trim() && search !== 'All') {  // Ignore 'All' for full list
       query += " AND (contact_name ILIKE $1 OR email ILIKE $1)";
       params.push(`%${search.trim()}%`);
     }
 
-    query += " ORDER BY created_time DESC LIMIT $2";
+    query += ` ORDER BY created_time DESC LIMIT $${params.length + 1}`;
     params.push(parseInt(limit));
 
     const { rows } = await pool.query(query, params);
@@ -151,7 +196,6 @@ export async function getCustomers(req, res) {
     res.status(500).json({ error: 'Failed to fetch customers' });
   }
 }
-
 export async function deleteCustomer(req, res) {
   const { zoho_id } = req.params; // we only need zoho_id for contacts
   const token = await getZohoAccessToken();
@@ -693,42 +737,103 @@ export async function deleteDocument(req, res) {
     });
   }
 }
+// Helper function (add outside the function, e.g., at module level)
+function isEmptyAddress(addrObj) {
+  if (!addrObj || typeof addrObj !== 'object') return true;
+  const fields = ['attention', 'address', 'street2', 'city', 'state_code', 'state', 'zip', 'country', 'county', 'country_code', 'phone', 'fax'];
+  return fields.every(field => !addrObj[field] || addrObj[field].trim() === '');
+}
 
 export async function updateCustomer(req, res) {
+  console.log("Received request to update customer:", req.body);
   const { zoho_id } = req.params;
-  const { contact_name, email, address, zoho_notes, associated_by, system_notes, type } = req.body;
+  const { 
+    contact_name, email, address, zoho_notes, associated_by, system_notes, type, 
+    contact_type: bodyContactType  // Rename to avoid confusion
+  } = req.body;
 
   try {
-    const token = await getZohoAccessToken();
+    // Fetch current from DB
+    const { rows } = await pool.query("SELECT * FROM customers WHERE zoho_id = $1", [zoho_id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+    const currentCustomer = rows[0];
+    console.log("Current DB customer:", { zoho_id, contact_type: currentCustomer.contact_type, type: currentCustomer.type });
 
-    // Build Zoho payload (Zoho needs contact_type)
-    const payload = {
-      contact_name: contact_name || null,
-      email: email || null,
-      notes: zoho_notes || "",
-      contact_type: "customer", // always required by Zoho
-    };
+    // Check for Zoho-updatable changes (exclude local fields)
+    const zohoChanges = { contact_name, email, zoho_notes, address };
+    const hasZohoChanges = Object.values(zohoChanges).some(v => v !== undefined && v !== '' && v !== null);
 
-    const zohoRes = await axios.put(
-      `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
-      payload,
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          "Content-Type": "application/json",
-        },
-        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
+    let zohoCustomer = { ...currentCustomer };  // Start with current
+    if (hasZohoChanges) {
+      const token = await getZohoAccessToken();
+
+      // Build partial payload: NO contact_type!
+      const payload = {};
+      if (contact_name !== undefined && contact_name !== '') {
+        payload.contact_name = contact_name;
       }
-    );
+      if (email !== undefined && email !== '') {
+        payload.primary_email = [{ email_address: email, is_primary: true }];
+      }
+      if (zoho_notes !== undefined && zoho_notes !== '') {
+        payload.notes = zoho_notes;
+      }
+      if (address !== undefined && address !== '' && address !== null) {
+        try {
+          const addrObj = typeof address === 'string' ? 
+            (address.startsWith('{') ? JSON.parse(address) : { address1: address }) : 
+            address;
+          payload.billing_address = addrObj;
+        } catch (e) {
+          console.warn("Invalid address format, skipping Zoho update for address:", e.message);
+        }
+      }
 
-    const zohoCustomer = zohoRes.data.contact;
-    console.log("Zoho update response:", zohoCustomer);
+      // Only call Zoho if payload has at least one field
+      if (Object.keys(payload).length > 0) {
+        console.log("Updating Zoho with payload:", payload);
+        const zohoRes = await axios.put(
+          `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
+          payload,
+          {
+            headers: {
+              Authorization: `Zoho-oauthtoken ${token}`,
+              "Content-Type": "application/json",
+            },
+            params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
+          }
+        );
 
-    const { rows } = await pool.query(
+        zohoCustomer = { ...currentCustomer, ...zohoRes.data.contact };  // Merge updated fields
+        console.log("Zoho updated:", { contact_id: zohoCustomer.contact_id, contact_type: zohoCustomer.contact_type });
+      } else {
+        console.log("No valid Zoho changes; skipping API call");
+      }
+    } else {
+      console.log("Only local changes (type, associated_by, system_notes); skipping Zoho");
+    }
+
+    // Fixed: Check for empty address before stringifying
+    let addressStr = null;
+    if (zohoCustomer.billing_address && !isEmptyAddress(zohoCustomer.billing_address)) {
+      addressStr = JSON.stringify(zohoCustomer.billing_address);
+    } else if (address && !isEmptyAddress(typeof address === 'string' ? JSON.parse(address) : address)) {
+      addressStr = typeof address === 'string' ? address : JSON.stringify(address);
+    } else {
+      addressStr = currentCustomer.address || null;  // Preserve existing if meaningful
+    }
+
+    // Timestamps: Pull from Zoho or default
+    const createdTime = zohoCustomer.created_time || currentCustomer.created_time || null;
+    const modifiedTime = zohoCustomer.last_modified_time || new Date().toISOString();
+
+    const { rows: updatedRows } = await pool.query(
       `INSERT INTO customers 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-         system_notes, type, contact_type, status, created_by, modified_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         system_notes, type, contact_type, status, created_by, modified_by, created_time, modified_time)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (zoho_id) DO UPDATE SET
          contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
          email = COALESCE(EXCLUDED.email, customers.email),
@@ -736,44 +841,74 @@ export async function updateCustomer(req, res) {
          zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
          associated_by = COALESCE(EXCLUDED.associated_by, customers.associated_by),
          system_notes = COALESCE(EXCLUDED.system_notes, customers.system_notes),
-         type = COALESCE(EXCLUDED.type, customers.type),
-         contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
+         type = COALESCE(EXCLUDED.type, customers.type),  -- Local update
+         contact_type = customers.contact_type,  -- ALWAYS preserve Zoho-linked type
          status = COALESCE(EXCLUDED.status, customers.status),
          created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-         modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by)
-       RETURNING zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-                 system_notes, type, contact_type, status, created_by, modified_by`,
+         modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by),
+         created_time = COALESCE(EXCLUDED.created_time, customers.created_time),
+         modified_time = COALESCE(EXCLUDED.modified_time, customers.modified_time)
+       RETURNING *`,
       [
-        zohoCustomer.contact_id,
-        contact_name || zohoCustomer.contact_name || null,
-        email || zohoCustomer.email || null,
-        address || null,
-        zoho_notes || zohoCustomer.notes || null,
-        associated_by || null,
-        system_notes || null,
-        type || null, // frontend
-        zohoCustomer.contact_type || "customer", // Zoho
-        zohoCustomer.status === "active",
-        zohoCustomer.created_by_name || null,
-        zohoCustomer.updated_by_name || null,
+        zoho_id,
+        zohoCustomer.contact_name || contact_name || currentCustomer.contact_name || null,
+        zohoCustomer.primary_email?.[0]?.email_address || email || currentCustomer.email || null,
+        addressStr,  // Now null for empty
+        zohoCustomer.notes || zoho_notes || currentCustomer.zoho_notes || null,
+        associated_by !== undefined ? (associated_by || null) : currentCustomer.associated_by,
+        system_notes !== undefined ? (system_notes || null) : currentCustomer.system_notes,
+        type || currentCustomer.type || null,
+        currentCustomer.contact_type,
+        zohoCustomer.status === "active" || currentCustomer.status,
+        zohoCustomer.created_by_name || currentCustomer.created_by || null,
+        zohoCustomer.updated_by_name || currentCustomer.modified_by || null,
+        createdTime,
+        modifiedTime,
       ]
     );
 
-    console.log("Updated customer:", rows[0]);
-    res.json(rows[0]);
+    console.log("Updated local customer record:", updatedRows[0]);
+    res.json(updatedRows[0]);
+
   } catch (err) {
-    console.error("Update customer failed:", err.response?.data || err.message);
-    const errorMessage = err.response?.data?.message || err.message;
+    // ... (fallback and error handling unchanged)
+    console.error("Update customer failed:", {
+      code: err.response?.data?.code,
+      message: err.response?.data?.message || err.message,
+      status: err.response?.status,
+    });
+
+    // Fallback: If Zoho error, update local fields in DB anyway
+    if (err.response?.status >= 400 && (type !== undefined || associated_by !== undefined || system_notes !== undefined)) {
+      console.log("Zoho failed; forcing local DB update");
+      try {
+        const { rows: fallbackRows } = await pool.query(
+          `UPDATE customers SET 
+             type = COALESCE($1::text, type),
+             associated_by = COALESCE($2::text, associated_by),
+             system_notes = COALESCE($3::text, system_notes),
+             modified_by = COALESCE($4::text, modified_by),
+             modified_time = NOW()
+           WHERE zoho_id = $5
+           RETURNING *`,
+          [type, associated_by || null, system_notes || null, 'System Update', zoho_id]
+        );
+        console.log("Fallback DB update:", fallbackRows[0]);
+        return res.json(fallbackRows[0]);
+      } catch (fallbackErr) {
+        console.error("Fallback DB update failed:", fallbackErr);
+      }
+    }
+
     const statusCode = err.response?.status || 500;
     res.status(statusCode).json({
-      error: `Failed to update customer: ${errorMessage}`,
+      error: `Failed to update customer: ${err.response?.data?.message || err.message}`,
     });
   }
 }
-
-
 // Include createCustomer and getCustomerById from previous messages
 export async function createCustomer(req, res) {
+  console.log("Received request to create customer:", req.body);
   const { contact_name, email, address, zoho_notes, associated_by, system_notes, type } = req.body ?? {};
 
   try {
@@ -788,7 +923,7 @@ export async function createCustomer(req, res) {
     const payload = {
       contact_name: `${contact_name.trim()}`,
       company_name: contact_name.trim(),
-      contact_type: "customer", // Zoho requires this
+      contact_type: req.body.contact_type ||  "customer", // Zoho requires this
       email: email
         ? `${email.split("@")[0]}.${uniqueSuffix}@${email.split("@")[1]}`
         : `test.${uniqueSuffix}@example.com`,

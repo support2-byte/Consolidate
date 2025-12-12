@@ -3,7 +3,7 @@ import {
   createContainer, 
   getAllContainers, 
   getContainerById, 
-  updateContainer, 
+  // updateContainer, 
   deleteContainer,
   getStatuses,
   getLocations,
@@ -11,9 +11,9 @@ import {
   getTypes,
   getOwnershipTypes,
   getUsageHistory,
-  getContainers
+  // getContainers
 } from "./container.controller.js";
-
+import {updateContainer} from "../orders/order.controller.js"
 const router = express.Router();
 
 // Specific dynamic option routes first to avoid :cid capture
