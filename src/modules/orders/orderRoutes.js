@@ -8,7 +8,8 @@ import {
   getOrderByItemRef, 
   assignContainersToOrders,
   // updateOrderStatus,
-  updateReceiverStatus  // New: Import for status update
+  updateReceiverStatus,  // New: Import for status update
+  assignContainersToOrdersAll
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -54,8 +55,11 @@ router.get('/track/:trackingId', getOrderByTrackingId);
 router.get('/track/item/:itemRef', getOrderByItemRef);
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
+router.post('/assign-container', assignContainersToOrders);
 
 // POST /api/orders/assign-container - Assign container to multiple orders
-router.post('/assign-container', assignContainersToOrders);
+// router.post('/:orderId/receivers/:id/assign-container', assignContainersToOrders);
+router.post('/assign-containers-to-orders', assignContainersToOrdersAll);
+
 
 export default router;      
