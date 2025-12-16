@@ -654,30 +654,42 @@ export async function getAllContainers(req, res) {
     const { container_number, container_size, container_type, owner_type, status = '', location, page = 1, limit = 100, includeOrder = 'false' } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let whereClause = 'cm.status = 1';
+    let whereClause = `cm.status = 1`;
     let baseValues = [];
 
     if (container_number) {
-      whereClause += ' AND cm.container_number ILIKE $' + (baseValues.length + 1);
+      whereClause += ` AND cm.container_number ILIKE $${baseValues.length + 1}`;
       baseValues.push(`%${container_number}%`);
     }
     if (container_size) {
-      whereClause += ' AND cm.container_size = $' + (baseValues.length + 1);
+      whereClause += ` AND cm.container_size = $${baseValues.length + 1}`;
       baseValues.push(container_size);
     }
     if (container_type) {
-      whereClause += ' AND cm.container_type = $' + (baseValues.length + 1);
+      whereClause += ` AND cm.container_type = $${baseValues.length + 1}`;
       baseValues.push(container_type);
     }
     if (owner_type) {
-      whereClause += ' AND cm.owner_type = $' + (baseValues.length + 1);
+      whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
       baseValues.push(owner_type);
     }
     if (location) {
-      whereClause += ' AND cs.location ILIKE $' + (baseValues.length + 1);
-      baseValues.push(`%${location}%`);
+      // FIXED: Better normalization to avoid double underscore
+      let normalizedLocation = location.toLowerCase().replace(/\s+/g, '_');
+      if (normalizedLocation.endsWith('_port')) {
+        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
+      } else if (normalizedLocation.includes('port')) {
+        normalizedLocation = normalizedLocation.replace(/_port$/, 'port').replace(/port$/, '_port'); // Handle edge cases
+      } else {
+        normalizedLocation = normalizedLocation.replace(/port$/, '_port'); // Append if ends with 'port'
+      }
+      if (['karachi_port', 'dubai_port'].includes(normalizedLocation)) {
+        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
+        baseValues.push(normalizedLocation);
+      } else {
+        return res.status(400).json({ error: `Invalid location: must be 'karachi_port' or 'dubai_port'` });
+      }
     }
-
     let baseFrom = `
       FROM container_master cm
       LEFT JOIN LATERAL (
@@ -694,7 +706,7 @@ export async function getAllContainers(req, res) {
     let selectClause = `
       SELECT 
         cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
-        cs.location, 
+        COALESCE(cs.location, 'karachi_port') as location,
         CASE 
           WHEN cs.availability = 'Cleared' THEN 'Cleared'
           WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
@@ -732,12 +744,11 @@ export async function getAllContainers(req, res) {
 
     // Prepare params for limit/offset (always added)
     let fullParams = [...baseValues];
-    let statusParamIndex = null;
     let statusWhere = '';
 
     if (status && status !== '') {
       // Filter by specific status
-      statusParamIndex = baseValues.length + 1;
+      const statusParamIndex = baseValues.length + 1;
       statusWhere = `WHERE derived_status = $${statusParamIndex}`;
       fullParams.push(status);
     }
@@ -745,7 +756,7 @@ export async function getAllContainers(req, res) {
     // Add limit and offset
     const limitParamIndex = fullParams.length + 1;
     const offsetParamIndex = limitParamIndex + 1;
-    fullParams.push(parseInt(limit), offset);
+    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
 
     let fullQuery;
     if (status && status !== '') {
@@ -766,19 +777,18 @@ export async function getAllContainers(req, res) {
       `;
     }
 
-    // Count query
-    let countWhere = whereClause;
+    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
     let countParams = [...baseValues];
+    let countStatusWhere = '';
     if (status && status !== '') {
       const countStatusIndex = baseValues.length + 1;
-      countWhere += ` AND derived_status = $${countStatusIndex}`;
+      countStatusWhere = `WHERE derived_status = $${countStatusIndex}`;
       countParams.push(status);
     }
-
-    const countInnerQuery = `${selectClause} ${baseFrom} WHERE ${countWhere}`;
     const countQuery = `
-      WITH container_summary AS (${countInnerQuery})
+      WITH container_summary AS (${innerQuery})
       SELECT COUNT(*) as total FROM container_summary
+      ${countStatusWhere}
     `;
 
     console.log("Generated Query:", fullQuery);  // Add logging for debugging
@@ -809,7 +819,20 @@ export async function getContainerById(req, res) {
     const { includeOrder = 'false' } = req.query;
     let query = `
       SELECT 
-        cm.*, cs.location, cs.availability,
+        cm.*, 
+        cs.location, 
+        CASE 
+          WHEN cs.availability = 'Cleared' THEN 'Cleared'
+          WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+          WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+          WHEN cs.availability = 'Arrived' THEN 'Arrived'
+          WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+          WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+          WHEN cs.availability = 'Returned' THEN 'Returned'
+          ELSE 'Available'
+        END as derived_status,
         cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
         chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination
     `;
@@ -824,8 +847,8 @@ export async function getContainerById(req, res) {
       ) cs ON true
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+      WHERE cm.cid = $1 AND cm.status = 1 AND (cs.location = 'karachi_port' OR cs.location = 'dubai_port')  -- NEW: Enforce valid locations
     `;
-    let whereClause = 'cm.cid = $1 AND cm.status = 1';
 
     if (includeOrder === 'true') {
       query += `,
@@ -836,12 +859,13 @@ export async function getContainerById(req, res) {
         o.final_destination as order_final_destination,
         o.created_at as order_created_at
       `;
-      fromClause += `
+      fromClause = fromClause.replace('WHERE', `
         LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
-      `;
+        WHERE
+      `);
     }
 
-    query += ` ${fromClause} WHERE ${whereClause}`;
+    query += ` ${fromClause}`;
 
     const rowsResult = await pool.query(query, [cid]);
     const rows = rowsResult.rows;
@@ -857,18 +881,41 @@ export async function getContainerById(req, res) {
     res.status(500).json({ error: err.message || 'Failed to fetch container' });
   }
 }
-
-// Usage History endpoint
+// Updated Usage History endpoint - Combines container_status and container_assignment_history for comprehensive usage
 export async function getUsageHistory(req, res) {
   try {
     const { cid } = req.params;
-    const query = `
+    if (!cid || isNaN(parseInt(cid))) {
+      return res.status(400).json({ error: 'Valid CID is required' });
+    }
+    const containerId = parseInt(cid);
+
+    // Union query to combine status changes and assignment events
+    const historyQuery = `
+      -- Status changes from container_status
       SELECT 
-        cs.sid, cs.availability as status, CURRENT_TIMESTAMP as status_date, cs.status_notes, cs.created_by,
-        cm.container_number, cm.owner_type,
-        cpd.owned_by, chd.hired_by,
-        o.id as job_id, o.booking_ref as job_no, o.place_of_loading as pol, o.final_destination as pod,
-        o.created_at as start_date, o.updated_at as end_date,
+        cs.created_time as event_time,
+        'STATUS_CHANGE' as event_type,
+        cs.availability as event_status,
+        NULL as assigned_qty,
+        NULL as action_type,
+        cs.location as location,
+        cs.status_notes as notes,
+        cs.created_by as changed_by,
+        NULL as previous_status,
+        NULL as order_id,
+        NULL as receiver_id,
+        NULL as detail_id,
+        cm.container_number,
+        cm.owner_type,
+        cpd.owned_by,
+        chd.hired_by,
+        o.id as job_id,
+        o.booking_ref as job_no,
+        o.place_of_loading as pol,
+        o.final_destination as pod,
+        o.created_at as start_date,
+        o.updated_at as end_date,
         o.status as order_status
       FROM container_status cs
       JOIN container_master cm ON cs.cid = cm.cid
@@ -877,28 +924,91 @@ export async function getUsageHistory(req, res) {
       LEFT JOIN orders o ON o.associated_container = cm.container_number 
         AND o.status != 'Cancelled'
       WHERE cs.cid = $1
-      ORDER BY cs.sid DESC
+
+      UNION ALL
+
+      -- Assignment events from container_assignment_history
+      SELECT 
+        cah.created_at as event_time,
+        'ASSIGNMENT' as event_type,
+        cah.status as event_status,
+        cah.assigned_qty,
+        cah.action_type,
+        NULL as location,  -- Assignments may not have location; could enhance if needed
+        cah.notes,
+        cah.changed_by,
+        cah.previous_status,
+        cah.order_id,
+        cah.receiver_id,
+        cah.detail_id,
+        cm.container_number,
+        cm.owner_type,
+        cpd.owned_by,
+        chd.hired_by,
+        cah.order_id as job_id,  -- Reuse order_id as job_id
+        o.booking_ref as job_no,
+        o.place_of_loading as pol,
+        o.final_destination as pod,
+        o.created_at as start_date,
+        o.updated_at as end_date,
+        o.status as order_status
+      FROM container_assignment_history cah
+      JOIN container_master cm ON cah.cid = cm.cid
+      LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
+      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+      LEFT JOIN orders o ON cah.order_id = o.id 
+        AND o.status != 'Cancelled'
+      WHERE cah.cid = $1
+
+      ORDER BY event_time DESC
     `;
-    const result = await pool.query(query, [cid]);
+
+    const result = await pool.query(historyQuery, [containerId]);
     const history = result.rows;
 
-    // Format for frontend (group by job if multiple statuses per job)
-    const formattedHistory = history.map(row => ({
-      jobNo: row.job_no || `JOB-${row.status_date.toISOString().split('T')[0].replace(/-/g, '')}`,
-      pol: row.pol || (row.owner_type === 'soc' ? 'Self Depot' : 'Vendor Depot'),
-      pod: row.pod || 'Destination Depot',
-      startDate: row.start_date ? row.start_date.toISOString().split('T')[0] : row.status_date.toISOString().split('T')[0],
-      endDate: row.end_date ? row.end_date.toISOString().split('T')[0] : row.status_date.toISOString().split('T')[0],
-      statusProgression: [row.status], // Extend if grouping multiple statuses
-      linkedOrders: row.job_no ? `ORD-${row.job_id}` : 'N/A',
-      remarks: row.status_notes || `Status: ${row.status} by ${row.created_by}`
-    }));
+    // Format for frontend (group by job if possible; enhance with event details)
+    const formattedHistory = history.map(row => {
+      const eventSummary = row.event_type === 'ASSIGNMENT' 
+        ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
+        : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
+      
+      return {
+        eventTime: row.event_time.toISOString().split('T')[0],  // YYYY-MM-DD
+        eventType: row.event_type,
+        eventSummary: eventSummary,
+        jobNo: row.job_no || `JOB-${row.event_time.toISOString().split('T')[0].replace(/-/g, '')}`,
+        pol: row.pol || (row.owner_type === 'soc' ? 'Self Depot' : 'Vendor Depot'),
+        pod: row.pod || 'Destination Depot',
+        startDate: row.start_date ? row.start_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
+        endDate: row.end_date ? row.end_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
+        statusProgression: [row.event_status],
+        linkedOrders: row.job_no ? `ORD-${row.job_id}` : 'N/A',
+        remarks: row.notes || eventSummary,
+        changedBy: row.changed_by,
+        orderId: row.order_id,
+        receiverId: row.receiver_id,
+        detailId: row.detail_id
+      };
+    });
 
-    console.log(`Fetched ${formattedHistory.length} history entries for container ${cid}`);
-    res.json(formattedHistory);
+    // Optional: Group by job/order for timeline view (if multiple events per job)
+    const groupedHistory = {};
+    formattedHistory.forEach(entry => {
+      const key = entry.jobNo;
+      if (!groupedHistory[key]) {
+        groupedHistory[key] = [];
+      }
+      groupedHistory[key].push(entry);
+    });
+
+    console.log(`Fetched ${formattedHistory.length} combined history events for container ${containerId} (grouped into ${Object.keys(groupedHistory).length} jobs)`);
+    res.json({
+      rawEvents: formattedHistory,  // Detailed event list
+      groupedByJob: groupedHistory  // Aggregated by job for easier UI rendering
+    });
   } catch (err) {
     console.error("Error fetching usage history:", err);
-    res.status(500).json({ error: 'Failed to fetch usage history' });
+    res.status(500).json({ error: 'Failed to fetch usage history', details: err.message });
   }
 }
 
