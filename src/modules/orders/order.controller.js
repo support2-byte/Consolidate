@@ -1470,6 +1470,201 @@ export async function updateOrder(req, res) {
     }
   }
 }
+// export async function getOrders(req, res) {
+//   try {
+//     // FIXED: Sanitize page and limit early to avoid NaN in offset calc
+//     const rawPage = req.query.page || '1';
+//     const rawLimit = req.query.limit || '10';
+//     const safePage = Math.max(1, parseInt(rawPage) || 1);
+//     const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit) || 10)); // Clamp 1-100
+//     const safeOffset = (parseInt(safePage) - 1) * safeLimit;
+//     const { status, booking_ref, container_id } = req.query;
+//     let whereClause = 'WHERE 1=1';
+//     let params = [];
+//     if (status) {
+//       whereClause += ' AND o.status = $' + (params.length + 1);
+//       params.push(status);
+//     }
+//     if (booking_ref) {
+//       whereClause += ' AND o.booking_ref ILIKE $' + (params.length + 1);
+//       params.push(`%${booking_ref}%`);
+//     }
+//     let containerNumbers = []; // To store looked-up container numbers
+//     if (container_id) {
+//       const containerIds = container_id.split(',').map(id => id.trim()).filter(Boolean);
+//       if (containerIds.length > 0) {
+//         // FIXED: Filter valid numeric IDs to avoid NaN/empty in array
+//         const validIds = containerIds.filter(id => !isNaN(parseInt(id)));
+//         if (validIds.length === 0) {
+//           // No valid containers, early return empty
+//           return res.json({
+//             data: [],
+//             pagination: {
+//               page: safePage,
+//               limit: safeLimit,
+//               total: 0,
+//               totalPages: 0
+//             }
+//           });
+//         }
+//         const idArray = validIds.map(id => parseInt(id)); // Now safe: all ints
+//         const containerQuery = {
+//           text: 'SELECT container_number FROM container_master WHERE cid = ANY($1::int[])',
+//           values: [idArray]
+//         };
+//         const containerResult = await pool.query(containerQuery);
+//         containerNumbers = containerResult.rows.map(row => row.container_number).filter(Boolean);
+//         if (containerNumbers.length === 0) {
+//           // No containers found, early return empty
+//           return res.json({
+//             data: [],
+//             pagination: {
+//               page: safePage,
+//               limit: safeLimit,
+//               total: 0,
+//               totalPages: 0
+//             }
+//           });
+//         }
+//         // Conditions for ot.container_id (exact numeric match on CIDs)
+//         const otConditions = validIds.map((idStr) => {
+//           const paramIdx = params.length + 1;
+//           params.push(parseInt(idStr));
+//           return `ot.container_id = $${paramIdx}`;
+//         }).join(' OR ');
+//         // Conditions for cm.container_number (partial ILIKE on looked-up numbers)
+//         const cmConditions = containerNumbers.map((num) => {
+//           const paramIdx = params.length + 1;
+//           params.push(`%${num}%`);
+//           return `cm.container_number ILIKE $${paramIdx}`;
+//         }).join(' OR ');
+//         // FIXED: Conditions for receivers JSONB (add jsonb_typeof check for safety)
+//         const receiverExists = containerNumbers.map((num) => {
+//           const paramIdx = params.length + 1;
+//           params.push(`%${num}%`);
+//           return `EXISTS (
+//             SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
+//             WHERE cont ILIKE $${paramIdx}
+//           )`;
+//         }).join(' OR ');
+//         whereClause += ` AND (
+//           (${otConditions}) OR
+//           (${cmConditions}) OR
+//           EXISTS (
+//             SELECT 1 FROM receivers r
+//             WHERE r.order_id = o.id
+//             AND r.containers IS NOT NULL
+//             AND jsonb_typeof(r.containers) = 'array'
+//             AND (${receiverExists})
+//           )
+//         )`;
+//       }
+//     }
+// let selectFields = [
+//   'o.*', // Core orders
+//   's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner', // From senders
+//   't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic', // From transport_details
+//   't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
+//   't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered', // From transport_details
+//   't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
+//   't.gatepass', // From transport_details
+//   'ot.status AS tracking_status, ot.created_time AS tracking_created_time', // Latest tracking
+//   'ot.container_id', // Explicit for join
+//   'cm.container_number', // From container_master
+//   // FIXED: Subquery for aggregated containers from all receivers (add jsonb_typeof for safety)
+//   'COALESCE((SELECT string_agg(DISTINCT elem, \', \') FROM (SELECT jsonb_array_elements_text(r3.containers) AS elem FROM receivers r3 WHERE r3.order_id = o.id AND r3.containers IS NOT NULL AND jsonb_typeof(r3.containers) = \'array\' AND jsonb_array_length(r3.containers) > 0) AS unnested), \'\') AS receiver_containers_json',
+//   // Updated subquery for full receivers as JSON array per order, using LATERAL with fixed ORDER BY position
+//   `(SELECT COALESCE(json_agg(r2_full ORDER BY r2_full.id), '[]') FROM (
+//     SELECT 
+//       r2.id, r2.order_id, r2.receiver_name, r2.receiver_contact, r2.receiver_address, r2.receiver_email,
+//       r2.total_number, r2.total_weight, r2.receiver_ref, r2.remarks, r2.containers,
+//       r2.status, r2.eta, r2.etd, r2.shipping_line, r2.consignment_vessel, r2.consignment_number,
+//       r2.consignment_marks, r2.consignment_voyage, r2.full_partial, r2.qty_delivered,
+//       sd_full.shippingDetails
+//     FROM receivers r2
+//     LEFT JOIN LATERAL (
+//       SELECT json_agg(
+//         json_build_object(
+//           'id', oi.id,
+//           'order_id', oi.order_id,
+//           'sender_id', oi.sender_id,
+//           'category', COALESCE(oi.category, ''),
+//           'subcategory', COALESCE(oi.subcategory, ''),
+//           'type', COALESCE(oi.type, ''),
+//           'pickupLocation', COALESCE(oi.pickup_location, ''),
+//           'deliveryAddress', COALESCE(oi.delivery_address, ''),
+//           'totalNumber', COALESCE(oi.total_number, 0),
+//           'weight', COALESCE(oi.weight, 0),
+//           'totalWeight', COALESCE(oi.total_weight, 0),
+//           'itemRef', COALESCE(oi.item_ref, ''),
+//           'consignmentStatus', COALESCE(oi.consignment_status, ''),
+//           'shippingLine', COALESCE(oi.shipping_line, ''),
+//           'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
+//           'remainingItems', (COALESCE(oi.total_number, 0) - COALESCE((SELECT SUM(
+//             CASE 
+//               WHEN (elem->>\'assign_total_box\') ~ \'^[0-9]+\$' 
+//               THEN (elem->>\'assign_total_box\')::int 
+//               ELSE 0 
+//             END
+//           ) FROM jsonb_array_elements(COALESCE(oi.container_details, \'[]\'::jsonb)) AS elem), 0))
+//         ) ORDER BY oi.id
+//       ) AS shippingDetails
+//       FROM order_items oi
+//       WHERE oi.receiver_id = r2.id
+//     ) sd_full ON true
+//     WHERE r2.order_id = o.id
+//   ) r2_full) AS receivers`
+// ].join(', ');
+//     // Build joins as array for easier extension (removed receivers join, now in subquery)
+//     let joinsArray = [
+//       'LEFT JOIN senders s ON o.id = s.order_id',
+//       'LEFT JOIN transport_details t ON o.id = t.order_id',
+//       'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true', // Latest tracking
+//       'LEFT JOIN container_master cm ON ot.container_id = cm.cid' // Join to container_master on cid
+//     ];
+//     const joins = joinsArray.join('\n ');
+//     // For count, no need for subqueries or receivers join, but conditions on ot/cm/r are handled via the whereClause (which includes subqueries for r)
+//     const countQuery = `
+//       SELECT COUNT(DISTINCT o.id) as total_count
+//       FROM orders o
+//       ${joins}
+//       ${whereClause}
+//     `;
+//     // Main query (no GROUP BY needed now with subqueries)
+//     const query = `
+//       SELECT ${selectFields}
+//       FROM orders o
+//       ${joins}
+//       ${whereClause}
+//       ORDER BY o.created_at DESC
+//       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+//     `;
+//     // const safeOffset = (parseInt(safePage) - 1) * safeLimit;
+//     // FIXED: Ensure limit/offset are always valid ints (fallback if NaN)
+//     params.push(safeLimit, safeOffset);
+//     const [result, countResult] = await Promise.all([
+//       pool.query(query, params),
+//       pool.query(countQuery, params.slice(0, -2)) // without limit offset
+//     ]);
+//     const total = parseInt(countResult.rows[0].total_count || 0);
+//     res.json({
+//       data: result.rows,
+//       pagination: {
+//         page: safePage,
+//         limit: safeLimit,
+//         total,
+//         totalPages: total === 0 ? 0 : Math.ceil(total / safeLimit)
+//       }
+//     });
+//   } catch (err) {
+//     console.error("Error fetching orders:", err);
+//     if (err.code === '42703') {
+//       return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
+//     }
+//     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
+//   }
+// }
+
 export async function getOrders(req, res) {
   try {
     // FIXED: Sanitize page and limit early to avoid NaN in offset calc
@@ -1560,6 +1755,59 @@ export async function getOrders(req, res) {
         )`;
       }
     }
+    const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+    const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT json_agg(
+          json_build_object(
+            'status', COALESCE(cs.derived_status, CASE WHEN ass.assigned_qty > 0 THEN 'Ready for Loading' ELSE 'Created' END),
+            'container', json_build_object(
+              'cid', u.cid,
+              'container_number', COALESCE(cm.container_number, '')
+            ),
+            'total_number', ${safeIntCast('oi.total_number')},
+            'assign_weight', CASE 
+              WHEN tot.total_ass > 0 AND ass.assigned_qty > 0 THEN 
+                ROUND((ass.assigned_qty::numeric / tot.total_ass::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+              ELSE '0' 
+            END,
+            'remaining_items', (${safeIntCast('oi.total_number')} - COALESCE(tot.total_ass, 0))::text,
+            'assign_total_box', COALESCE(ass.assigned_qty, 0)::text
+          ) ORDER BY COALESCE(cm.container_number, '')
+        )
+        FROM (
+          SELECT (cd_obj->>'cid')::int AS cid
+          FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS cd_obj
+          WHERE (cd_obj->>'cid') ~ '^\\d+$'
+          UNION
+          SELECT cid
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+          GROUP BY cid
+        ) u (cid)
+        LEFT JOIN container_master cm ON u.cid = cm.cid
+        LEFT JOIN LATERAL (
+          SELECT availability AS derived_status
+          FROM container_status
+          WHERE cid = u.cid
+          ORDER BY sid DESC NULLS LAST
+          LIMIT 1
+        ) cs ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS assigned_qty
+          FROM container_assignment_history
+          WHERE detail_id = oi.id AND cid = u.cid
+        ) ass ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS total_ass
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+        ) tot ON true
+        WHERE u.cid IS NOT NULL
+      ), '[]'::json)
+    `;
 let selectFields = [
   'o.*', // Core orders
   's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner', // From senders
@@ -1593,20 +1841,14 @@ let selectFields = [
           'type', COALESCE(oi.type, ''),
           'pickupLocation', COALESCE(oi.pickup_location, ''),
           'deliveryAddress', COALESCE(oi.delivery_address, ''),
-          'totalNumber', COALESCE(oi.total_number, 0),
-          'weight', COALESCE(oi.weight, 0),
-          'totalWeight', COALESCE(oi.total_weight, 0),
+          'totalNumber', ${safeIntCast('oi.total_number')},
+          'weight', ${safeNumericCast('oi.weight')},
+          'totalWeight', ${safeNumericCast('oi.total_weight')},
           'itemRef', COALESCE(oi.item_ref, ''),
           'consignmentStatus', COALESCE(oi.consignment_status, ''),
           'shippingLine', COALESCE(oi.shipping_line, ''),
-          'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-          'remainingItems', (COALESCE(oi.total_number, 0) - COALESCE((SELECT SUM(
-            CASE 
-              WHEN (elem->>\'assign_total_box\') ~ \'^[0-9]+\$' 
-              THEN (elem->>\'assign_total_box\')::int 
-              ELSE 0 
-            END
-          ) FROM jsonb_array_elements(COALESCE(oi.container_details, \'[]\'::jsonb)) AS elem), 0))
+          'containerDetails', ${containerDetailsSub},
+          'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
         ) ORDER BY oi.id
       ) AS shippingDetails
       FROM order_items oi
@@ -1664,6 +1906,7 @@ let selectFields = [
     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
   }
 }
+
 export async function getOrderById(req, res) {
   let client; // For potential tx if needed for calculateETA
   try {
@@ -1711,12 +1954,79 @@ export async function getOrderById(req, res) {
 
     // Updated: Receivers query aligned with createOrder (eta/etd per receiver, containers init empty)
     // Fetch receivers with nested shippingDetails (including container_details from order_items) and remaining_items from containerDetails JSON sum, with fixed ORDER BY position
+    // FIXED: For DB numeric columns, use simple COALESCE(val, 0) to handle NULLs without type coercion errors
+    // For JSON-extracted text fields, use full safe casting with trimming to handle potential invalid strings/spaces
+    const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+    const safeIntFromJson = (jsonPath) => {
+      const trimmed = `TRIM(COALESCE(${jsonPath}, ''))`;
+      return `CASE 
+        WHEN ${trimmed} = '' THEN 0
+        WHEN ${trimmed} ~ '^\\d+$' THEN ${trimmed}::int
+        ELSE 0 
+      END`;
+    };
+    const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT json_agg(
+          json_build_object(
+            'status', COALESCE(cs.derived_status, CASE WHEN ass.assigned_qty > 0 THEN 'Ready for Loading' ELSE 'Created' END),
+            'container', json_build_object(
+              'cid', u.cid,
+              'container_number', COALESCE(cm.container_number, '')
+            ),
+            'total_number', ${safeIntCast('oi.total_number')},
+            'assign_weight', CASE 
+              WHEN tot.total_ass > 0 AND ass.assigned_qty > 0 THEN 
+                ROUND((ass.assigned_qty::numeric / tot.total_ass::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+              ELSE '0' 
+            END,
+            'remaining_items', (${safeIntCast('oi.total_number')} - COALESCE(tot.total_ass, 0))::text,
+            'assign_total_box', COALESCE(ass.assigned_qty, 0)::text
+          ) ORDER BY COALESCE(cm.container_number, '')
+        )
+        FROM (
+          SELECT (cd_obj->>'cid')::int AS cid
+          FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS cd_obj
+          WHERE (cd_obj->>'cid') ~ '^\\d+$'
+          UNION
+          SELECT cid
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+          GROUP BY cid
+        ) u (cid)
+        LEFT JOIN container_master cm ON u.cid = cm.cid
+        LEFT JOIN LATERAL (
+          SELECT availability AS derived_status
+          FROM container_status
+          WHERE cid = u.cid
+          ORDER BY sid DESC NULLS LAST
+          LIMIT 1
+        ) cs ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS assigned_qty
+          FROM container_assignment_history
+          WHERE detail_id = oi.id AND cid = u.cid
+        ) ass ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS total_ass
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+        ) tot ON true
+        WHERE u.cid IS NOT NULL
+      ), '[]'::json)
+    `;
+
     const receiversQuery = `
       SELECT 
         r.id, r.order_id, r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
-        r.total_number, r.total_weight, r.receiver_ref, r.remarks, r.containers,
+        ${safeIntCast('r.total_number')} AS total_number,
+        ${safeNumericCast('r.total_weight')} AS total_weight,
+        r.receiver_ref, r.remarks, r.containers,
         r.status, r.eta, r.etd, r.shipping_line, r.consignment_vessel, r.consignment_number,
-        r.consignment_marks, r.consignment_voyage, r.full_partial, r.qty_delivered,
+        r.consignment_marks, r.consignment_voyage, r.full_partial,
+        ${safeIntCast('r.qty_delivered')} AS qty_delivered,
         sd_full.shippingdetails
       FROM receivers r
       LEFT JOIN LATERAL (
@@ -1730,14 +2040,14 @@ export async function getOrderById(req, res) {
             'type', COALESCE(oi.type, ''),
             'pickupLocation', COALESCE(oi.pickup_location, ''),
             'deliveryAddress', COALESCE(oi.delivery_address, ''),
-            'totalNumber', COALESCE(oi.total_number, 0),
-            'weight', COALESCE(oi.weight, 0),
-            'totalWeight', COALESCE(oi.total_weight, 0),
+            'totalNumber', ${safeIntCast('oi.total_number')},
+            'weight', ${safeNumericCast('oi.weight')},
+            'totalWeight', ${safeNumericCast('oi.total_weight')},
             'itemRef', COALESCE(oi.item_ref, ''),
             'consignmentStatus', COALESCE(oi.consignment_status, ''),
             'shippingLine', COALESCE(oi.shipping_line, ''),
-            'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-            'remainingItems', (COALESCE(oi.total_number, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
+            'containerDetails', ${containerDetailsSub},
+            'remainingItems', (${safeIntCast('oi.total_number')} - COALESCE((SELECT SUM(${safeIntFromJson('elem->>\'assign_total_box\'')}) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
           ) ORDER BY oi.id
         ) AS shippingdetails
         FROM order_items oi
@@ -1780,6 +2090,18 @@ export async function getOrderById(req, res) {
         }
       });
     });
+
+    // Fetch container_assignment_history details for this order
+    const historyQuery = `
+      SELECT 
+        h.*,
+        cm.container_number
+      FROM container_assignment_history h
+      LEFT JOIN container_master cm ON h.cid = cm.cid
+      WHERE h.order_id = $1
+      ORDER BY h.id DESC  -- FIXED: Use 'id' instead of 'created_time' assuming auto-increment primary key
+    `;
+    const historyResult = await client.query(historyQuery, [id]);
 
     // Parse attachments (from orders; aligned with create's attachmentsJson)
     let parsedAttachments = orderRow.attachments || [];
@@ -1859,6 +2181,7 @@ export async function getOrderById(req, res) {
       collection_scope: orderRow.collection_scope,
       qty_delivered: orderRow.qty_delivered,
       receivers,  // With conditional eta/etd, parsed containers, nested shippingDetails with enriched containerDetails and remainingItems from JSON sum
+      assignmentHistory: historyResult.rows,  // NEW: Added full history details
       color: getOrderStatusColor(overallStatus)  // Assumes this function is defined elsewhere
     };
 
@@ -1876,6 +2199,9 @@ export async function getOrderById(req, res) {
     if (err.code === '42601') {  // Syntax error code
       return res.status(500).json({ error: 'SQL syntax error in query. Check logs for details.' });
     }
+    if (err.code === '22P02') {  // NEW: Handle invalid input syntax (casting errors)
+      return res.status(500).json({ error: 'Invalid data format in order details. Please check numeric fields.' });
+    }
     res.status(500).json({ error: 'Failed to fetch order', details: err.message });
   } finally {
     if (client) {
@@ -1884,6 +2210,496 @@ export async function getOrderById(req, res) {
   }
 }
 
+// export async function getOrderById(req , res) {
+//   let client; // For potential tx if needed for calculateETA
+//   try {
+//     const { id } = req.params;
+//     const { includeContainer = 'true' } = req.query;
+
+//     client = await pool.connect(); // Connect for calculateETA if needed
+
+//     // FIXED: Simplified SELECT fields - removed tracking and container joins to avoid schema mismatch
+//     // Only core tables: orders, senders, transport_details
+//     let selectFields = [
+//       'o.*',  // Core orders
+//       's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',  // From senders
+//       't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',  // From transport_details
+//       't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
+//       't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',  // From transport_details
+//       't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
+//       't.gatepass'  // From transport_details
+//     ].join(', ');
+
+//     // FIXED: Simplified joins - only senders and transport_details
+//     let joinsArray = [
+//       'LEFT JOIN senders s ON o.id = s.order_id',
+//       'LEFT JOIN transport_details t ON o.id = t.order_id'
+//     ];
+
+//     const joins = joinsArray.join('\n      ');
+
+//     const query = `
+//       SELECT ${selectFields}
+//       FROM orders o
+//       ${joins}
+//       WHERE o.id = $1
+//     `;
+
+//     const orderResult = await client.query(query, [id]);
+//     if (orderResult.rowCount === 0) {
+//       return res.status(404).json({ error: 'Order not found' });
+//     }
+
+//     const orderRow = orderResult.rows[0];
+
+//     // Log total_assigned_qty for debugging (aligned with createOrder's aggregation potential)
+//     console.log(`[getOrderById ${id}] Order fetched with total_assigned_qty: ${orderRow.total_assigned_qty || 0}`);
+
+//     // Updated: Receivers query aligned with createOrder (eta/etd per receiver, containers init empty)
+//     // Fetch receivers with nested shippingDetails (including container_details from order_items) and remaining_items from containerDetails JSON sum, with fixed ORDER BY position
+//     // FIXED: For DB numeric columns, use simple COALESCE(val, 0) to handle NULLs without type coercion errors
+//     // For JSON-extracted text fields, use full safe casting with trimming to handle potential invalid strings/spaces
+//     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+//     const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+//     const safeIntFromJson = (jsonPath) => {
+//       const trimmed = `TRIM(COALESCE(${jsonPath}, ''))`;
+//       return `CASE 
+//         WHEN ${trimmed} = '' THEN 0
+//         WHEN ${trimmed} ~ '^\\d+$' THEN ${trimmed}::int
+//         ELSE 0 
+//       END`;
+//     };
+
+//     const receiversQuery = `
+//       SELECT 
+//         r.id, r.order_id, r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
+//         ${safeIntCast('r.total_number')} AS total_number,
+//         ${safeNumericCast('r.total_weight')} AS total_weight,
+//         r.receiver_ref, r.remarks, r.containers,
+//         r.status, r.eta, r.etd, r.shipping_line, r.consignment_vessel, r.consignment_number,
+//         r.consignment_marks, r.consignment_voyage, r.full_partial,
+//         ${safeIntCast('r.qty_delivered')} AS qty_delivered,
+//         sd_full.shippingdetails
+//       FROM receivers r
+//       LEFT JOIN LATERAL (
+//         SELECT json_agg(
+//           json_build_object(
+//             'id', oi.id,
+//             'order_id', oi.order_id,
+//             'sender_id', oi.sender_id,
+//             'category', COALESCE(oi.category, ''),
+//             'subcategory', COALESCE(oi.subcategory, ''),
+//             'type', COALESCE(oi.type, ''),
+//             'pickupLocation', COALESCE(oi.pickup_location, ''),
+//             'deliveryAddress', COALESCE(oi.delivery_address, ''),
+//             'totalNumber', ${safeIntCast('oi.total_number')},
+//             'weight', ${safeNumericCast('oi.weight')},
+//             'totalWeight', ${safeNumericCast('oi.total_weight')},
+//             'itemRef', COALESCE(oi.item_ref, ''),
+//             'consignmentStatus', COALESCE(oi.consignment_status, ''),
+//             'shippingLine', COALESCE(oi.shipping_line, ''),
+//             'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
+//             'remainingItems', (${safeIntCast('oi.total_number')} - COALESCE((SELECT SUM(${safeIntFromJson('elem->>\'assign_total_box\'')}) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
+//           ) ORDER BY oi.id
+//         ) AS shippingdetails
+//         FROM order_items oi
+//         WHERE oi.receiver_id = r.id
+//       ) sd_full ON true
+//       WHERE r.order_id = $1
+//       ORDER BY r.id
+//     `;
+//     const receiversResult = await client.query(receiversQuery, [id]);
+//     let receivers = receiversResult.rows.map(row => ({
+//       ...row,
+//       shippingDetails: row.shippingdetails || [],  // Ensure array even if no items; rename to camelCase
+//       containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])  // Clean malformed JSON
+//     }));
+
+//     // NEW: Fetch all containers to enrich containerDetails with container_number
+//     const allContainersQuery = `
+//       SELECT cid, container_number 
+//       FROM container_master
+//       ORDER BY cid
+//     `;
+//     const allContainersResult = await client.query(allContainersQuery);
+//     const allContainersMap = new Map(allContainersResult.rows.map(c => [c.cid, c.container_number]));
+
+//     // Enrich each receiver's shippingDetails.containerDetails with container_number
+//     receivers.forEach(receiver => {
+//       receiver.shippingDetails.forEach(sd => {
+//         if (sd.containerDetails && Array.isArray(sd.containerDetails)) {
+//           sd.containerDetails.forEach(cd => {
+//             const containerCid = cd.container;
+//             if (typeof containerCid === 'number') {
+//               const containerNumber = allContainersMap.get(containerCid) || '';
+//               cd.container = {
+//                 cid: containerCid,
+//                 container_number: containerNumber
+//               };
+//             }
+//             // If already object, assume it's enriched; skip
+//           });
+//         }
+//       });
+//     });
+
+//     // Fetch container_assignment_history details for this order
+//     const historyQuery = `
+//       SELECT 
+//         h.*,
+//         cm.container_number
+//       FROM container_assignment_history h
+//       LEFT JOIN container_master cm ON h.cid = cm.cid
+//       WHERE h.order_id = $1
+//       ORDER BY h.id DESC  -- FIXED: Use 'id' instead of 'created_time' assuming auto-increment primary key
+//     `;
+//     const historyResult = await client.query(historyQuery, [id]);
+
+//     // Parse attachments (from orders; aligned with create's attachmentsJson)
+//     let parsedAttachments = orderRow.attachments || [];
+//     if (typeof orderRow.attachments === 'string') {
+//       if (orderRow.attachments.trim() === '') {
+//         parsedAttachments = [];
+//       } else {
+//         try {
+//           parsedAttachments = JSON.parse(orderRow.attachments);
+//         } catch (parseErr) {
+//           console.warn('Invalid JSON in attachments for order', id, '- treating as single path');
+//           parsedAttachments = [orderRow.attachments];
+//         }
+//       }
+//     }
+
+//     // Parse gatepass (from transport_details via t.gatepass; aligned with create's gatepassJson)
+//     let parsedGatepass = orderRow.gatepass || [];
+//     if (typeof orderRow.gatepass === 'string') {
+//       if (orderRow.gatepass.trim() === '') {
+//         parsedGatepass = [];
+//       } else {
+//         try {
+//           parsedGatepass = JSON.parse(orderRow.gatepass);
+//         } catch (parseErr) {
+//           console.warn('Invalid JSON in gatepass for order', id, '- treating as single path');
+//           parsedGatepass = [orderRow.gatepass];
+//         }
+//       }
+//     }
+
+//     // Format dates to YYYY-MM-DD for frontend (from transport_details; aligned with create)
+//     const formattedOrderRow = {
+//       ...orderRow,
+//       drop_date: orderRow.drop_date ? new Date(orderRow.drop_date).toISOString().split('T')[0] : '',
+//       delivery_date: orderRow.delivery_date ? new Date(orderRow.delivery_date).toISOString().split('T')[0] : ''
+//     };
+
+//     // Derive overall order status based on receivers' statuses (aligned with create's per-receiver status)
+//     let overallStatus = 'Created'; // Default if no receivers
+//     if (receivers.length > 0) {
+//       const receiverStatuses = receivers.map(r => r.status || 'Created');
+//       if (receiverStatuses.includes('Cancelled')) {
+//         overallStatus = 'Cancelled';  // Override: if any cancelled, whole order is
+//       } else {
+//         const statusOrder = { 'Created': 0, 'In Process': 1, 'Ready for Loading': 2, 'Loaded into Container': 3, 'Delivered': 4 };  // Extended for your statuses
+//         const maxStatusIndex = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
+//         overallStatus = Object.keys(statusOrder).find(key => statusOrder[key] === maxStatusIndex) || 'Created';
+//       }
+//     }
+
+//     // Derive overall eta: min eta from receivers with containers assigned (aligned with per-receiver logic)
+//     let overallEta = null;
+//     const receiversWithContainers = receivers.filter(r => {
+//       return (r.shippingDetails || []).some(sd => 
+//         (sd.containerDetails || []).some(cd => cd.container && cd.container.cid)
+//       );
+//     });
+//     if (receiversWithContainers.length > 0) {
+//       const etas = receiversWithContainers
+//         .map(r => r.eta)
+//         .filter(eta => eta)  // Non-null
+//         .map(eta => new Date(eta).getTime())
+//         .sort((a, b) => a - b);  // Earliest first
+//       overallEta = etas.length > 0 ? new Date(etas[0]).toISOString().split('T')[0] : null;
+//     } else {
+//       console.log(`[getOrderById ${id}] No receivers with containers; overall eta hidden`);
+//     }
+
+//     const orderData = {
+//       ...formattedOrderRow,
+//       eta: overallEta,  // Derived overall eta (only if any receiver has containers)
+//       overall_status: overallStatus, // New field for derived status
+//       status: overallStatus, // Override for backward compatibility
+//       attachments: Array.isArray(parsedAttachments) ? parsedAttachments : [],
+//       gatepass: Array.isArray(parsedGatepass) ? parsedGatepass : [],
+//       collection_scope: orderRow.collection_scope,
+//       qty_delivered: orderRow.qty_delivered,
+//       receivers,  // With conditional eta/etd, parsed containers, nested shippingDetails with enriched containerDetails and remainingItems from JSON sum
+//       assignmentHistory: historyResult.rows,  // NEW: Added full history details
+//       color: getOrderStatusColor(overallStatus)  // Assumes this function is defined elsewhere
+//     };
+
+//     console.log(`[getOrderById ${id}] Final response structure: receivers=${orderData.receivers.length}, overall_eta=${overallEta || 'HIDDEN (No Containers)'}, total_assigned_qty=${orderData.total_assigned_qty || 0}`);
+
+//     res.json(orderData);
+//   } catch (err) {
+//     console.error("Error fetching order by ID:", err.message, "Params:", req.params);
+//     if (err.code === '23514') {
+//       return res.status(400).json({ error: 'Invalid value for constrained field' });
+//     }
+//     if (err.code === '42P01' || err.code === '42703') {
+//       return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
+//     }
+//     if (err.code === '42601') {  // Syntax error code
+//       return res.status(500).json({ error: 'SQL syntax error in query. Check logs for details.' });
+//     }
+//     if (err.code === '22P02') {  // NEW: Handle invalid input syntax (casting errors)
+//       return res.status(500).json({ error: 'Invalid data format in order details. Please check numeric fields.' });
+//     }
+//     res.status(500).json({ error: 'Failed to fetch order', details: err.message });
+//   } finally {
+//     if (client) {
+//       client.release();
+//     }
+//   }
+// }
+
+// export async function getOrderById(req, res) {
+//   let client; // For potential tx if needed for calculateETA
+//   try {
+//     const { id } = req.params;
+//     const { includeContainer = 'true' } = req.query;
+
+//     client = await pool.connect(); // Connect for calculateETA if needed
+
+//     // FIXED: Simplified SELECT fields - removed tracking and container joins to avoid schema mismatch
+//     // Only core tables: orders, senders, transport_details
+//     let selectFields = [
+//       'o.*',  // Core orders
+//       's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',  // From senders
+//       't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',  // From transport_details
+//       't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
+//       't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',  // From transport_details
+//       't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
+//       't.gatepass'  // From transport_details
+//     ].join(', ');
+
+//     // FIXED: Simplified joins - only senders and transport_details
+//     let joinsArray = [
+//       'LEFT JOIN senders s ON o.id = s.order_id',
+//       'LEFT JOIN transport_details t ON o.id = t.order_id'
+//     ];
+
+//     const joins = joinsArray.join('\n      ');
+
+//     const query = `
+//       SELECT ${selectFields}
+//       FROM orders o
+//       ${joins}
+//       WHERE o.id = $1
+//     `;
+
+//     const orderResult = await client.query(query, [id]);
+//     if (orderResult.rowCount === 0) {
+//       return res.status(404).json({ error: 'Order not found' });
+//     }
+
+//     const orderRow = orderResult.rows[0];
+
+//     // Log total_assigned_qty for debugging (aligned with createOrder's aggregation potential)
+//     console.log(`[getOrderById ${id}] Order fetched with total_assigned_qty: ${orderRow.total_assigned_qty || 0}`);
+
+//     // Updated: Receivers query aligned with createOrder (eta/etd per receiver, containers init empty)
+//     // Fetch receivers with nested shippingDetails (including container_details from order_items) and remaining_items from containerDetails JSON sum, with fixed ORDER BY position
+//     // FIXED: For DB numeric columns, use simple COALESCE(val, 0) to handle NULLs without type coercion errors
+//     // For JSON-extracted text fields, use full safe casting with trimming to handle potential invalid strings/spaces
+//     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+//     const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+//     const safeIntFromJson = (jsonPath) => {
+//       const trimmed = `TRIM(COALESCE(${jsonPath}, ''))`;
+//       return `CASE 
+//         WHEN ${trimmed} = '' THEN 0
+//         WHEN ${trimmed} ~ '^\\d+$' THEN ${trimmed}::int
+//         ELSE 0 
+//       END`;
+//     };
+
+//     const receiversQuery = `
+//       SELECT 
+//         r.id, r.order_id, r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
+//         ${safeIntCast('r.total_number')} AS total_number,
+//         ${safeNumericCast('r.total_weight')} AS total_weight,
+//         r.receiver_ref, r.remarks, r.containers,
+//         r.status, r.eta, r.etd, r.shipping_line, r.consignment_vessel, r.consignment_number,
+//         r.consignment_marks, r.consignment_voyage, r.full_partial,
+//         ${safeIntCast('r.qty_delivered')} AS qty_delivered,
+//         sd_full.shippingdetails
+//       FROM receivers r
+//       LEFT JOIN LATERAL (
+//         SELECT json_agg(
+//           json_build_object(
+//             'id', oi.id,
+//             'order_id', oi.order_id,
+//             'sender_id', oi.sender_id,
+//             'category', COALESCE(oi.category, ''),
+//             'subcategory', COALESCE(oi.subcategory, ''),
+//             'type', COALESCE(oi.type, ''),
+//             'pickupLocation', COALESCE(oi.pickup_location, ''),
+//             'deliveryAddress', COALESCE(oi.delivery_address, ''),
+//             'totalNumber', ${safeIntCast('oi.total_number')},
+//             'weight', ${safeNumericCast('oi.weight')},
+//             'totalWeight', ${safeNumericCast('oi.total_weight')},
+//             'itemRef', COALESCE(oi.item_ref, ''),
+//             'consignmentStatus', COALESCE(oi.consignment_status, ''),
+//             'shippingLine', COALESCE(oi.shipping_line, ''),
+//             'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
+//             'remainingItems', (${safeIntCast('oi.total_number')} - COALESCE((SELECT SUM(${safeIntFromJson('elem->>\'assign_total_box\'')}) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
+//           ) ORDER BY oi.id
+//         ) AS shippingdetails
+//         FROM order_items oi
+//         WHERE oi.receiver_id = r.id
+//       ) sd_full ON true
+//       WHERE r.order_id = $1
+//       ORDER BY r.id
+//     `;
+//     const receiversResult = await client.query(receiversQuery, [id]);
+//     let receivers = receiversResult.rows.map(row => ({
+//       ...row,
+//       shippingDetails: row.shippingdetails || [],  // Ensure array even if no items; rename to camelCase
+//       containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])  // Clean malformed JSON
+//     }));
+
+//     // NEW: Fetch all containers to enrich containerDetails with container_number
+//     const allContainersQuery = `
+//       SELECT cid, container_number 
+//       FROM container_master
+//       ORDER BY cid
+//     `;
+//     const allContainersResult = await client.query(allContainersQuery);
+//     const allContainersMap = new Map(allContainersResult.rows.map(c => [c.cid, c.container_number]));
+
+//     // Enrich each receiver's shippingDetails.containerDetails with container_number
+//     receivers.forEach(receiver => {
+//       receiver.shippingDetails.forEach(sd => {
+//         if (sd.containerDetails && Array.isArray(sd.containerDetails)) {
+//           sd.containerDetails.forEach(cd => {
+//             const containerCid = cd.container;
+//             if (typeof containerCid === 'number') {
+//               const containerNumber = allContainersMap.get(containerCid) || '';
+//               cd.container = {
+//                 cid: containerCid,
+//                 container_number: containerNumber
+//               };
+//             }
+//             // If already object, assume it's enriched; skip
+//           });
+//         }
+//       });
+//     });
+
+//     // Parse attachments (from orders; aligned with create's attachmentsJson)
+//     let parsedAttachments = orderRow.attachments || [];
+//     if (typeof orderRow.attachments === 'string') {
+//       if (orderRow.attachments.trim() === '') {
+//         parsedAttachments = [];
+//       } else {
+//         try {
+//           parsedAttachments = JSON.parse(orderRow.attachments);
+//         } catch (parseErr) {
+//           console.warn('Invalid JSON in attachments for order', id, '- treating as single path');
+//           parsedAttachments = [orderRow.attachments];
+//         }
+//       }
+//     }
+
+//     // Parse gatepass (from transport_details via t.gatepass; aligned with create's gatepassJson)
+//     let parsedGatepass = orderRow.gatepass || [];
+//     if (typeof orderRow.gatepass === 'string') {
+//       if (orderRow.gatepass.trim() === '') {
+//         parsedGatepass = [];
+//       } else {
+//         try {
+//           parsedGatepass = JSON.parse(orderRow.gatepass);
+//         } catch (parseErr) {
+//           console.warn('Invalid JSON in gatepass for order', id, '- treating as single path');
+//           parsedGatepass = [orderRow.gatepass];
+//         }
+//       }
+//     }
+
+//     // Format dates to YYYY-MM-DD for frontend (from transport_details; aligned with create)
+//     const formattedOrderRow = {
+//       ...orderRow,
+//       drop_date: orderRow.drop_date ? new Date(orderRow.drop_date).toISOString().split('T')[0] : '',
+//       delivery_date: orderRow.delivery_date ? new Date(orderRow.delivery_date).toISOString().split('T')[0] : ''
+//     };
+
+//     // Derive overall order status based on receivers' statuses (aligned with create's per-receiver status)
+//     let overallStatus = 'Created'; // Default if no receivers
+//     if (receivers.length > 0) {
+//       const receiverStatuses = receivers.map(r => r.status || 'Created');
+//       if (receiverStatuses.includes('Cancelled')) {
+//         overallStatus = 'Cancelled';  // Override: if any cancelled, whole order is
+//       } else {
+//         const statusOrder = { 'Created': 0, 'In Process': 1, 'Ready for Loading': 2, 'Loaded into Container': 3, 'Delivered': 4 };  // Extended for your statuses
+//         const maxStatusIndex = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
+//         overallStatus = Object.keys(statusOrder).find(key => statusOrder[key] === maxStatusIndex) || 'Created';
+//       }
+//     }
+
+//     // Derive overall eta: min eta from receivers with containers assigned (aligned with per-receiver logic)
+//     let overallEta = null;
+//     const receiversWithContainers = receivers.filter(r => {
+//       return (r.shippingDetails || []).some(sd => 
+//         (sd.containerDetails || []).some(cd => cd.container && cd.container.cid)
+//       );
+//     });
+//     if (receiversWithContainers.length > 0) {
+//       const etas = receiversWithContainers
+//         .map(r => r.eta)
+//         .filter(eta => eta)  // Non-null
+//         .map(eta => new Date(eta).getTime())
+//         .sort((a, b) => a - b);  // Earliest first
+//       overallEta = etas.length > 0 ? new Date(etas[0]).toISOString().split('T')[0] : null;
+//     } else {
+//       console.log(`[getOrderById ${id}] No receivers with containers; overall eta hidden`);
+//     }
+
+//     const orderData = {
+//       ...formattedOrderRow,
+//       eta: overallEta,  // Derived overall eta (only if any receiver has containers)
+//       overall_status: overallStatus, // New field for derived status
+//       status: overallStatus, // Override for backward compatibility
+//       attachments: Array.isArray(parsedAttachments) ? parsedAttachments : [],
+//       gatepass: Array.isArray(parsedGatepass) ? parsedGatepass : [],
+//       collection_scope: orderRow.collection_scope,
+//       qty_delivered: orderRow.qty_delivered,
+//       receivers,  // With conditional eta/etd, parsed containers, nested shippingDetails with enriched containerDetails and remainingItems from JSON sum
+//       color: getOrderStatusColor(overallStatus)  // Assumes this function is defined elsewhere
+//     };
+
+//     console.log(`[getOrderById ${id}] Final response structure: receivers=${orderData.receivers.length}, overall_eta=${overallEta || 'HIDDEN (No Containers)'}, total_assigned_qty=${orderData.total_assigned_qty || 0}`);
+
+//     res.json(orderData);
+//   } catch (err) {
+//     console.error("Error fetching order by ID:", err.message, "Params:", req.params);
+//     if (err.code === '23514') {
+//       return res.status(400).json({ error: 'Invalid value for constrained field' });
+//     }
+//     if (err.code === '42P01' || err.code === '42703') {
+//       return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
+//     }
+//     if (err.code === '42601') {  // Syntax error code
+//       return res.status(500).json({ error: 'SQL syntax error in query. Check logs for details.' });
+//     }
+//     if (err.code === '22P02') {  // NEW: Handle invalid input syntax (casting errors)
+//       return res.status(500).json({ error: 'Invalid data format in order details. Please check numeric fields.' });
+//     }
+//     res.status(500).json({ error: 'Failed to fetch order', details: err.message });
+//   } finally {
+//     if (client) {
+//       client.release();
+//     }
+//   }
+// }
 // // Helper: Compute days until ETA (dynamic today)
 // function computeDaysUntilEta(etaDateStr, today = new Date()) {  // Dynamic: Default to current date
 //   if (!etaDateStr) return null;
@@ -3177,6 +3993,1065 @@ function computeDaysUntilEtaAll(etaStr) {
   return Math.max(0, Math.ceil((eta - now) / (24 * 60 * 60 * 1000)));
 }
 
+// export async function assignContainersToOrdersAll(req, res) {
+//   console.log('Received request to assign containers to orders', req.body);
+//   let client;
+//   try {
+//     client = await pool.connect();
+//     await client.query('BEGIN');
+//     const updates = req.body || {};
+//     const created_by = req.user?.id || 'system';
+
+//     let assignments = updates.assignments || updates;
+//     if (!assignments || typeof assignments !== 'object') {
+//       assignments = {}; // Ensure it's an object even if invalid
+//     }
+
+//     let assignmentOrderIds = Object.keys(assignments).filter(k => !isNaN(parseInt(k))).map(k => parseInt(k));
+//     let explicitOrderIds = (updates.order_ids || updates.orderIds || []).filter(id => !isNaN(parseInt(id)));
+//     let orderIds = [...new Set([...assignmentOrderIds, ...explicitOrderIds])].filter(id => id > 0);
+
+//     console.log('Assign containers body:', JSON.stringify(updates, null, 2));
+//     console.log('Extracted orderIds:', orderIds);
+
+//     if (orderIds.length === 0) {
+//       await client.query('ROLLBACK');
+//       return res.status(400).json({ error: 'orderIds array is required and must not be empty' });
+//     }
+
+//     const allContainerIds = new Set();
+//     let parsedCount = 0;
+//     const resolvedAssignments = JSON.parse(JSON.stringify(assignments));
+//     for (const [orderIdStr, orderAssign] of Object.entries(assignments)) {
+//       if (typeof orderAssign !== 'object') continue;
+//       console.log(`Parsing order ${orderIdStr}: ${Object.keys(orderAssign).length} receivers`);
+//       for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
+//         if (typeof recAssign !== 'object' || recAssign === null) continue;
+//         console.log(`  Parsing receiver ${recIdStr}: ${Object.keys(recAssign).length} details`);
+//         for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
+//           if (detailAssign && typeof detailAssign === 'object') {
+//             console.log(`    Detail ${detailIdxStr}: qty=${detailAssign.qty}, containers=${JSON.stringify(detailAssign.containers)}`);
+//             if (Array.isArray(detailAssign.containers)) {
+//               detailAssign.containers.forEach((contIdStr) => {
+//                 allContainerIds.add(String(contIdStr));
+//                 parsedCount++;
+//                 console.log(`      Added container ID "${contIdStr}"`);
+//               });
+//             } else {
+//               console.warn(`    No valid containers array in detail ${detailIdxStr}`);
+//             }
+//           }
+//         }
+//       }
+//     }
+//     console.log(`Total unique container IDs extracted for specific: ${allContainerIds.size} (parsed ${parsedCount} items)`);
+
+//     const resolvedCids = new Set();
+//     let fullContainerMap = new Map();
+//     let containerIdToCidMap = new Map();
+//     const singleContainerStr = updates.container_number || updates.container_id || updates.cid;
+//     let singleMode = false;
+//     let singleCid = null;
+//     let singleContNum = null;
+//     let singleFullCont = null;
+//     let singlePriorLocation = 'karachi_port';
+//     let singlePreviousStatus = 'Available';
+
+//     if (allContainerIds.size > 0) {
+//       // Original specific handling
+//       const stringIds = Array.from(allContainerIds).filter(id => isNaN(parseInt(id)));
+//       const numericIds = Array.from(allContainerIds).filter(id => !isNaN(parseInt(id))).map(id => parseInt(id));
+//       const containerQuery = `
+//         SELECT 
+//           cm.*,
+//           cs.location as status_location,
+//           cs.availability as current_availability,
+//           chd.hire_start_date,
+//           chd.hire_end_date,
+//           CASE 
+//             WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//             WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//             WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//             WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//             WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//             WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//             WHEN cs.availability = 'Returned' THEN 'Returned'
+//             ELSE 'Available'
+//           END as derived_status
+//         FROM container_master cm
+//         LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//         LEFT JOIN (
+//           SELECT DISTINCT ON (cid) cid, location, availability
+//           FROM container_status
+//           ORDER BY cid, sid DESC NULLS LAST
+//         ) cs ON cm.cid = cs.cid
+//         WHERE (cm.container_number = ANY($1::text[]) OR cm.cid = ANY($2::int[]))
+//           AND (
+//             CASE 
+//               WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//               WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//               WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//               WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//               WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//               WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//               WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//               WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//               WHEN cs.availability = 'Returned' THEN 'Returned'
+//               ELSE 'Available'
+//             END
+//           ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
+//       `;
+//       const containerResult = await client.query(containerQuery, [stringIds, numericIds]);
+//       console.log('Container query for specific IDs', Array.from(allContainerIds), 'returned', containerResult.rows.length, 'rows');
+//       fullContainerMap = new Map(containerResult.rows.map(row => [row.cid, row]));
+//       containerResult.rows.forEach(row => {
+//         containerIdToCidMap.set(row.container_number, row.cid);
+//         containerIdToCidMap.set(String(row.cid), row.cid);
+//       });
+//       const missingIds = Array.from(allContainerIds).filter(contId => !containerIdToCidMap.has(String(contId)));
+//       if (missingIds.length > 0) {
+//         console.warn(`Skipping unavailable specific containers: ${missingIds.join(', ')}`);
+//       }
+//       if (containerResult.rows.length === 0 && allContainerIds.size > 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ error: 'No valid available containers specified in assignments' });
+//       }
+//       // Resolve specific
+//       let totalSkippedInAssignments = 0;
+//       for (const [orderIdStr, orderAssign] of Object.entries(resolvedAssignments)) {
+//         for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
+//           for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
+//             if (Array.isArray(detailAssign.containers)) {
+//               const originalCount = detailAssign.containers.length;
+//               detailAssign.containers = detailAssign.containers
+//                 .map(contIdStr => {
+//                   const cid = containerIdToCidMap.get(String(contIdStr));
+//                   if (cid !== undefined) {
+//                     resolvedCids.add(cid);
+//                   }
+//                   return cid;
+//                 })
+//                 .filter(cid => cid !== undefined);
+//               const skippedInThis = originalCount - detailAssign.containers.length;
+//               totalSkippedInAssignments += skippedInThis;
+//               if (detailAssign.containers.length === 0) {
+//                 delete recAssign[detailIdxStr];
+//               }
+//             }
+//           }
+//           if (Object.keys(recAssign).length === 0) {
+//             delete orderAssign[recIdStr];
+//           }
+//         }
+//         if (Object.keys(orderAssign).length === 0) {
+//           delete resolvedAssignments[orderIdStr];
+//         }
+//       }
+//       console.log(`Skipped ${totalSkippedInAssignments} specific container assignments due to unavailability`);
+//     }
+
+//     // Check for single mode from explicit single or from resolved single
+//     let isSingleFromExplicit = false;
+//     if (singleContainerStr) {
+//       isSingleFromExplicit = true;
+//       const stringIds = [singleContainerStr];
+//       const numericIds = isNaN(parseInt(singleContainerStr)) ? [] : [parseInt(singleContainerStr)];
+//       const containerQuery = `
+//         SELECT 
+//           cm.*,
+//           cs.location as status_location,
+//           cs.availability as current_availability,
+//           chd.hire_start_date,
+//           chd.hire_end_date,
+//           CASE 
+//             WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//             WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//             WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//             WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//             WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//             WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//             WHEN cs.availability = 'Returned' THEN 'Returned'
+//             ELSE 'Available'
+//           END as derived_status
+//         FROM container_master cm
+//         LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//         LEFT JOIN (
+//           SELECT DISTINCT ON (cid) cid, location, availability
+//           FROM container_status
+//           ORDER BY cid, sid DESC NULLS LAST
+//         ) cs ON cm.cid = cs.cid
+//         WHERE (cm.container_number = ANY($1::text[]) OR cm.cid = ANY($2::int[]))
+//           AND (
+//             CASE 
+//               WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//               WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//               WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//               WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//               WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//               WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//               WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//               WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//               WHEN cs.availability = 'Returned' THEN 'Returned'
+//               ELSE 'Available'
+//             END
+//           ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
+//       `;
+//       const containerResult = await client.query(containerQuery, [stringIds, numericIds]);
+//       if (containerResult.rows.length === 0 || !containerResult.rows[0].derived_status || !['Available', 'Assigned to Job'].includes(containerResult.rows[0].derived_status)) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ error: 'Selected container is not available or not in eligible status' });
+//       }
+//       singleFullCont = containerResult.rows[0];
+//       singleCid = singleFullCont.cid;
+//       singleContNum = singleFullCont.container_number;
+//       resolvedCids.add(singleCid);
+//       fullContainerMap = new Map([[singleCid, singleFullCont]]);
+//       containerIdToCidMap.set(singleContNum, singleCid);
+//       containerIdToCidMap.set(String(singleCid), singleCid);
+
+//       // Fetch prior location
+//       const priorQuerySingle = `
+//         SELECT DISTINCT ON (cid) cid, location
+//         FROM container_status 
+//         WHERE cid = $1 ORDER BY cid, created_time DESC
+//       `;
+//       const priorResult = await client.query(priorQuerySingle, [singleCid]);
+//       singlePriorLocation = priorResult.rows[0]?.location || 'karachi_port';
+
+//       // Fetch previous status
+//       const prevStatusQuery = `
+//         SELECT availability as status
+//         FROM container_status
+//         WHERE cid = $1
+//         ORDER BY created_time DESC
+//         LIMIT 1
+//       `;
+//       const prevStatusResult = await client.query(prevStatusQuery, [singleCid]);
+//       singlePreviousStatus = prevStatusResult.rows[0]?.status || 'Available';
+//     }
+
+//     // Set singleMode if only one container resolved
+//     if (resolvedCids.size === 1) {
+//       singleMode = true;
+//       singleCid = Array.from(resolvedCids)[0];
+//       singleFullCont = fullContainerMap.get(singleCid);
+//       singleContNum = singleFullCont.container_number;
+//       // Fetch prior if not set
+//       if (!isSingleFromExplicit) {
+//         const priorQuerySingle = `
+//           SELECT DISTINCT ON (cid) cid, location
+//           FROM container_status 
+//           WHERE cid = $1 ORDER BY cid, created_time DESC
+//         `;
+//         const priorResult = await client.query(priorQuerySingle, [singleCid]);
+//         singlePriorLocation = priorResult.rows[0]?.location || 'karachi_port';
+
+//         const prevStatusQuery = `
+//           SELECT availability as status
+//           FROM container_status
+//           WHERE cid = $1
+//           ORDER BY created_time DESC
+//           LIMIT 1
+//         `;
+//         const prevStatusResult = await client.query(prevStatusQuery, [singleCid]);
+//         singlePreviousStatus = prevStatusResult.rows[0]?.status || 'Available';
+//       }
+//       console.log(`Detected single container mode for container ${singleContNum}, will assign to all remaining details`);
+//     } else if (resolvedCids.size > 1 || allContainerIds.size > 1) {
+//       singleMode = false;
+//     }
+
+//     // Batched: Fetch prior physical locations for resolved CIDs (for specific multi)
+//     const priorQuery = `
+//       SELECT DISTINCT ON (cid) cid, location
+//       FROM container_status 
+//       WHERE cid = ANY($1) ORDER BY cid, created_time DESC
+//     `;
+//     let priorLocations = new Map();
+//     if (resolvedCids.size > 0 && !singleMode) {
+//       const priorResult = await client.query(priorQuery, [Array.from(resolvedCids)]);
+//       priorLocations = new Map(priorResult.rows.map(row => [row.cid, row.location || 'karachi_port']));
+//     } else if (singleMode) {
+//       priorLocations = new Map([[singleCid, singlePriorLocation]]);
+//     }
+
+//     // Track updates
+//     const updatedOrders = [];
+//     const trackingData = [];
+//     const orderAssignedQtys = new Map();
+//     const currentOrders = {};
+//     const currentReceiversByOrder = {};
+//     for (const orderId of orderIds) {
+//       const orderQuery = `
+//         SELECT id, booking_ref, status as overall_status, total_assigned_qty, eta 
+//         FROM orders 
+//         WHERE id = $1
+//       `;
+//       const orderResult = await client.query(orderQuery, [orderId]);
+//       if (orderResult.rowCount === 0) continue;
+//       currentOrders[orderId] = orderResult.rows[0];
+//       const receiversQuery = `
+//         SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+//         FROM receivers 
+//         WHERE order_id = $1
+//       `;
+//       const receiversResult = await client.query(receiversQuery, [orderId]);
+//       currentReceiversByOrder[orderId] = receiversResult.rows;
+//     }
+
+//     const logQuery = `
+//       INSERT INTO container_assignment_history (
+//         cid, container_number, order_id, receiver_id, detail_id, assigned_qty, status, action_type, changed_by, notes, previous_status
+//       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+//     `;
+
+//     const statusInsertQuery = `
+//       INSERT INTO container_status (cid, availability, location, status_notes, created_by, created_time) 
+//       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+//     `;
+
+//     const skippedDetails = [];
+//     const currentAssignedQuery = `
+//       SELECT COALESCE(SUM(assigned_qty), 0) as current_assigned
+//       FROM container_assignment_history 
+//       WHERE detail_id = $1
+//     `;
+
+//     // Helper function for assigning to a detail (with availability check) - for specific multi
+//     async function assignToDetail(orderId, recId, detailId, qty, cids, fullContainerMap, priorLocations, receiverEta = null) {
+//       try {
+//         const orderItemQuery = `
+//           SELECT total_number, weight
+//           FROM order_items 
+//           WHERE id = $1
+//         `;
+//         const orderItemResult = await client.query(orderItemQuery, [detailId]);
+//         if (orderItemResult.rowCount === 0) return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+//         const orderItem = orderItemResult.rows[0];
+//         const totalNumber = parseInt(orderItem.total_number) || 0;
+//         const detailWeight = parseFloat(orderItem.weight) || 0;
+//         const currentAssignedResult = await client.query(currentAssignedQuery, [detailId]);
+//         const currentAssigned = parseInt(currentAssignedResult.rows[0].current_assigned) || 0;
+//         const remainingBefore = totalNumber - currentAssigned;
+//         let detailQty = Math.min(qty, remainingBefore);
+//         if (detailQty <= 0) {
+//           console.warn(`No remaining qty for detail ${detailId}`);
+//           return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+//         }
+//         const totalAssigned = currentAssigned + detailQty;
+//         const remainingItems = totalNumber - totalAssigned;
+//         const assignedDetailWeight = detailWeight * (detailQty / totalNumber || 0);
+//         const numNewConts = cids.length;
+//         if (numNewConts === 0) return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+//         let remainingQtyToAssign = detailQty;
+//         let remainingWeightToAssign = assignedDetailWeight;
+//         let sumThis = 0;
+//         let newContNumbers = new Set();
+//         let pendingLogs = [];
+//         let pendingStatusInserts = [];
+//         for (let i = 0; i < numNewConts; i++) {
+//           const cid = cids[i];
+//           // Refetch availability to handle race
+//           const availQuery = `
+//             SELECT 
+//               CASE 
+//                 WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//                 WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//                 WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//                 WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//                 WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//                 WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//                 WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//                 WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//                 WHEN cs.availability = 'Returned' THEN 'Returned'
+//                 ELSE 'Available'
+//               END as derived_status
+//             FROM container_master cm
+//             LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//             LEFT JOIN (
+//               SELECT DISTINCT ON (cid) cid, location, availability
+//               FROM container_status
+//               ORDER BY cid, sid DESC NULLS LAST
+//             ) cs ON cm.cid = cs.cid
+//             WHERE cm.cid = $1
+//           `;
+//           const availResult = await client.query(availQuery, [cid]);
+//           if (availResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(availResult.rows[0].derived_status)) {
+//             console.warn(`Container ${cid} no longer eligible during assignment`);
+//             continue;
+//           }
+//           const fullCont = fullContainerMap.get(cid);
+//           if (!fullCont) continue;
+//           const contNum = fullCont.container_number;
+//           newContNumbers.add(contNum);
+//           const isLast = i === numNewConts - 1;
+//           const thisQty = isLast ? remainingQtyToAssign : Math.floor(detailQty / numNewConts);
+//           const thisWeight = isLast ? remainingWeightToAssign : assignedDetailWeight * (Math.floor(detailQty / numNewConts) / detailQty);
+//           remainingQtyToAssign -= thisQty;
+//           remainingWeightToAssign -= thisWeight;
+//           const priorLocation = priorLocations.get(cid) || 'karachi_port';
+//           const prevStatusResult = await client.query(`
+//             SELECT availability as status
+//             FROM container_status
+//             WHERE cid = $1
+//             ORDER BY created_time DESC
+//             LIMIT 1
+//           `, [cid]);
+//           const previousStatus = prevStatusResult.rows[0]?.status || 'Available';
+//           let enhancedStatusNotes = `Assigned ${thisQty} items from ${priorLocation.toUpperCase()} to Order ${orderId} / Receiver ${recId} / Detail ${detailId} / Cont ${contNum}`;
+//           let enhancedLogNotes = `Assigned ${thisQty} items to container ${contNum} for Order ${orderId} / Receiver ${recId} / Detail ${detailId} (remaining: ${remainingItems}) from ${priorLocation.toUpperCase()}`;
+//           // Optional: Log for reassignments
+//           if (fullCont.derived_status === 'Assigned to Job') {
+//             console.warn(`Reassigning already 'Assigned to Job' container ${contNum} (CID ${cid}) to new detail ${detailId}`);
+//             enhancedLogNotes += ' (Reassignment from prior job)';
+//           }
+//           pendingLogs.push([
+//             cid,
+//             contNum,
+//             orderId,
+//             recId,
+//             detailId,
+//             thisQty,
+//             'Assigned to Job',
+//             'ASSIGN',
+//             created_by,
+//             enhancedLogNotes,
+//             previousStatus
+//           ]);
+//           pendingStatusInserts.push([cid, priorLocation, enhancedStatusNotes, created_by]);
+//           sumThis += thisQty;
+//         }
+//         // Insert
+//         for (let k = 0; k < pendingLogs.length; k++) {
+//           const logValues = pendingLogs[k];
+//           const tempNotes = logValues[9];
+//           const fullNotes = `${tempNotes} (ETA: ${receiverEta || 'N/A'})`;
+//           logValues[9] = fullNotes;
+//           await client.query(logQuery, logValues);
+//         }
+//         for (let k = 0; k < pendingStatusInserts.length; k++) {
+//           const [cid, location, tempStatusNotes, created_by_val] = pendingStatusInserts[k];
+//           const fullStatusNotes = `${tempStatusNotes} (ETA: ${receiverEta || 'N/A'})`;
+//           await client.query(statusInsertQuery, [cid, 'Assigned to Job', location, fullStatusNotes, created_by_val]);
+//         }
+//         return { assigned: sumThis, newContNumbers, logs: pendingLogs, statusInserts: pendingStatusInserts };
+//       } catch (err) {
+//         console.error(`Error in assignToDetail for detail ${detailId}:`, err);
+//         return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+//       }
+//     }
+
+//     // Helper to get available containers - for auto multi
+//     async function getAvailableContainers() {
+//       const availQuery = `
+//         SELECT 
+//           cm.*,
+//           cs.location as status_location,
+//           cs.availability as current_availability,
+//           chd.hire_start_date,
+//           chd.hire_end_date,
+//           CASE 
+//             WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//             WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//             WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//             WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//             WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//             WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//             WHEN cs.availability = 'Returned' THEN 'Returned'
+//             ELSE 'Available'
+//           END as derived_status
+//         FROM container_master cm
+//         LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//         LEFT JOIN (
+//           SELECT DISTINCT ON (cid) cid, location, availability
+//           FROM container_status
+//           ORDER BY cid, sid DESC NULLS LAST
+//         ) cs ON cm.cid = cs.cid
+//         WHERE (
+//           CASE 
+//             WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//             WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//             WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//             WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//             WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//             WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//             WHEN cs.availability = 'Returned' THEN 'Returned'
+//             ELSE 'Available'
+//           END
+//         ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
+//         ORDER BY cm.cid
+//       `;
+//       const availResult = await client.query(availQuery);
+//       return availResult.rows;
+//     }
+
+//     for (const orderId of orderIds) {
+//       const orderAssignments = resolvedAssignments[orderId] || {};
+//       const currentOrder = currentOrders[orderId];
+//       if (!currentOrder) continue;
+//       let currentTotalAssigned = parseInt(currentOrder.total_assigned_qty) || 0;
+//       let assignedForThisOrder = 0;
+//       let assignedGrossWeight = 0;
+//       let assignedCount = 0;
+//       const orderReceivers = [];
+//       let orderEta = currentOrder.eta || new Date().toISOString().split('T')[0];
+
+//       if (singleMode) {
+//         // Single container assignment to all remaining details across all receivers in the order
+//         console.log(`Single container assigning to all remaining details in order ${orderId} using container ${singleContNum}`);
+//         // Check availability once before starting
+//         const availQuerySingle = `
+//           SELECT 
+//             CASE 
+//               WHEN cs.availability = 'Cleared' THEN 'Cleared'
+//               WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+//               WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+//               WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+//               WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+//               WHEN cs.availability = 'Arrived' THEN 'Arrived'
+//               WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+//               WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+//               WHEN cs.availability = 'Returned' THEN 'Returned'
+//               ELSE 'Available'
+//             END as derived_status
+//           FROM container_master cm
+//           LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//           LEFT JOIN (
+//             SELECT DISTINCT ON (cid) cid, location, availability
+//             FROM container_status
+//             ORDER BY cid, sid DESC NULLS LAST
+//           ) cs ON cm.cid = cs.cid
+//           WHERE cm.cid = $1
+//         `;
+//         const availResult = await client.query(availQuerySingle, [singleCid]);
+//         if (availResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(availResult.rows[0].derived_status)) {
+//           console.warn(`Container ${singleCid} not eligible for order ${orderId}`);
+//           continue;
+//         }
+//         const receiversQuerySingle = `
+//           SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+//           FROM receivers 
+//           WHERE order_id = $1 AND total_number > COALESCE(qty_delivered, 0)
+//         `;
+//         const receiversResult = await client.query(receiversQuerySingle, [orderId]);
+//         let allPendingLogs = [];
+//         let allAssignedDetailIds = [];
+//         let totalAssignedToCont = 0;
+//         let receiverUpdates = []; // Collect receiver update queries
+//         for (const recRow of receiversResult.rows) {
+//           const recId = recRow.id;
+//           const receiver = recRow;
+//           orderReceivers.push(receiver);
+//           const remainingDetailsQuery = `
+//             SELECT oi.id as detail_id, oi.total_number, oi.weight, COALESCE(SUM(h.assigned_qty), 0) as current_assigned
+//             FROM order_items oi
+//             LEFT JOIN container_assignment_history h ON oi.id = h.detail_id
+//             WHERE oi.receiver_id = $1
+//             GROUP BY oi.id, oi.total_number, oi.weight
+//             HAVING oi.total_number > COALESCE(SUM(h.assigned_qty), 0)
+//             ORDER BY oi.id
+//           `;
+//           const remainingDetailsResult = await client.query(remainingDetailsQuery, [recId]);
+//           let sumQty = 0;
+//           let sumGross = 0;
+//           let receiverEta = receiver.eta || orderEta;
+//           let recAssignedDetailIds = [];
+//           let recPendingLogs = [];
+//           for (const detailRow of remainingDetailsResult.rows) {
+//             const detailId = detailRow.detail_id;
+//             const totalNumber = parseInt(detailRow.total_number);
+//             const detailWeight = parseFloat(detailRow.weight) || 0;
+//             const currentAssigned = parseInt(detailRow.current_assigned) || 0;
+//             const remaining = totalNumber - currentAssigned;
+//             if (remaining <= 0) continue;
+//             const thisQty = remaining;
+//             const assignedDetailWeight = detailWeight * (thisQty / totalNumber);
+//             let enhancedLogNotes = `Assigned ${thisQty} items to container ${singleContNum} for Order ${orderId} / Receiver ${recId} / Detail ${detailId}`;
+//             // Optional: Log for reassignments
+//             if (singleFullCont.derived_status === 'Assigned to Job') {
+//               console.warn(`Reassigning already 'Assigned to Job' container ${singleContNum} (CID ${singleCid}) to new detail ${detailId}`);
+//               enhancedLogNotes += ' (Reassignment from prior job)';
+//             }
+//             recPendingLogs.push([
+//               singleCid,
+//               singleContNum,
+//               orderId,
+//               recId,
+//               detailId,
+//               thisQty,
+//               'Assigned to Job',
+//               'ASSIGN',
+//               created_by,
+//               enhancedLogNotes,
+//               singlePreviousStatus
+//             ]);
+//             totalAssignedToCont += thisQty;
+//             allAssignedDetailIds.push(detailId);
+//             recAssignedDetailIds.push(detailId);
+//             sumQty += thisQty;
+//             sumGross += assignedDetailWeight;
+//           }
+//           if (recPendingLogs.length > 0) {
+//             // Prepare receiver update
+//             let currentContainers = [];
+//             if (receiver.containers && typeof receiver.containers === 'string') {
+//               try {
+//                 currentContainers = JSON.parse(receiver.containers);
+//               } catch (e) {
+//                 currentContainers = [];
+//               }
+//             }
+//             const allContainers = new Set([...currentContainers, singleContNum]);
+//             const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+//             let newEta = receiverEta;
+//             let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+//             const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+//             const receiverSet = [];
+//             const receiverValues = [];
+//             let receiverParamIndex = 1;
+//             const receiverFields = [
+//               { key: 'containers', val: updatedContainersJson },
+//               { key: 'qty_delivered', val: newDelivered },
+//               { key: 'eta', val: newEta || null },
+//               { key: 'etd', val: newEtd || null },
+//               { key: 'status', val: 'Ready for Loading' }
+//             ];
+//             receiverFields.forEach(field => {
+//               receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+//               receiverValues.push(field.val);
+//               receiverParamIndex++;
+//             });
+//             receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+//             receiverValues.push(recId);
+//             const updateReceiverQuery = `
+//               UPDATE receivers 
+//               SET ${receiverSet.join(', ')} 
+//               WHERE id = $${receiverParamIndex}
+//               RETURNING id, status, eta
+//             `;
+//             receiverUpdates.push({ query: updateReceiverQuery, values: receiverValues, sumQty, sumGross, receiver, recId });
+//             allPendingLogs = allPendingLogs.concat(recPendingLogs);
+//           }
+//         }
+//         // Now, after collecting all, insert logs and status once
+//         if (allPendingLogs.length > 0) {
+//           // Refetch eligibility final check
+//           const finalAvailResult = await client.query(availQuerySingle, [singleCid]);
+//           if (finalAvailResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(finalAvailResult.rows[0].derived_status)) {
+//             console.warn(`Container ${singleCid} no longer eligible at final insert for order ${orderId}`);
+//             continue;
+//           }
+//           // Insert all history logs
+//           for (const logValues of allPendingLogs) {
+//             const tempNotes = logValues[9];
+//             const fullNotes = `${tempNotes} (ETA: ${orderEta || 'N/A'})`;
+//             logValues[9] = fullNotes;
+//             await client.query(logQuery, logValues);
+//           }
+//           // Insert one status for the whole order
+//           const assignedReceiversList = receiverUpdates.map(ru => ru.recId).join(', ');
+//           const enhancedStatusNotes = `Assigned ${totalAssignedToCont} items from ${singlePriorLocation.toUpperCase()} to Order ${orderId} / Receivers ${assignedReceiversList} / Cont ${singleContNum} (details: ${allAssignedDetailIds.join(', ')})`;
+//           const fullStatusNotes = `${enhancedStatusNotes} (ETA: ${orderEta || 'N/A'})`;
+//           await client.query(statusInsertQuery, [singleCid, 'Assigned to Job', singlePriorLocation, fullStatusNotes, created_by]);
+//           // Now execute receiver updates
+//           for (const ru of receiverUpdates) {
+//             const updateResult = await client.query(ru.query, ru.values);
+//             if (updateResult.rowCount > 0) {
+//               assignedCount++;
+//               assignedForThisOrder += ru.sumQty;
+//               assignedGrossWeight += ru.sumGross;
+//               trackingData.push({
+//                 receiverId: ru.recId,
+//                 receiverName: ru.receiver.receiver_name,
+//                 orderId,
+//                 bookingRef: currentOrder.booking_ref,
+//                 assignedQty: ru.sumQty,
+//                 assignedGross: ru.sumGross.toFixed(2),
+//                 assignedContainers: [singleContNum],
+//                 status: currentOrder.overall_status,
+//                 newEta: ru.receiver.eta,
+//                 newEtd: ru.receiver.etd || new Date().toISOString().split('T')[0],
+//                 daysUntilEta: null
+//               });
+//               console.log(`Single container assigned ${ru.sumQty} to receiver ${ru.recId}`);
+//             }
+//           }
+//         }
+//       } else if (Object.keys(orderAssignments).length > 0) {
+//         // Specific assignments - original code
+//         for (const recIdStr of Object.keys(orderAssignments)) {
+//           const recId = parseInt(recIdStr);
+//           if (isNaN(recId)) continue;
+//           const receiverQuery = `
+//             SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+//             FROM receivers 
+//             WHERE id = $1 AND order_id = $2
+//           `;
+//           const receiverResult = await client.query(receiverQuery, [recId, orderId]);
+//           if (receiverResult.rowCount === 0) continue;
+//           const receiver = receiverResult.rows[0];
+//           orderReceivers.push(receiver);
+//           let currentContainers = [];
+//           if (receiver.containers && typeof receiver.containers === 'string') {
+//             try {
+//               currentContainers = JSON.parse(receiver.containers);
+//             } catch (e) {
+//               currentContainers = [];
+//             }
+//           }
+//           const itemsQuery = `
+//             SELECT id, total_number, weight
+//             FROM order_items 
+//             WHERE receiver_id = $1 
+//             ORDER BY id ASC
+//           `;
+//           const itemsResult = await client.query(itemsQuery, [recId]);
+//           const orderItemsIds = itemsResult.rows.map(row => row.id);
+//           const orderItemsMap = new Map(itemsResult.rows.map(row => [row.id, row]));
+//           const recAssignments = orderAssignments[recIdStr];
+//           const sortedDetailKeys = Object.keys(recAssignments).sort((a, b) => parseInt(a) - parseInt(b));
+//           let sumQty = 0;
+//           let sumGross = 0;
+//           let newContNumbers = new Set();
+//           for (const detailIdxStr of sortedDetailKeys) {
+//             const detailIndex = parseInt(detailIdxStr);
+//             if (isNaN(detailIndex) || detailIndex >= orderItemsIds.length) continue;
+//             let intendedDetailId = orderItemsIds[detailIndex];
+//             const detailAssign = recAssignments[detailIdxStr];
+//             const detailCids = detailAssign.containers || [];
+//             if (detailCids.length === 0) continue;
+//             const resolvedCidsThis = detailCids;
+//             if (resolvedCidsThis.length === 0) continue;
+//             const result = await assignToDetail(orderId, recId, intendedDetailId, parseInt(detailAssign.qty) || 0, resolvedCidsThis, fullContainerMap, priorLocations, receiver.eta);
+//             if (result.assigned > 0) {
+//               sumQty += result.assigned;
+//               result.newContNumbers.forEach(num => newContNumbers.add(num));
+//               sumGross += (receiver.total_weight || 0) * (result.assigned / (receiver.total_number || 1));  // Approximate gross
+//             }
+//           }
+//           if (sumQty > 0) {
+//             const allContainers = new Set([...currentContainers, ...newContNumbers]);
+//             const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+//             let newEta = receiver.eta;
+//             let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+//             const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+//             const receiverSet = [];
+//             const receiverValues = [];
+//             let receiverParamIndex = 1;
+//             const receiverFields = [
+//               { key: 'containers', val: updatedContainersJson },
+//               { key: 'qty_delivered', val: newDelivered },
+//               { key: 'eta', val: newEta || null },
+//               { key: 'etd', val: newEtd || null },
+//               { key: 'status', val: 'Ready for Loading' }
+//             ];
+//             receiverFields.forEach(field => {
+//               receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+//               receiverValues.push(field.val);
+//               receiverParamIndex++;
+//             });
+//             receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+//             receiverValues.push(recId);
+//             const updateReceiverQuery = `
+//               UPDATE receivers 
+//               SET ${receiverSet.join(', ')} 
+//               WHERE id = $${receiverParamIndex}
+//               RETURNING id, status, eta
+//             `;
+//             const updateResult = await client.query(updateReceiverQuery, receiverValues);
+//             if (updateResult.rowCount > 0) {
+//               assignedCount++;
+//               assignedForThisOrder += sumQty;
+//               assignedGrossWeight += sumGross;
+//               trackingData.push({
+//                 receiverId: recId,
+//                 receiverName: receiver.receiver_name,
+//                 orderId,
+//                 bookingRef: currentOrder.booking_ref,
+//                 assignedQty: sumQty,
+//                 assignedGross: sumGross.toFixed(2),
+//                 assignedContainers: Array.from(newContNumbers),
+//                 status: currentOrder.overall_status,
+//                 newEta,
+//                 newEtd,
+//                 daysUntilEta: null
+//               });
+//               console.log(`Specific assigned ${sumQty} to receiver ${recId}`);
+//             }
+//           }
+//         }
+//       } else {
+//         // Original auto-assignment for orders without specific assignments
+//         console.log(`Auto-assigning to remaining details in order ${orderId}`);
+//         const receiversResult = await client.query('SELECT id FROM receivers WHERE order_id = $1 AND (total_number > COALESCE(qty_delivered, 0))', [orderId]);
+//         let availableContainers = await getAvailableContainers();
+//         let contIndex = 0;
+//         for (const recRow of receiversResult.rows) {
+//           const recId = recRow.id;
+//           const receiverQuery = `
+//             SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+//             FROM receivers 
+//             WHERE id = $1
+//           `;
+//           const receiverResult = await client.query(receiverQuery, [recId]);
+//           if (receiverResult.rowCount === 0) continue;
+//           const receiver = receiverResult.rows[0];
+//           orderReceivers.push(receiver);
+//           const remainingDetailsQuery = `
+//             SELECT oi.id, oi.total_number, oi.weight, COALESCE(SUM(h.assigned_qty), 0) as assigned
+//             FROM order_items oi
+//             LEFT JOIN container_assignment_history h ON oi.id = h.detail_id
+//             WHERE oi.receiver_id = $1
+//             GROUP BY oi.id, oi.total_number, oi.weight
+//             HAVING oi.total_number > COALESCE(SUM(h.assigned_qty), 0)
+//             ORDER BY oi.id
+//           `;
+//           const remainingDetailsResult = await client.query(remainingDetailsQuery, [recId]);
+//           let sumQty = 0;
+//           let sumGross = 0;
+//           let newContNumbers = new Set();
+//           for (const detailRow of remainingDetailsResult.rows) {
+//             const detailId = detailRow.id;
+//             const remaining = parseInt(detailRow.total_number) - parseInt(detailRow.assigned);
+//             if (contIndex >= availableContainers.length) {
+//               availableContainers = await getAvailableContainers();
+//               contIndex = 0;
+//             }
+//             if (availableContainers.length === 0) break;
+//             const fullCont = availableContainers[contIndex];
+//             const cids = [fullCont.cid];
+//             const result = await assignToDetail(orderId, recId, detailId, remaining, cids, new Map(availableContainers.map(c => [c.cid, c])), priorLocations, receiver.eta);
+//             if (result.assigned > 0) {
+//               sumQty += result.assigned;
+//               result.newContNumbers.forEach(num => newContNumbers.add(num));
+//               sumGross += parseFloat(detailRow.weight) * (result.assigned / parseInt(detailRow.total_number) || 0);
+//             }
+//             contIndex++;
+//           }
+//           if (sumQty > 0) {
+//             let currentContainers = [];
+//             if (receiver.containers && typeof receiver.containers === 'string') {
+//               try {
+//                 currentContainers = JSON.parse(receiver.containers);
+//               } catch (e) {
+//                 currentContainers = [];
+//               }
+//             }
+//             const allContainers = new Set([...currentContainers, ...newContNumbers]);
+//             const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+//             let newEta = receiver.eta;
+//             let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+//             const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+//             const receiverSet = [];
+//             const receiverValues = [];
+//             let receiverParamIndex = 1;
+//             const receiverFields = [
+//               { key: 'containers', val: updatedContainersJson },
+//               { key: 'qty_delivered', val: newDelivered },
+//               { key: 'eta', val: newEta || null },
+//               { key: 'etd', val: newEtd || null },
+//               { key: 'status', val: 'Ready for Loading' }
+//             ];
+//             receiverFields.forEach(field => {
+//               receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+//               receiverValues.push(field.val);
+//               receiverParamIndex++;
+//             });
+//             receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+//             receiverValues.push(recId);
+//             const updateReceiverQuery = `
+//               UPDATE receivers 
+//               SET ${receiverSet.join(', ')} 
+//               WHERE id = $${receiverParamIndex}
+//               RETURNING id, status, eta
+//             `;
+//             const updateResult = await client.query(updateReceiverQuery, receiverValues);
+//             if (updateResult.rowCount > 0) {
+//               assignedCount++;
+//               assignedForThisOrder += sumQty;
+//               assignedGrossWeight += sumGross;
+//               trackingData.push({
+//                 receiverId: recId,
+//                 receiverName: receiver.receiver_name,
+//                 orderId,
+//                 bookingRef: currentOrder.booking_ref,
+//                 assignedQty: sumQty,
+//                 assignedGross: sumGross.toFixed(2),
+//                 assignedContainers: Array.from(newContNumbers),
+//                 status: currentOrder.overall_status,
+//                 newEta,
+//                 newEtd,
+//                 daysUntilEta: null
+//               });
+//               console.log(`Auto assigned ${sumQty} to receiver ${recId}`);
+//             }
+//           }
+//         }
+//       }
+
+//       // Update order if assigned something
+//       if (assignedForThisOrder > 0) {
+//         const newTotalAssigned = currentTotalAssigned + assignedForThisOrder;
+//         const orderSet = [];
+//         const orderValues = [];
+//         let orderParamIndex = 1;
+//         const orderFields = [
+//           { key: 'total_assigned_qty', val: newTotalAssigned },
+//           { key: 'eta', val: orderEta }
+//         ];
+//         orderFields.forEach(field => {
+//           orderSet.push(`${field.key} = $${orderParamIndex}`);
+//           orderValues.push(field.val);
+//           orderParamIndex++;
+//         });
+//         orderSet.push('updated_at = CURRENT_TIMESTAMP');
+//         orderValues.push(orderId);
+//         const updateOrderQuery = `
+//           UPDATE orders 
+//           SET ${orderSet.join(', ')} 
+//           WHERE id = $${orderParamIndex}
+//           RETURNING id, total_assigned_qty, eta
+//         `;
+//         const orderUpdateResult = await client.query(updateOrderQuery, orderValues);
+//         if (orderUpdateResult.rowCount > 0) {
+//           console.log(`Updated total_assigned_qty to ${newTotalAssigned} for order ${orderId}`);
+//         }
+//         await updateOrderOverallStatus(client, orderId, 'Loaded Into Container', orderReceivers);
+//       }
+//       updatedOrders.push({ 
+//         orderId: currentOrder.id, 
+//         bookingRef: currentOrder.booking_ref, 
+//         assignedReceivers: assignedCount,
+//         assignedQty: assignedForThisOrder,
+//         assignedGross: assignedGrossWeight.toFixed(2)
+//       });
+//     }
+//     await client.query('COMMIT');
+
+//     // Refetch updated data (same as before, with containerDetails from history)
+//     const enhancedUpdatedOrders = [];
+//     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+//     const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+//     const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+//     const containerDetailsSub = `
+//       COALESCE((
+//         SELECT json_agg(
+//           json_build_object(
+//             'status', CASE WHEN ${totalAssignedSub} > 0 THEN 'Ready for Loading' ELSE 'Created' END,
+//             'container', json_build_object(
+//               'cid', h.cid,
+//               'container_number', cm.container_number
+//             ),
+//             'total_number', ${safeIntCast('oi.total_number')},
+//             'assign_weight', CASE 
+//               WHEN ${totalAssignedSub} > 0 AND h.assigned_qty > 0 THEN 
+//                 ROUND((h.assigned_qty::numeric / ${totalAssignedSub}::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+//               ELSE '0' 
+//             END,
+//             'remaining_items', (${safeIntCast('oi.total_number')} - ${totalAssignedSub})::text,
+//             'assign_total_box', h.assigned_qty::text
+//           ) ORDER BY cm.container_number
+//         )
+//         FROM (
+//           SELECT cid, SUM(assigned_qty) as assigned_qty 
+//           FROM container_assignment_history 
+//           WHERE detail_id = oi.id 
+//           GROUP BY cid
+//         ) h 
+//         LEFT JOIN container_master cm ON h.cid = cm.cid 
+//         WHERE h.cid IS NOT NULL
+//       ), '[]'::json)
+//     `;
+//     const fetchReceiversQuery = `
+//       SELECT 
+//         r.*,
+//         COALESCE(
+//           (
+//             SELECT json_agg(
+//               json_build_object(
+//                 'pickupLocation', oi.pickup_location,
+//                 'deliveryAddress', oi.delivery_address,
+//                 'category', oi.category,
+//                 'subcategory', oi.subcategory,
+//                 'type', oi.type,
+//                 'totalNumber', ${safeIntCast('oi.total_number')},
+//                 'weight', ${safeNumericCast('oi.weight')},
+//                 'itemRef', oi.item_ref,
+//                 'containerDetails', ${containerDetailsSub},
+//                 'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
+//               ) ORDER BY oi.id
+//             )
+//             FROM order_items oi 
+//             WHERE oi.receiver_id = r.id
+//           ), 
+//           '[]'::json
+//         ) AS shippingDetails
+//       FROM receivers r 
+//       WHERE r.order_id = $1 
+//       ORDER BY r.id
+//     `;
+//     for (const updOrder of updatedOrders) {
+//       const orderId = updOrder.orderId;
+//       const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
+//       const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [orderId]);
+//       const enhancedReceiversResult = await client.query(fetchReceiversQuery, [orderId]);
+//       const enhancedReceivers = enhancedReceiversResult.rows.map(row => ({
+//         ...row,
+//         shippingDetails: row.shippingDetails || [],
+//         containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])
+//       }));
+//       let orderSummary = [];
+//       try {
+//         const summaryResult = await client.query('SELECT * FROM order_summary WHERE order_id = $1', [orderId]);
+//         orderSummary = summaryResult.rows;
+//       } catch (e) {
+//         console.warn('order_summary fetch failed:', e.message);
+//         orderSummary = [];  // Fallback as before if needed
+//       }
+//       enhancedUpdatedOrders.push({
+//         order: updatedOrderResult.rows[0],
+//         senders: updatedSenderResult.rows,
+//         summary: orderSummary,
+//         receivers: enhancedReceivers,
+//         tracking: trackingData.filter(t => t.orderId === orderId)
+//       });
+//     }
+//     const responseData = { 
+//       success: true, 
+//       message: `Assigned containers to ${trackingData.length} receivers across ${updatedOrders.length} orders`,
+//       updatedOrders: enhancedUpdatedOrders,
+//       tracking: trackingData 
+//     };
+//     if (skippedDetails.length > 0) {
+//       responseData.skippedDetails = skippedDetails;
+//       console.warn(`Skipped ${skippedDetails.length} over-assigned details:`, skippedDetails);
+//     }
+//     res.status(200).json(responseData);
+//   } catch (error) {
+//     console.error('Error assigning containers:', error);
+//     if (client) {
+//       try {
+//         await client.query('ROLLBACK');
+//       } catch (rollbackErr) {
+//         console.error('Rollback failed:', rollbackErr);
+//       }
+//     }
+//     // Error codes as before...
+//     return res.status(500).json({ error: 'Internal server error', details: error.message });
+//   } finally {
+//     if (client) client.release();
+//   }
+// }
+
+
 export async function assignContainersToOrdersAll(req, res) {
   console.log('Received request to assign containers to orders', req.body);
   let client;
@@ -3184,53 +5059,28 @@ export async function assignContainersToOrdersAll(req, res) {
     client = await pool.connect();
     await client.query('BEGIN');
     const updates = req.body || {};
-    const created_by = req.user?.id || 'system';  // From auth if available
+    const created_by = req.user?.id || 'system';
 
-    // Extract assignments (support wrapped or direct)
     let assignments = updates.assignments || updates;
     if (!assignments || typeof assignments !== 'object') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Assignments object is required' });
+      assignments = {}; // Ensure it's an object even if invalid
     }
 
-    // Infer orderIds from keys of assignments (ensure array)
-    let orderIds = Object.keys(assignments).filter(k => !isNaN(parseInt(k)));
-    if (orderIds.length === 0) {
-      // Fallback: If explicit order_ids provided, use it
-      orderIds = updates.order_ids || updates.orderIds || [];
-      if (Array.isArray(orderIds)) {
-        orderIds = orderIds.filter(id => !isNaN(parseInt(id)));
-      } else {
-        orderIds = [];
-      }
-    }
+    let assignmentOrderIds = Object.keys(assignments).filter(k => !isNaN(parseInt(k))).map(k => parseInt(k));
+    let explicitOrderIds = (updates.order_ids || updates.orderIds || []).filter(id => !isNaN(parseInt(id)));
+    let orderIds = [...new Set([...assignmentOrderIds, ...explicitOrderIds])].filter(id => id > 0);
 
-    // Debug log (enhanced)
     console.log('Assign containers body:', JSON.stringify(updates, null, 2));
-    console.log('Extracted assignments keys (orderIds):', orderIds);
-    console.log('Sample assignment:', assignments[orderIds[0]] ? Object.keys(assignments[orderIds[0]]).slice(0, 2) : null);
+    console.log('Extracted orderIds:', orderIds);
 
-    // Validation
-    const updateErrors = [];
     if (orderIds.length === 0) {
-      updateErrors.push('orderIds array is required and must not be empty');
-    }
-    if (Object.keys(assignments).length === 0) {
-      updateErrors.push('assignments object is required and must not be empty');
-    }
-    if (updateErrors.length > 0) {
       await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'Invalid request fields',
-        details: updateErrors.join('; ')
-      });
+      return res.status(400).json({ error: 'orderIds array is required and must not be empty' });
     }
 
-    // Collect all unique container identifiers from the assignments (strings or numbers)
     const allContainerIds = new Set();
     let parsedCount = 0;
-    // Also, build a map of original assignments for later resolution
-    const resolvedAssignments = JSON.parse(JSON.stringify(assignments)); // Deep copy for modification
+    const resolvedAssignments = JSON.parse(JSON.stringify(assignments));
     for (const [orderIdStr, orderAssign] of Object.entries(assignments)) {
       if (typeof orderAssign !== 'object') continue;
       console.log(`Parsing order ${orderIdStr}: ${Object.keys(orderAssign).length} receivers`);
@@ -3241,8 +5091,8 @@ export async function assignContainersToOrdersAll(req, res) {
           if (detailAssign && typeof detailAssign === 'object') {
             console.log(`    Detail ${detailIdxStr}: qty=${detailAssign.qty}, containers=${JSON.stringify(detailAssign.containers)}`);
             if (Array.isArray(detailAssign.containers)) {
-              detailAssign.containers.forEach((contIdStr, idx) => {
-                allContainerIds.add(String(contIdStr)); // Normalize to string
+              detailAssign.containers.forEach((contIdStr) => {
+                allContainerIds.add(String(contIdStr));
                 parsedCount++;
                 console.log(`      Added container ID "${contIdStr}"`);
               });
@@ -3253,43 +5103,30 @@ export async function assignContainersToOrdersAll(req, res) {
         }
       }
     }
-    console.log(`Total unique container IDs extracted: ${allContainerIds.size} (parsed ${parsedCount} items)`);
+    console.log(`Total unique container IDs extracted for specific: ${allContainerIds.size} (parsed ${parsedCount} items)`);
 
-    if (allContainerIds.size === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'No valid containers specified in assignments' });
-    }
+    const resolvedCids = new Set();
+    let fullContainerMap = new Map();
+    let containerIdToCidMap = new Map();
+    const singleContainerStr = updates.container_number || updates.container_id || updates.cid;
+    let singleMode = false;
+    let singleCid = null;
+    let singleContNum = null;
+    let singleFullCont = null;
+    let singlePriorLocation = 'karachi_port';
+    let singlePreviousStatus = 'Available';
 
-    // Fetch full container details for all unique container IDs - resolve strings to CIDs, ensure only available
-    // FIXED: Replaced LATERAL with DISTINCT ON; removed duplicate CASE
-    const containerQuery = `
-      SELECT 
-        cm.*,
-        cs.location as status_location,
-        cs.availability as current_availability,
-        chd.hire_start_date,
-        chd.hire_end_date,
-        CASE 
-          WHEN cs.availability = 'Cleared' THEN 'Cleared'
-          WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-          WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-          WHEN cs.availability = 'Arrived' THEN 'Arrived'
-          WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-          WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-          WHEN cs.availability = 'Returned' THEN 'Returned'
-          ELSE 'Available'
-        END as derived_status
-      FROM container_master cm
-      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      LEFT JOIN (
-        SELECT DISTINCT ON (cid) cid, location, availability
-        FROM container_status
-        ORDER BY cid, sid DESC NULLS LAST
-      ) cs ON cm.cid = cs.cid
-      WHERE (cm.container_number = ANY($1::text[]) OR cm.cid = ANY($2::int[]))
-        AND (
+    if (allContainerIds.size > 0) {
+      // Original specific handling
+      const stringIds = Array.from(allContainerIds).filter(id => isNaN(parseInt(id)));
+      const numericIds = Array.from(allContainerIds).filter(id => !isNaN(parseInt(id))).map(id => parseInt(id));
+      const containerQuery = `
+        SELECT 
+          cm.*,
+          cs.location as status_location,
+          cs.availability as current_availability,
+          chd.hire_start_date,
+          chd.hire_end_date,
           CASE 
             WHEN cs.availability = 'Cleared' THEN 'Cleared'
             WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
@@ -3301,121 +5138,221 @@ export async function assignContainersToOrdersAll(req, res) {
             WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
             WHEN cs.availability = 'Returned' THEN 'Returned'
             ELSE 'Available'
-          END
-        ) = 'Available' AND cs.location IN ('karachi_port', 'dubai_port')
-    `;
-    // Split into string (container_number) and numeric (cid) arrays
-    const stringIds = Array.from(allContainerIds).filter(id => isNaN(parseInt(id)));
-    const numericIds = Array.from(allContainerIds).filter(id => !isNaN(parseInt(id))).map(id => parseInt(id));
-    const containerResult = await client.query(containerQuery, [stringIds, numericIds]);
-    console.log('Container query for IDs', Array.from(allContainerIds), 'returned', containerResult.rows.length, 'rows');
-    containerResult.rows.forEach(row => {
-      console.log('  - CID', row.cid, ':', row.container_number, '(status:', row.derived_status, ')');
-    });
-    const fullContainerMap = new Map(containerResult.rows.map(row => [row.cid, row]));
-    const containerIdToCidMap = new Map(); // Map input ID (str/num) to CID
-    containerResult.rows.forEach(row => {
-      containerIdToCidMap.set(row.container_number, row.cid);
-      containerIdToCidMap.set(String(row.cid), row.cid); // Ensure string key
-    });
-    // Check for missing or unavailable containers - now collect skipped instead of error
-    const missingIds = Array.from(allContainerIds).filter(contId => !containerIdToCidMap.has(String(contId))); // Normalize to string
-    console.log('Missing/unavailable container IDs:', missingIds);
-    const skippedContainers = missingIds.join(', ');
-    if (missingIds.length > 0) {
-      console.warn(`Skipping unavailable containers: ${skippedContainers}`);
-    }
-    // If no available containers at all, error
-    if (containerResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'No valid available containers specified in assignments' });
-    }
-
-    // Resolve all containers in resolvedAssignments to CIDs, filtering out unavailable
-    let totalSkippedInAssignments = 0;
-    const resolvedCids = new Set(); // Collect unique resolved CIDs for prior locations
-    for (const [orderIdStr, orderAssign] of Object.entries(resolvedAssignments)) {
-      for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
-        for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
-          if (Array.isArray(detailAssign.containers)) {
-            const originalCount = detailAssign.containers.length;
-            detailAssign.containers = detailAssign.containers
-              .map(contIdStr => {
-                const cid = containerIdToCidMap.get(String(contIdStr));
-                if (cid !== undefined) {
-                  resolvedCids.add(cid);
-                }
-                return cid;
-              })
-              .filter(cid => cid !== undefined);
-            const skippedInThis = originalCount - detailAssign.containers.length;
-            totalSkippedInAssignments += skippedInThis;
-            if (detailAssign.containers.length === 0) {
-              console.warn(`No available containers left for detail ${detailIdxStr} in receiver ${recIdStr} of order ${orderIdStr}`);
-              // Optionally remove the empty detail assignment
-              delete recAssign[detailIdxStr];
+          END as derived_status
+        FROM container_master cm
+        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+        LEFT JOIN (
+          SELECT DISTINCT ON (cid) cid, location, availability
+          FROM container_status
+          ORDER BY cid, sid DESC NULLS LAST
+        ) cs ON cm.cid = cs.cid
+        WHERE (cm.container_number = ANY($1::text[]) OR cm.cid = ANY($2::int[]))
+          AND (
+            CASE 
+              WHEN cs.availability = 'Cleared' THEN 'Cleared'
+              WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+              WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+              WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+              WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+              WHEN cs.availability = 'Arrived' THEN 'Arrived'
+              WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+              WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+              WHEN cs.availability = 'Returned' THEN 'Returned'
+              ELSE 'Available'
+            END
+          ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
+      `;
+      const containerResult = await client.query(containerQuery, [stringIds, numericIds]);
+      console.log('Container query for specific IDs', Array.from(allContainerIds), 'returned', containerResult.rows.length, 'rows');
+      fullContainerMap = new Map(containerResult.rows.map(row => [row.cid, row]));
+      containerResult.rows.forEach(row => {
+        containerIdToCidMap.set(row.container_number, row.cid);
+        containerIdToCidMap.set(String(row.cid), row.cid);
+      });
+      const missingIds = Array.from(allContainerIds).filter(contId => !containerIdToCidMap.has(String(contId)));
+      if (missingIds.length > 0) {
+        console.warn(`Skipping unavailable specific containers: ${missingIds.join(', ')}`);
+      }
+      if (containerResult.rows.length === 0 && allContainerIds.size > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'No valid available containers specified in assignments' });
+      }
+      // Resolve specific
+      let totalSkippedInAssignments = 0;
+      for (const [orderIdStr, orderAssign] of Object.entries(resolvedAssignments)) {
+        for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
+          for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
+            if (Array.isArray(detailAssign.containers)) {
+              const originalCount = detailAssign.containers.length;
+              detailAssign.containers = detailAssign.containers
+                .map(contIdStr => {
+                  const cid = containerIdToCidMap.get(String(contIdStr));
+                  if (cid !== undefined) {
+                    resolvedCids.add(cid);
+                  }
+                  return cid;
+                })
+                .filter(cid => cid !== undefined);
+              const skippedInThis = originalCount - detailAssign.containers.length;
+              totalSkippedInAssignments += skippedInThis;
+              if (detailAssign.containers.length === 0) {
+                delete recAssign[detailIdxStr];
+              }
             }
           }
+          if (Object.keys(recAssign).length === 0) {
+            delete orderAssign[recIdStr];
+          }
         }
-        // Clean up empty receivers
-        if (Object.keys(recAssign).length === 0) {
-          delete orderAssign[recIdStr];
+        if (Object.keys(orderAssign).length === 0) {
+          delete resolvedAssignments[orderIdStr];
         }
       }
-      // Clean up empty orders
-      if (Object.keys(orderAssign).length === 0) {
-        delete resolvedAssignments[orderIdStr];
-      }
-    }
-    console.log(`Skipped ${totalSkippedInAssignments} container assignments due to unavailability`);
-
-    // If no assignments left after filtering, error
-    if (Object.keys(resolvedAssignments).length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        error: 'No valid available containers could be assigned after filtering', 
-        skipped: skippedContainers 
-      });
+      console.log(`Skipped ${totalSkippedInAssignments} specific container assignments due to unavailability`);
     }
 
-    // NEW: Fetch prior physical locations for each resolved CID (default to 'karachi_port')
-    const priorLocations = new Map();
-    for (const cid of resolvedCids) {
-      const priorQuery = `
-        SELECT location FROM container_status 
-        WHERE cid = $1 ORDER BY created_time DESC LIMIT 1
+    // Check for single mode from explicit single or from resolved single
+    let isSingleFromExplicit = false;
+    if (singleContainerStr) {
+      isSingleFromExplicit = true;
+      const stringIds = [singleContainerStr];
+      const numericIds = isNaN(parseInt(singleContainerStr)) ? [] : [parseInt(singleContainerStr)];
+      const containerQuery = `
+        SELECT 
+          cm.*,
+          cs.location as status_location,
+          cs.availability as current_availability,
+          chd.hire_start_date,
+          chd.hire_end_date,
+          CASE 
+            WHEN cs.availability = 'Cleared' THEN 'Cleared'
+            WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+            WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+            WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+            WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+            WHEN cs.availability = 'Arrived' THEN 'Arrived'
+            WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+            WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+            WHEN cs.availability = 'Returned' THEN 'Returned'
+            ELSE 'Available'
+          END as derived_status
+        FROM container_master cm
+        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+        LEFT JOIN (
+          SELECT DISTINCT ON (cid) cid, location, availability
+          FROM container_status
+          ORDER BY cid, sid DESC NULLS LAST
+        ) cs ON cm.cid = cs.cid
+        WHERE (cm.container_number = ANY($1::text[]) OR cm.cid = ANY($2::int[]))
+          AND (
+            CASE 
+              WHEN cs.availability = 'Cleared' THEN 'Cleared'
+              WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+              WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+              WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+              WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+              WHEN cs.availability = 'Arrived' THEN 'Arrived'
+              WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+              WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+              WHEN cs.availability = 'Returned' THEN 'Returned'
+              ELSE 'Available'
+            END
+          ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
       `;
-      const priorResult = await client.query(priorQuery, [cid]);
-      priorLocations.set(cid, priorResult.rows[0]?.location || 'karachi_port');
+      const containerResult = await client.query(containerQuery, [stringIds, numericIds]);
+      if (containerResult.rows.length === 0 || !containerResult.rows[0].derived_status || !['Available', 'Assigned to Job'].includes(containerResult.rows[0].derived_status)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Selected container is not available or not in eligible status' });
+      }
+      singleFullCont = containerResult.rows[0];
+      singleCid = singleFullCont.cid;
+      singleContNum = singleFullCont.container_number;
+      resolvedCids.add(singleCid);
+      fullContainerMap = new Map([[singleCid, singleFullCont]]);
+      containerIdToCidMap.set(singleContNum, singleCid);
+      containerIdToCidMap.set(String(singleCid), singleCid);
+
+      // Fetch prior location
+      const priorQuerySingle = `
+        SELECT DISTINCT ON (cid) cid, location
+        FROM container_status 
+        WHERE cid = $1 ORDER BY cid, created_time DESC
+      `;
+      const priorResult = await client.query(priorQuerySingle, [singleCid]);
+      singlePriorLocation = priorResult.rows[0]?.location || 'karachi_port';
+
+      // Fetch previous status
+      const prevStatusQuery = `
+        SELECT availability as status
+        FROM container_status
+        WHERE cid = $1
+        ORDER BY created_time DESC
+        LIMIT 1
+      `;
+      const prevStatusResult = await client.query(prevStatusQuery, [singleCid]);
+      singlePreviousStatus = prevStatusResult.rows[0]?.status || 'Available';
+    }
+
+    // Set singleMode if only one container resolved
+    if (resolvedCids.size === 1) {
+      singleMode = true;
+      singleCid = Array.from(resolvedCids)[0];
+      singleFullCont = fullContainerMap.get(singleCid);
+      singleContNum = singleFullCont.container_number;
+      // Fetch prior if not set
+      if (!isSingleFromExplicit) {
+        const priorQuerySingle = `
+          SELECT DISTINCT ON (cid) cid, location
+          FROM container_status 
+          WHERE cid = $1 ORDER BY cid, created_time DESC
+        `;
+        const priorResult = await client.query(priorQuerySingle, [singleCid]);
+        singlePriorLocation = priorResult.rows[0]?.location || 'karachi_port';
+
+        const prevStatusQuery = `
+          SELECT availability as status
+          FROM container_status
+          WHERE cid = $1
+          ORDER BY created_time DESC
+          LIMIT 1
+        `;
+        const prevStatusResult = await client.query(prevStatusQuery, [singleCid]);
+        singlePreviousStatus = prevStatusResult.rows[0]?.status || 'Available';
+      }
+      console.log(`Detected single container mode for container ${singleContNum}, will assign to all remaining details`);
+    } else if (resolvedCids.size > 1 || allContainerIds.size > 1) {
+      singleMode = false;
+    }
+
+    // Batched: Fetch prior physical locations for resolved CIDs (for specific multi)
+    const priorQuery = `
+      SELECT DISTINCT ON (cid) cid, location
+      FROM container_status 
+      WHERE cid = ANY($1) ORDER BY cid, created_time DESC
+    `;
+    let priorLocations = new Map();
+    if (resolvedCids.size > 0 && !singleMode) {
+      const priorResult = await client.query(priorQuery, [Array.from(resolvedCids)]);
+      priorLocations = new Map(priorResult.rows.map(row => [row.cid, row.location || 'karachi_port']));
+    } else if (singleMode) {
+      priorLocations = new Map([[singleCid, singlePriorLocation]]);
     }
 
     // Track updates
     const updatedOrders = [];
     const trackingData = [];
-    // Accumulate total assigned qty per order for final update
     const orderAssignedQtys = new Map();
-    // Fetch current orders and related records for fallback
     const currentOrders = {};
     const currentReceiversByOrder = {};
-    for (const orderIdStr of orderIds) {
-      const orderId = parseInt(orderIdStr);
-      if (isNaN(orderId)) {
-        console.warn(`Invalid order_id: ${orderIdStr}`);
-        continue;
-      }
-      // Fetch current order
+    for (const orderId of orderIds) {
       const orderQuery = `
         SELECT id, booking_ref, status as overall_status, total_assigned_qty, eta 
         FROM orders 
         WHERE id = $1
       `;
       const orderResult = await client.query(orderQuery, [orderId]);
-      if (orderResult.rowCount === 0) {
-        console.warn(`Order not found: ${orderId}`);
-        continue;
-      }
+      if (orderResult.rowCount === 0) continue;
       currentOrders[orderId] = orderResult.rows[0];
-      // Fetch current receivers for this order
       const receiversQuery = `
         SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
         FROM receivers 
@@ -3431,337 +5368,603 @@ export async function assignContainersToOrdersAll(req, res) {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `;
 
-    const skippedDetails = [];  // Track capped details
+    const statusInsertQuery = `
+      INSERT INTO container_status (cid, availability, location, status_notes, created_by, created_time) 
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+    `;
 
-    for (const orderIdStr of Object.keys(resolvedAssignments)) {  // Now use resolved keys
-      const orderId = parseInt(orderIdStr);
-      if (isNaN(orderId)) {
-        console.warn(`Invalid order_id: ${orderIdStr}`);
-        continue;
-      }
-      const currentOrder = currentOrders[orderId];
-      if (!currentOrder) {
-        console.warn(`No current order data for: ${orderId}`);
-        continue;
-      }
-      let currentTotalAssigned = parseInt(currentOrder.total_assigned_qty) || 0;
-      let assignedForThisOrder = 0; // Accumulate for this order
-      let assignedGrossWeight = 0;  // Accumulate gross
-      let assignedCount = 0;
-      const orderAssignments = resolvedAssignments[orderIdStr];
-      const orderReceivers = [];  // Collect for status update
-      for (const recIdStr of Object.keys(orderAssignments)) {
-        const recId = parseInt(recIdStr);
-        if (isNaN(recId)) {
-          console.warn(`Invalid receiver_id: ${recIdStr}`);
-          continue;
-        }
-        // Fetch receiver (include eta, etd, status for calculation; add total_weight for gross)
-        const receiverQuery = `
-          SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
-          FROM receivers 
-          WHERE id = $1 AND order_id = $2
-        `;
-        const receiverResult = await client.query(receiverQuery, [recId, orderId]);
-        if (receiverResult.rowCount === 0) {
-          console.warn(`Receiver not found: ${recId} for order ${orderId}`);
-          continue;
-        }
-        const receiver = receiverResult.rows[0];
-        orderReceivers.push(receiver);  // For status
-        // Parse current containers
-        let currentContainers = [];
-        if (receiver.containers && typeof receiver.containers === 'string') {
-          try {
-            currentContainers = JSON.parse(receiver.containers);
-            if (!Array.isArray(currentContainers)) {
-              currentContainers = [];
-            }
-          } catch (parseErr) {
-            console.warn(`Failed to parse containers for receiver ${recId}:`, parseErr.message);
-            currentContainers = [];
-          }
-        }
-        // Fetch order_items for this receiver
-        const itemsQuery = `
-          SELECT id, total_number, weight, container_details 
+    const skippedDetails = [];
+    const currentAssignedQuery = `
+      SELECT COALESCE(SUM(assigned_qty), 0) as current_assigned
+      FROM container_assignment_history 
+      WHERE detail_id = $1
+    `;
+
+    // Helper function for assigning to a detail (with availability check) - for specific multi
+    async function assignToDetail(orderId, recId, detailId, qty, cids, fullContainerMap, priorLocations, receiverEta = null) {
+      try {
+        const orderItemQuery = `
+          SELECT total_number, weight
           FROM order_items 
-          WHERE receiver_id = $1 
-          ORDER BY id ASC
+          WHERE id = $1
         `;
-        const itemsResult = await client.query(itemsQuery, [recId]);
-        const orderItemRows = itemsResult.rows;
-        if (orderItemRows.length === 0) {
-          console.warn(`No order_items found for receiver ${recId}`);
-          continue;
+        const orderItemResult = await client.query(orderItemQuery, [detailId]);
+        if (orderItemResult.rowCount === 0) return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+        const orderItem = orderItemResult.rows[0];
+        const totalNumber = parseInt(orderItem.total_number) || 0;
+        const detailWeight = parseFloat(orderItem.weight) || 0;
+        const currentAssignedResult = await client.query(currentAssignedQuery, [detailId]);
+        const currentAssigned = parseInt(currentAssignedResult.rows[0].current_assigned) || 0;
+        const remainingBefore = totalNumber - currentAssigned;
+        let detailQty = Math.min(qty, remainingBefore);
+        if (detailQty <= 0) {
+          console.warn(`No remaining qty for detail ${detailId}`);
+          return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
         }
-        const orderItemsIds = orderItemRows.map(row => row.id);
-        const orderItemsMap = new Map(orderItemRows.map(row => [row.id, row]));
-        // Collect new containers and sum qty/gross for this receiver
-        const newContNumbers = new Set();
-        let sumQty = 0;
-        let sumGross = 0;
-        const recAssignments = orderAssignments[recIdStr];
-        // Sort detail keys numerically to process in order
-        const sortedDetailKeys = Object.keys(recAssignments).sort((a, b) => parseInt(a) - parseInt(b));
+        const totalAssigned = currentAssigned + detailQty;
+        const remainingItems = totalNumber - totalAssigned;
+        const assignedDetailWeight = detailWeight * (detailQty / totalNumber || 0);
+        const numNewConts = cids.length;
+        if (numNewConts === 0) return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+        let remainingQtyToAssign = detailQty;
+        let remainingWeightToAssign = assignedDetailWeight;
+        let sumThis = 0;
+        let newContNumbers = new Set();
         let pendingLogs = [];
         let pendingStatusInserts = [];
-        for (const detailIdxStr of sortedDetailKeys) {
-          const detailIndex = parseInt(detailIdxStr);
-          if (isNaN(detailIndex) || detailIndex < 0 || detailIndex >= orderItemsIds.length) {
-            console.warn(`Invalid detail index ${detailIdxStr} for receiver ${recId} (only ${orderItemsIds.length} items)`);
-            continue;
-          }
-          const actualDetailId = orderItemsIds[detailIndex];
-          const orderItem = orderItemsMap.get(actualDetailId);
-          if (!orderItem) continue;
-          const totalNumber = parseInt(orderItem.total_number) || 0;
-          const detailWeight = parseFloat(orderItem.weight) || 0;
-          const inputDetailQty = parseInt(recAssignments[detailIdxStr].qty) || 0;
-          if (inputDetailQty === 0) continue;
-          // Fetch current assigned from history
-          const currentAssignedQuery = `
-            SELECT COALESCE(SUM(assigned_qty), 0) as current_assigned
-            FROM container_assignment_history 
-            WHERE detail_id = $1
-          `;
-          const currentAssignedResult = await client.query(currentAssignedQuery, [actualDetailId]);
-          const currentAssigned = parseInt(currentAssignedResult.rows[0].current_assigned) || 0;
-          const remainingBefore = totalNumber - currentAssigned;
-          let detailQty = inputDetailQty;
-          if (remainingBefore < 0) {
-            console.warn(`Over-assignment detected for detail ${actualDetailId}: current_assigned=${currentAssigned} > total_number=${totalNumber} (overage: ${-remainingBefore})`);
-            skippedDetails.push({ detailId: actualDetailId, overBy: -remainingBefore });
-            // Optional: Insert corrective negative entry to balance history (audit trail)
-            // await client.query(logQuery, [null, null, orderId, recId, actualDetailId, remainingBefore, 'Overage Correction', 'CORRECT', created_by, `Auto-corrected overage of ${-remainingBefore}`, 'Overassigned']);
-            detailQty = 0;  // Skip assignment
-            continue;
-          }
-          if (detailQty > remainingBefore) {
-            console.warn(`Capping assignment for detail ${actualDetailId}: ${detailQty} > ${remainingBefore}`);
-            detailQty = remainingBefore;
-          }
-          if (detailQty <= 0) {
-            console.warn(`No remaining qty for detail ${actualDetailId} (remaining: ${remainingBefore})`);
-            continue;
-          }
-          const totalAssigned = currentAssigned + detailQty;
-          const remainingItems = totalNumber - totalAssigned;
-          const assignedDetailWeight = detailWeight * (detailQty / totalNumber || 0);
-          let currentContainerDetails = [];
-          if (orderItem.container_details) {
-            if (typeof orderItem.container_details === 'string') {
-              try {
-                currentContainerDetails = JSON.parse(orderItem.container_details);
-              } catch (e) {
-                console.warn(`Failed to parse container_details for detail ${actualDetailId}:`, e.message);
-              }
-            } else if (Array.isArray(orderItem.container_details)) {
-              currentContainerDetails = orderItem.container_details;
-            }
-          }
-          const detailAssign = recAssignments[detailIdxStr];
-          const detailCids = detailAssign.containers || []; // Already resolved to CIDs, filtered
-          const numNewConts = detailCids.length;
-          if (numNewConts === 0) continue;
-          let remainingQtyToAssign = detailQty;
-          let remainingWeightToAssign = assignedDetailWeight;
-          for (let i = 0; i < numNewConts; i++) {
-            const cid = detailCids[i];
-            const priorLocation = priorLocations.get(cid);  // e.g., 'karachi_port'
-            const fullCont = fullContainerMap.get(cid);
-            if (!fullCont) continue;
-            const contNum = fullCont.container_number;
-            newContNumbers.add(contNum);
-            const isLast = i === numNewConts - 1;
-            const thisQty = isLast ? remainingQtyToAssign : Math.floor(detailQty / numNewConts);
-            const thisWeight = isLast ? remainingWeightToAssign : assignedDetailWeight * (Math.floor(detailQty / numNewConts) / detailQty);
-            remainingQtyToAssign -= thisQty;
-            remainingWeightToAssign -= thisWeight;
-            // Check for existing entry
-            let existingIndex = -1;
-            for (let j = 0; j < currentContainerDetails.length; j++) {
-              if (currentContainerDetails[j].container?.cid === cid) {
-                existingIndex = j;
-                break;
-              }
-            }
-            const newEntry = {
-              status: "Ready for Loading",
-              container: {
-                cid: cid,
-                container_number: contNum
-              },
-              total_number: "",
-              assign_weight: Math.round(thisWeight / 1000).toString(),
-              remaining_items: remainingItems.toString(),
-              assign_total_box: thisQty.toString()
-            };
-            if (existingIndex !== -1) {
-              const existing = currentContainerDetails[existingIndex];
-              const newBox = parseInt(existing.assign_total_box || 0) + thisQty;
-              const newW = parseFloat(existing.assign_weight || 0) + Math.round(thisWeight / 1000);
-              currentContainerDetails[existingIndex] = {
-                ...existing,
-                assign_total_box: newBox.toString(),
-                assign_weight: newW.toString(),
-                remaining_items: remainingItems.toString()
-              };
-            } else {
-              currentContainerDetails.push(newEntry);
-            }
-            // Fetch previous status
-            const prevStatusQuery = `
-              SELECT availability as status
+        for (let i = 0; i < numNewConts; i++) {
+          const cid = cids[i];
+          // Refetch availability to handle race
+          const availQuery = `
+            SELECT 
+              CASE 
+                WHEN cs.availability = 'Cleared' THEN 'Cleared'
+                WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+                WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+                WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+                WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+                WHEN cs.availability = 'Arrived' THEN 'Arrived'
+                WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+                WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+                WHEN cs.availability = 'Returned' THEN 'Returned'
+                ELSE 'Available'
+              END as derived_status
+            FROM container_master cm
+            LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+            LEFT JOIN (
+              SELECT DISTINCT ON (cid) cid, location, availability
               FROM container_status
-              WHERE cid = $1
-              ORDER BY created_time DESC
-              LIMIT 1
-            `;
-            const prevStatusResult = await client.query(prevStatusQuery, [cid]);
-            const previousStatus = prevStatusResult.rows[0]?.status || 'Available';
-            // Enhanced notes with physical location
-            let enhancedStatusNotes = `Assigned ${thisQty} items from ${priorLocation.toUpperCase()} to Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} / Cont ${contNum}`;
-            let enhancedLogNotes = `Assigned ${thisQty} items to container ${contNum} for Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} (remaining: ${remainingItems}) from ${priorLocation.toUpperCase()}`;
-            // Collect for log (notes temp without ETA)
-            pendingLogs.push([
-              cid,
-              contNum,
+              ORDER BY cid, sid DESC NULLS LAST
+            ) cs ON cm.cid = cs.cid
+            WHERE cm.cid = $1
+          `;
+          const availResult = await client.query(availQuery, [cid]);
+          if (availResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(availResult.rows[0].derived_status)) {
+            console.warn(`Container ${cid} no longer eligible during assignment`);
+            continue;
+          }
+          const fullCont = fullContainerMap.get(cid);
+          if (!fullCont) continue;
+          const contNum = fullCont.container_number;
+          newContNumbers.add(contNum);
+          const isLast = i === numNewConts - 1;
+          const thisQty = isLast ? remainingQtyToAssign : Math.floor(detailQty / numNewConts);
+          const thisWeight = isLast ? remainingWeightToAssign : assignedDetailWeight * (Math.floor(detailQty / numNewConts) / detailQty);
+          remainingQtyToAssign -= thisQty;
+          remainingWeightToAssign -= thisWeight;
+          const priorLocation = priorLocations.get(cid) || 'karachi_port';
+          const prevStatusResult = await client.query(`
+            SELECT availability as status
+            FROM container_status
+            WHERE cid = $1
+            ORDER BY created_time DESC
+            LIMIT 1
+          `, [cid]);
+          const previousStatus = prevStatusResult.rows[0]?.status || 'Available';
+          let enhancedStatusNotes = `Assigned ${thisQty} items from ${priorLocation.toUpperCase()} to Order ${orderId} / Receiver ${recId} / Detail ${detailId} / Cont ${contNum}`;
+          let enhancedLogNotes = `Assigned ${thisQty} items to container ${contNum} for Order ${orderId} / Receiver ${recId} / Detail ${detailId} (remaining: ${remainingItems}) from ${priorLocation.toUpperCase()}`;
+          // Optional: Log for reassignments
+          if (fullCont.derived_status === 'Assigned to Job') {
+            console.warn(`Reassigning already 'Assigned to Job' container ${contNum} (CID ${cid}) to new detail ${detailId}`);
+            enhancedLogNotes += ' (Reassignment from prior job)';
+          }
+          pendingLogs.push([
+            cid,
+            contNum,
+            orderId,
+            recId,
+            detailId,
+            thisQty,
+            'Assigned to Job',
+            'ASSIGN',
+            created_by,
+            enhancedLogNotes,
+            previousStatus
+          ]);
+          pendingStatusInserts.push([cid, priorLocation, enhancedStatusNotes, created_by]);
+          sumThis += thisQty;
+        }
+        // Insert
+        for (let k = 0; k < pendingLogs.length; k++) {
+          const logValues = pendingLogs[k];
+          const tempNotes = logValues[9];
+          const fullNotes = `${tempNotes} (ETA: ${receiverEta || 'N/A'})`;
+          logValues[9] = fullNotes;
+          await client.query(logQuery, logValues);
+        }
+        for (let k = 0; k < pendingStatusInserts.length; k++) {
+          const [cid, location, tempStatusNotes, created_by_val] = pendingStatusInserts[k];
+          const fullStatusNotes = `${tempStatusNotes} (ETA: ${receiverEta || 'N/A'})`;
+          await client.query(statusInsertQuery, [cid, 'Assigned to Job', location, fullStatusNotes, created_by_val]);
+        }
+        return { assigned: sumThis, newContNumbers, logs: pendingLogs, statusInserts: pendingStatusInserts };
+      } catch (err) {
+        console.error(`Error in assignToDetail for detail ${detailId}:`, err);
+        return { assigned: 0, newContNumbers: new Set(), logs: [], statusInserts: [] };
+      }
+    }
+
+    // Helper to get available containers - for auto multi
+    async function getAvailableContainers() {
+      const availQuery = `
+        SELECT 
+          cm.*,
+          cs.location as status_location,
+          cs.availability as current_availability,
+          chd.hire_start_date,
+          chd.hire_end_date,
+          CASE 
+            WHEN cs.availability = 'Cleared' THEN 'Cleared'
+            WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+            WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+            WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+            WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+            WHEN cs.availability = 'Arrived' THEN 'Arrived'
+            WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+            WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+            WHEN cs.availability = 'Returned' THEN 'Returned'
+            ELSE 'Available'
+          END as derived_status
+        FROM container_master cm
+        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+        LEFT JOIN (
+          SELECT DISTINCT ON (cid) cid, location, availability
+          FROM container_status
+          ORDER BY cid, sid DESC NULLS LAST
+        ) cs ON cm.cid = cs.cid
+        WHERE (
+          CASE 
+            WHEN cs.availability = 'Cleared' THEN 'Cleared'
+            WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+            WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+            WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+            WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+            WHEN cs.availability = 'Arrived' THEN 'Arrived'
+            WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+            WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+            WHEN cs.availability = 'Returned' THEN 'Returned'
+            ELSE 'Available'
+          END
+        ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
+        ORDER BY cm.cid
+      `;
+      const availResult = await client.query(availQuery);
+      return availResult.rows;
+    }
+
+    for (const orderId of orderIds) {
+      const orderAssignments = resolvedAssignments[orderId] || {};
+      const currentOrder = currentOrders[orderId];
+      if (!currentOrder) continue;
+      let currentTotalAssigned = parseInt(currentOrder.total_assigned_qty) || 0;
+      let assignedForThisOrder = 0;
+      let assignedGrossWeight = 0;
+      let assignedCount = 0;
+      const orderReceivers = [];
+      let orderEta = currentOrder.eta || new Date().toISOString().split('T')[0];
+
+      if (singleMode) {
+        // Single container assignment to all remaining details across all receivers in the order
+        console.log(`Single container assigning to all remaining details in order ${orderId} using container ${singleContNum}`);
+        // Check availability once before starting
+        const availQuerySingle = `
+          SELECT 
+            CASE 
+              WHEN cs.availability = 'Cleared' THEN 'Cleared'
+              WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
+              WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+              WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+              WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+              WHEN cs.availability = 'Arrived' THEN 'Arrived'
+              WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+              WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+              WHEN cs.availability = 'Returned' THEN 'Returned'
+              ELSE 'Available'
+            END as derived_status
+          FROM container_master cm
+          LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+          LEFT JOIN (
+            SELECT DISTINCT ON (cid) cid, location, availability
+            FROM container_status
+            ORDER BY cid, sid DESC NULLS LAST
+          ) cs ON cm.cid = cs.cid
+          WHERE cm.cid = $1
+        `;
+        const availResult = await client.query(availQuerySingle, [singleCid]);
+        if (availResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(availResult.rows[0].derived_status)) {
+          console.warn(`Container ${singleCid} not eligible for order ${orderId}`);
+          continue;
+        }
+        const receiversQuerySingle = `
+          SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+          FROM receivers 
+          WHERE order_id = $1 AND total_number > COALESCE(qty_delivered, 0)
+        `;
+        const receiversResult = await client.query(receiversQuerySingle, [orderId]);
+        let allPendingLogs = [];
+        let allAssignedDetailIds = [];
+        let totalAssignedToCont = 0;
+        let receiverUpdates = []; // Collect receiver update queries
+        for (const recRow of receiversResult.rows) {
+          const recId = recRow.id;
+          const receiver = recRow;
+          orderReceivers.push(receiver);
+          const remainingDetailsQuery = `
+            SELECT oi.id as detail_id, oi.total_number, oi.weight, COALESCE(SUM(h.assigned_qty), 0) as current_assigned
+            FROM order_items oi
+            LEFT JOIN container_assignment_history h ON oi.id = h.detail_id
+            WHERE oi.receiver_id = $1
+            GROUP BY oi.id, oi.total_number, oi.weight
+            HAVING oi.total_number > COALESCE(SUM(h.assigned_qty), 0)
+            ORDER BY oi.id
+          `;
+          const remainingDetailsResult = await client.query(remainingDetailsQuery, [recId]);
+          let sumQty = 0;
+          let sumGross = 0;
+          let receiverEta = receiver.eta || orderEta;
+          let recAssignedDetailIds = [];
+          let recPendingLogs = [];
+          for (const detailRow of remainingDetailsResult.rows) {
+            const detailId = detailRow.detail_id;
+            const totalNumber = parseInt(detailRow.total_number);
+            const detailWeight = parseFloat(detailRow.weight) || 0;
+            const currentAssigned = parseInt(detailRow.current_assigned) || 0;
+            const remaining = totalNumber - currentAssigned;
+            if (remaining <= 0) continue;
+            const thisQty = remaining;
+            const assignedDetailWeight = detailWeight * (thisQty / totalNumber);
+            let enhancedLogNotes = `Assigned ${thisQty} items to container ${singleContNum} for Order ${orderId} / Receiver ${recId} / Detail ${detailId}`;
+            // Optional: Log for reassignments
+            if (singleFullCont.derived_status === 'Assigned to Job') {
+              console.warn(`Reassigning already 'Assigned to Job' container ${singleContNum} (CID ${singleCid}) to new detail ${detailId}`);
+              enhancedLogNotes += ' (Reassignment from prior job)';
+            }
+            recPendingLogs.push([
+              singleCid,
+              singleContNum,
               orderId,
               recId,
-              actualDetailId,
+              detailId,
               thisQty,
               'Assigned to Job',
               'ASSIGN',
               created_by,
               enhancedLogNotes,
-              previousStatus
+              singlePreviousStatus
             ]);
-            // Collect for status insert (notes temp without ETA; location physical)
-            pendingStatusInserts.push([cid, priorLocation, enhancedStatusNotes, created_by]);
+            totalAssignedToCont += thisQty;
+            allAssignedDetailIds.push(detailId);
+            recAssignedDetailIds.push(detailId);
+            sumQty += thisQty;
+            sumGross += assignedDetailWeight;
           }
-          // Update all remaining_items in currentContainerDetails
-          currentContainerDetails.forEach(cd => {
-            cd.remaining_items = remainingItems.toString();
-          });
-          // Update order_item container_details
-          const updateItemQuery = `
-            UPDATE order_items 
-            SET container_details = $1, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2
-            RETURNING id
-          `;
-          const itemUpdateResult = await client.query(updateItemQuery, [JSON.stringify(currentContainerDetails), actualDetailId]);
-          if (itemUpdateResult.rowCount === 0) {
-            console.warn(`Failed to update order_item ${actualDetailId}`);
+          if (recPendingLogs.length > 0) {
+            // Prepare receiver update
+            let currentContainers = [];
+            if (receiver.containers && typeof receiver.containers === 'string') {
+              try {
+                currentContainers = JSON.parse(receiver.containers);
+              } catch (e) {
+                currentContainers = [];
+              }
+            }
+            const allContainers = new Set([...currentContainers, singleContNum]);
+            const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+            let newEta = receiverEta;
+            let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+            const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+            const receiverSet = [];
+            const receiverValues = [];
+            let receiverParamIndex = 1;
+            const receiverFields = [
+              { key: 'containers', val: updatedContainersJson },
+              { key: 'qty_delivered', val: newDelivered },
+              { key: 'eta', val: newEta || null },
+              { key: 'etd', val: newEtd || null },
+              { key: 'status', val: 'Ready for Loading' }
+            ];
+            receiverFields.forEach(field => {
+              receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+              receiverValues.push(field.val);
+              receiverParamIndex++;
+            });
+            receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+            receiverValues.push(recId);
+            const updateReceiverQuery = `
+              UPDATE receivers 
+              SET ${receiverSet.join(', ')} 
+              WHERE id = $${receiverParamIndex}
+              RETURNING id, status, eta
+            `;
+            receiverUpdates.push({ query: updateReceiverQuery, values: receiverValues, sumQty, sumGross, receiver, recId });
+            allPendingLogs = allPendingLogs.concat(recPendingLogs);
+          }
+        }
+        // Now, after collecting all, insert logs and status once
+        if (allPendingLogs.length > 0) {
+          // Refetch eligibility final check
+          const finalAvailResult = await client.query(availQuerySingle, [singleCid]);
+          if (finalAvailResult.rows[0]?.derived_status && !['Available', 'Assigned to Job'].includes(finalAvailResult.rows[0].derived_status)) {
+            console.warn(`Container ${singleCid} no longer eligible at final insert for order ${orderId}`);
             continue;
           }
-          // Accumulate
-          sumQty += detailQty;
-          sumGross += assignedDetailWeight;
+          // Insert all history logs
+          for (const logValues of allPendingLogs) {
+            const tempNotes = logValues[9];
+            const fullNotes = `${tempNotes} (ETA: ${orderEta || 'N/A'})`;
+            logValues[9] = fullNotes;
+            await client.query(logQuery, logValues);
+          }
+          // Insert one status for the whole order
+          const assignedReceiversList = receiverUpdates.map(ru => ru.recId).join(', ');
+          const enhancedStatusNotes = `Assigned ${totalAssignedToCont} items from ${singlePriorLocation.toUpperCase()} to Order ${orderId} / Receivers ${assignedReceiversList} / Cont ${singleContNum} (details: ${allAssignedDetailIds.join(', ')})`;
+          const fullStatusNotes = `${enhancedStatusNotes} (ETA: ${orderEta || 'N/A'})`;
+          await client.query(statusInsertQuery, [singleCid, 'Assigned to Job', singlePriorLocation, fullStatusNotes, created_by]);
+          // Now execute receiver updates
+          for (const ru of receiverUpdates) {
+            const updateResult = await client.query(ru.query, ru.values);
+            if (updateResult.rowCount > 0) {
+              assignedCount++;
+              assignedForThisOrder += ru.sumQty;
+              assignedGrossWeight += ru.sumGross;
+              trackingData.push({
+                receiverId: ru.recId,
+                receiverName: ru.receiver.receiver_name,
+                orderId,
+                bookingRef: currentOrder.booking_ref,
+                assignedQty: ru.sumQty,
+                assignedGross: ru.sumGross.toFixed(2),
+                assignedContainers: [singleContNum],
+                status: currentOrder.overall_status,
+                newEta: ru.receiver.eta,
+                newEtd: ru.receiver.etd || new Date().toISOString().split('T')[0],
+                daysUntilEta: null
+              });
+              console.log(`Single container assigned ${ru.sumQty} to receiver ${ru.recId}`);
+            }
+          }
         }
-        if (sumQty === 0 && newContNumbers.size === 0) {
-          console.warn(`No qty or containers to assign for receiver ${recId} (skipped details: ${sortedDetailKeys.filter(k => recAssignments[k].qty > 0 && recAssignments[k].containers.length === 0)})`);
-          continue;
+      } else if (Object.keys(orderAssignments).length > 0) {
+        // Specific assignments - original code
+        for (const recIdStr of Object.keys(orderAssignments)) {
+          const recId = parseInt(recIdStr);
+          if (isNaN(recId)) continue;
+          const receiverQuery = `
+            SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+            FROM receivers 
+            WHERE id = $1 AND order_id = $2
+          `;
+          const receiverResult = await client.query(receiverQuery, [recId, orderId]);
+          if (receiverResult.rowCount === 0) continue;
+          const receiver = receiverResult.rows[0];
+          orderReceivers.push(receiver);
+          let currentContainers = [];
+          if (receiver.containers && typeof receiver.containers === 'string') {
+            try {
+              currentContainers = JSON.parse(receiver.containers);
+            } catch (e) {
+              currentContainers = [];
+            }
+          }
+          const itemsQuery = `
+            SELECT id, total_number, weight
+            FROM order_items 
+            WHERE receiver_id = $1 
+            ORDER BY id ASC
+          `;
+          const itemsResult = await client.query(itemsQuery, [recId]);
+          const orderItemsIds = itemsResult.rows.map(row => row.id);
+          const orderItemsMap = new Map(itemsResult.rows.map(row => [row.id, row]));
+          const recAssignments = orderAssignments[recIdStr];
+          const sortedDetailKeys = Object.keys(recAssignments).sort((a, b) => parseInt(a) - parseInt(b));
+          let sumQty = 0;
+          let sumGross = 0;
+          let newContNumbers = new Set();
+          for (const detailIdxStr of sortedDetailKeys) {
+            const detailIndex = parseInt(detailIdxStr);
+            if (isNaN(detailIndex) || detailIndex >= orderItemsIds.length) continue;
+            let intendedDetailId = orderItemsIds[detailIndex];
+            const detailAssign = recAssignments[detailIdxStr];
+            const detailCids = detailAssign.containers || [];
+            if (detailCids.length === 0) continue;
+            const resolvedCidsThis = detailCids;
+            if (resolvedCidsThis.length === 0) continue;
+            const result = await assignToDetail(orderId, recId, intendedDetailId, parseInt(detailAssign.qty) || 0, resolvedCidsThis, fullContainerMap, priorLocations, receiver.eta);
+            if (result.assigned > 0) {
+              sumQty += result.assigned;
+              result.newContNumbers.forEach(num => newContNumbers.add(num));
+              sumGross += (receiver.total_weight || 0) * (result.assigned / (receiver.total_number || 1));  // Approximate gross
+            }
+          }
+          if (sumQty > 0) {
+            const allContainers = new Set([...currentContainers, ...newContNumbers]);
+            const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+            let newEta = receiver.eta;
+            let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+            const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+            const receiverSet = [];
+            const receiverValues = [];
+            let receiverParamIndex = 1;
+            const receiverFields = [
+              { key: 'containers', val: updatedContainersJson },
+              { key: 'qty_delivered', val: newDelivered },
+              { key: 'eta', val: newEta || null },
+              { key: 'etd', val: newEtd || null },
+              { key: 'status', val: 'Ready for Loading' }
+            ];
+            receiverFields.forEach(field => {
+              receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+              receiverValues.push(field.val);
+              receiverParamIndex++;
+            });
+            receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+            receiverValues.push(recId);
+            const updateReceiverQuery = `
+              UPDATE receivers 
+              SET ${receiverSet.join(', ')} 
+              WHERE id = $${receiverParamIndex}
+              RETURNING id, status, eta
+            `;
+            const updateResult = await client.query(updateReceiverQuery, receiverValues);
+            if (updateResult.rowCount > 0) {
+              assignedCount++;
+              assignedForThisOrder += sumQty;
+              assignedGrossWeight += sumGross;
+              trackingData.push({
+                receiverId: recId,
+                receiverName: receiver.receiver_name,
+                orderId,
+                bookingRef: currentOrder.booking_ref,
+                assignedQty: sumQty,
+                assignedGross: sumGross.toFixed(2),
+                assignedContainers: Array.from(newContNumbers),
+                status: currentOrder.overall_status,
+                newEta,
+                newEtd,
+                daysUntilEta: null
+              });
+              console.log(`Specific assigned ${sumQty} to receiver ${recId}`);
+            }
+          }
         }
-        // Append unique new containers
-        const allContainers = new Set([...currentContainers, ...newContNumbers]);
-        const updatedContainersJson = JSON.stringify(Array.from(allContainers));
-        // Since assigned, now calculate eta/etd
-        let newEta = receiver.eta;
-        let newEtd = receiver.etd;
-        let daysUntilEta = null;
-        const nowHasContainers = allContainers.size > 0;
-        if (nowHasContainers && !newEta) {
-          const etaResult = await calculateETAAll(client, receiver.status || 'Created');
-          newEta = etaResult.eta;
-          daysUntilEta = etaResult.daysUntil;
-          console.log(`[assignContainers] Calculated new ETA for receiver ${recId}: ${newEta} (status: ${receiver.status}, daysUntil: ${daysUntilEta})`);
-        } else if (newEta) {
-          daysUntilEta = computeDaysUntilEtaAll(newEta);
-        }
-        // ETD: Set to today if not set
-        if (nowHasContainers && !newEtd) {
-          newEtd = new Date().toISOString().split('T')[0];
-          console.log(`[assignContainers] Set ETD for receiver ${recId} to today: ${newEtd}`);
-        }
-        // Insert pending logs and status updates with ETA
-        for (let k = 0; k < pendingLogs.length; k++) {
-          const logValues = pendingLogs[k];
-          const tempNotes = logValues[9];
-          const fullNotes = `${tempNotes} (ETA: ${newEta || 'N/A'})`;
-          logValues[9] = fullNotes;
-          await client.query(logQuery, logValues);
-        }
-        const statusInsertQuery = `
-          INSERT INTO container_status (cid, availability, location, status_notes, created_by, created_time) 
-          VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-        `;
-        for (let k = 0; k < pendingStatusInserts.length; k++) {
-          const [cid, location, tempStatusNotes, created_by_val] = pendingStatusInserts[k];
-          const fullStatusNotes = `${tempStatusNotes} (ETA: ${newEta || 'N/A'})`;
-          await client.query(statusInsertQuery, [cid, 'Assigned to Job', location, fullStatusNotes, created_by_val]);
-        }
-        // Update qty_delivered
-        const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
-        // Update receiver (dynamic SET) - removed total_weight update; added status
-        const receiverSet = [];
-        const receiverValues = [];
-        let receiverParamIndex = 1;
-        const receiverFields = [
-          { key: 'containers', val: updatedContainersJson },
-          { key: 'qty_delivered', val: newDelivered },
-          { key: 'eta', val: newEta || null },
-          { key: 'etd', val: newEtd || null },
-          { key: 'status', val: 'Ready for Loading' }
-        ];
-        receiverFields.forEach(field => {
-          receiverSet.push(`${field.key} = $${receiverParamIndex}`);
-          receiverValues.push(field.val);
-          receiverParamIndex++;
-        });
-        receiverSet.push('updated_at = CURRENT_TIMESTAMP');
-        receiverValues.push(recId);
-        const updateReceiverQuery = `
-          UPDATE receivers 
-          SET ${receiverSet.join(', ')} 
-          WHERE id = $${receiverParamIndex}
-          RETURNING id, status, eta
-        `;
-        const updateResult = await client.query(updateReceiverQuery, receiverValues);
-        if (updateResult.rowCount > 0) {
-          assignedCount++;
-          assignedForThisOrder += sumQty;
-          assignedGrossWeight += sumGross;
-          const updatedRec = updateResult.rows[0];
-          trackingData.push({
-            receiverId: recId,
-            receiverName: receiver.receiver_name,
-            orderId: currentOrder.id,
-            bookingRef: currentOrder.booking_ref,
-            assignedQty: sumQty,
-            assignedGross: sumGross.toFixed(2),
-            assignedContainers: Array.from(newContNumbers),
-            status: currentOrder.overall_status,
-            newEta: newEta,
-            newEtd: newEtd,
-            daysUntilEta
-          });
-          console.log(`Assigned ${sumQty} qty, ${sumGross.toFixed(2)} gross, ${newContNumbers.size} containers to receiver ${recId} (order ${orderId}); ETA/ETD: ${newEta}/${newEtd} (days: ${daysUntilEta})`);
-        } else {
-          console.warn(`No rows updated for receiver ${recId}`);
+      } else {
+        // Original auto-assignment for orders without specific assignments
+        console.log(`Auto-assigning to remaining details in order ${orderId}`);
+        const receiversResult = await client.query('SELECT id FROM receivers WHERE order_id = $1 AND (total_number > COALESCE(qty_delivered, 0))', [orderId]);
+        let availableContainers = await getAvailableContainers();
+        let contIndex = 0;
+        for (const recRow of receiversResult.rows) {
+          const recId = recRow.id;
+          const receiverQuery = `
+            SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
+            FROM receivers 
+            WHERE id = $1
+          `;
+          const receiverResult = await client.query(receiverQuery, [recId]);
+          if (receiverResult.rowCount === 0) continue;
+          const receiver = receiverResult.rows[0];
+          orderReceivers.push(receiver);
+          const remainingDetailsQuery = `
+            SELECT oi.id, oi.total_number, oi.weight, COALESCE(SUM(h.assigned_qty), 0) as assigned
+            FROM order_items oi
+            LEFT JOIN container_assignment_history h ON oi.id = h.detail_id
+            WHERE oi.receiver_id = $1
+            GROUP BY oi.id, oi.total_number, oi.weight
+            HAVING oi.total_number > COALESCE(SUM(h.assigned_qty), 0)
+            ORDER BY oi.id
+          `;
+          const remainingDetailsResult = await client.query(remainingDetailsQuery, [recId]);
+          let sumQty = 0;
+          let sumGross = 0;
+          let newContNumbers = new Set();
+          for (const detailRow of remainingDetailsResult.rows) {
+            const detailId = detailRow.id;
+            const remaining = parseInt(detailRow.total_number) - parseInt(detailRow.assigned);
+            if (contIndex >= availableContainers.length) {
+              availableContainers = await getAvailableContainers();
+              contIndex = 0;
+            }
+            if (availableContainers.length === 0) break;
+            const fullCont = availableContainers[contIndex];
+            const cids = [fullCont.cid];
+            const result = await assignToDetail(orderId, recId, detailId, remaining, cids, new Map(availableContainers.map(c => [c.cid, c])), priorLocations, receiver.eta);
+            if (result.assigned > 0) {
+              sumQty += result.assigned;
+              result.newContNumbers.forEach(num => newContNumbers.add(num));
+              sumGross += parseFloat(detailRow.weight) * (result.assigned / parseInt(detailRow.total_number) || 0);
+            }
+            contIndex++;
+          }
+          if (sumQty > 0) {
+            let currentContainers = [];
+            if (receiver.containers && typeof receiver.containers === 'string') {
+              try {
+                currentContainers = JSON.parse(receiver.containers);
+              } catch (e) {
+                currentContainers = [];
+              }
+            }
+            const allContainers = new Set([...currentContainers, ...newContNumbers]);
+            const updatedContainersJson = JSON.stringify(Array.from(allContainers));
+            let newEta = receiver.eta;
+            let newEtd = receiver.etd || new Date().toISOString().split('T')[0];
+            const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
+            const receiverSet = [];
+            const receiverValues = [];
+            let receiverParamIndex = 1;
+            const receiverFields = [
+              { key: 'containers', val: updatedContainersJson },
+              { key: 'qty_delivered', val: newDelivered },
+              { key: 'eta', val: newEta || null },
+              { key: 'etd', val: newEtd || null },
+              { key: 'status', val: 'Ready for Loading' }
+            ];
+            receiverFields.forEach(field => {
+              receiverSet.push(`${field.key} = $${receiverParamIndex}`);
+              receiverValues.push(field.val);
+              receiverParamIndex++;
+            });
+            receiverSet.push('updated_at = CURRENT_TIMESTAMP');
+            receiverValues.push(recId);
+            const updateReceiverQuery = `
+              UPDATE receivers 
+              SET ${receiverSet.join(', ')} 
+              WHERE id = $${receiverParamIndex}
+              RETURNING id, status, eta
+            `;
+            const updateResult = await client.query(updateReceiverQuery, receiverValues);
+            if (updateResult.rowCount > 0) {
+              assignedCount++;
+              assignedForThisOrder += sumQty;
+              assignedGrossWeight += sumGross;
+              trackingData.push({
+                receiverId: recId,
+                receiverName: receiver.receiver_name,
+                orderId,
+                bookingRef: currentOrder.booking_ref,
+                assignedQty: sumQty,
+                assignedGross: sumGross.toFixed(2),
+                assignedContainers: Array.from(newContNumbers),
+                status: currentOrder.overall_status,
+                newEta,
+                newEtd,
+                daysUntilEta: null
+              });
+              console.log(`Auto assigned ${sumQty} to receiver ${recId}`);
+            }
+          }
         }
       }
-      // After processing all receivers for this order, update the order
+
+      // Update order if assigned something
       if (assignedForThisOrder > 0) {
         const newTotalAssigned = currentTotalAssigned + assignedForThisOrder;
-        orderAssignedQtys.set(orderId, newTotalAssigned);
         const orderSet = [];
         const orderValues = [];
         let orderParamIndex = 1;
         const orderFields = [
           { key: 'total_assigned_qty', val: newTotalAssigned },
-          { key: 'eta', val: currentOrder.eta || new Date().toISOString().split('T')[0] }
+          { key: 'eta', val: orderEta }
         ];
         orderFields.forEach(field => {
           orderSet.push(`${field.key} = $${orderParamIndex}`);
@@ -3777,12 +5980,9 @@ export async function assignContainersToOrdersAll(req, res) {
           RETURNING id, total_assigned_qty, eta
         `;
         const orderUpdateResult = await client.query(updateOrderQuery, orderValues);
-        if (orderUpdateResult.rowCount === 0) {
-          console.warn(`Failed to update total_assigned_qty/eta for order ${orderId}`);
-        } else {
-          console.log(`Updated total_assigned_qty to ${newTotalAssigned} and ETA for order ${orderId}`);
+        if (orderUpdateResult.rowCount > 0) {
+          console.log(`Updated total_assigned_qty to ${newTotalAssigned} for order ${orderId}`);
         }
-        // Cascade overall status
         await updateOrderOverallStatus(client, orderId, 'Loaded Into Container', orderReceivers);
       }
       updatedOrders.push({ 
@@ -3794,116 +5994,104 @@ export async function assignContainersToOrdersAll(req, res) {
       });
     }
     await client.query('COMMIT');
-    // Refetch updated data - for all affected orders
+
+    // Refetch updated data (same as before, with containerDetails from history)
     const enhancedUpdatedOrders = [];
+    const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+    const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT json_agg(
+          json_build_object(
+            'status', CASE WHEN ${totalAssignedSub} > 0 THEN 'Ready for Loading' ELSE 'Created' END,
+            'container', json_build_object(
+              'cid', h.cid,
+              'container_number', cm.container_number
+            ),
+            'total_number', ${safeIntCast('oi.total_number')},
+            'assign_weight', CASE 
+              WHEN ${totalAssignedSub} > 0 AND h.assigned_qty > 0 THEN 
+                ROUND((h.assigned_qty::numeric / ${totalAssignedSub}::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+              ELSE '0' 
+            END,
+            'remaining_items', (${safeIntCast('oi.total_number')} - ${totalAssignedSub})::text,
+            'assign_total_box', h.assigned_qty::text
+          ) ORDER BY cm.container_number
+        )
+        FROM (
+          SELECT cid, SUM(assigned_qty) as assigned_qty 
+          FROM container_assignment_history 
+          WHERE detail_id = oi.id 
+          GROUP BY cid
+        ) h 
+        LEFT JOIN container_master cm ON h.cid = cm.cid 
+        WHERE h.cid IS NOT NULL
+      ), '[]'::json)
+    `;
+    const fetchReceiversQuery = `
+      SELECT 
+        r.*,
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'pickupLocation', oi.pickup_location,
+                'deliveryAddress', oi.delivery_address,
+                'category', oi.category,
+                'subcategory', oi.subcategory,
+                'type', oi.type,
+                'totalNumber', ${safeIntCast('oi.total_number')},
+                'weight', ${safeNumericCast('oi.weight')},
+                'itemRef', oi.item_ref,
+                'containerDetails', ${containerDetailsSub},
+                'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
+              ) ORDER BY oi.id
+            )
+            FROM order_items oi 
+            WHERE oi.receiver_id = r.id
+          ), 
+          '[]'::json
+        ) AS shippingDetails
+      FROM receivers r 
+      WHERE r.order_id = $1 
+      ORDER BY r.id
+    `;
     for (const updOrder of updatedOrders) {
       const orderId = updOrder.orderId;
-      // Refetch order
       const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
-      // Fetch senders
       const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [orderId]);
-      // Fetch enhanced receivers with shippingDetails
-      const fetchReceiversQuery = `
-        SELECT 
-          r.*,
-          COALESCE(
-            (
-              SELECT json_agg(
-                json_build_object(
-                  'pickupLocation', oi.pickup_location,
-                  'deliveryAddress', oi.delivery_address,
-                  'category', oi.category,
-                  'subcategory', oi.subcategory,
-                  'type', oi.type,
-                  'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
-                  'weight', oi.weight,
-                  'itemRef', oi.item_ref,
-                  'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-                  'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
-                ) ORDER BY oi.id
-              )
-              FROM order_items oi 
-              WHERE oi.receiver_id = r.id
-            ), 
-            '[]'::json
-          ) AS shippingDetails
-        FROM receivers r 
-        WHERE r.order_id = $1 
-        ORDER BY r.id
-      `;
       const enhancedReceiversResult = await client.query(fetchReceiversQuery, [orderId]);
       const enhancedReceivers = enhancedReceiversResult.rows.map(row => ({
         ...row,
         shippingDetails: row.shippingDetails || [],
         containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])
       }));
-      // Fetch summary
-      let orderSummary = [];
+      let orderSummary = [];  
       try {
-        const summaryQuery = 'SELECT * FROM order_summary WHERE order_id = $1';
-        const summaryResult = await client.query(summaryQuery, [orderId]);
+        const summaryResult = await client.query('SELECT * FROM order_summary WHERE order_id = $1', [orderId]);
         orderSummary = summaryResult.rows;
-      } catch (summaryErr) {
-        console.warn('order_summary view fetch failed:', summaryErr.message);
-        // FIXED: Simplified fallback; used jsonb_agg for receivers_details, avoided nested LATERAL
-        const fallbackQuery = `
-          SELECT 
-            o.id as order_id, o.booking_ref, o.status, o.created_at, o.eta, o.etd, o.shipping_line,
-            s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
-            t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
-            t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
-            t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
-            t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
-            t.gatepass,
-            ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
-            cm.container_number,
-            rs.receiver_summary,
-            rss.receiver_status_summary,
-            rc.receiver_containers_json,
-            rt.total_items,
-            rt.remaining_items,
-            rd.receivers_details
-          FROM orders o
-          LEFT JOIN senders s ON o.id = s.order_id
-          LEFT JOIN transport_details t ON o.id = t.order_id
-          LEFT JOIN order_tracking ot ON o.id = ot.order_id
-          LEFT JOIN container_master cm ON ot.container_id = cm.cid
-          LEFT JOIN (
-            SELECT jsonb_agg(
-              json_build_object(
-                'id', r.id,
-                'receiver_name', r.receiver_name,
-                'shippingDetails', COALESCE((
-                  SELECT json_agg(
-                    json_build_object(
-                      'pickupLocation', oi.pickup_location,
-                      'deliveryAddress', oi.delivery_address,
-                      'category', oi.category,
-                      'subcategory', oi.subcategory,
-                      'type', oi.type,
-                      'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
-                      'weight', oi.weight,
-                      'itemRef', oi.item_ref,
-                      'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-                      'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
-                    ) ORDER BY oi.id
-                    FROM order_items oi WHERE oi.receiver_id = r.id
-                ), '[]'::json)
-              ) ORDER BY r.id
-            ) AS receivers_details
-            FROM receivers r
-            WHERE r.order_id = $1
-          ) rd ON true
-          WHERE o.id = $1
-        `;
-        const fallbackResult = await client.query(fallbackQuery, [orderId]);
-        orderSummary = fallbackResult.rows;
+      } catch (e) {
+        console.warn('order_summary fetch failed:', e.message);
+        orderSummary = [];  // Fallback as before if needed
       }
+      // Fetch container_assignment_history details for this order
+      const historyQuery = `
+        SELECT 
+          h.*,
+          cm.container_number
+        FROM container_assignment_history h
+        LEFT JOIN container_master cm ON h.cid = cm.cid
+        WHERE h.order_id = $1
+        ORDER BY h.id DESC
+      `;
+      const historyResult = await client.query(historyQuery, [orderId]);
       enhancedUpdatedOrders.push({
         order: updatedOrderResult.rows[0],
         senders: updatedSenderResult.rows,
         summary: orderSummary,
         receivers: enhancedReceivers,
+        assignmentHistory: historyResult.rows,  // Added full history details
         tracking: trackingData.filter(t => t.orderId === orderId)
       });
     }
@@ -3913,9 +6101,6 @@ export async function assignContainersToOrdersAll(req, res) {
       updatedOrders: enhancedUpdatedOrders,
       tracking: trackingData 
     };
-    if (skippedContainers) {
-      responseData.warning = `Skipped unavailable containers: ${skippedContainers}`;
-    }
     if (skippedDetails.length > 0) {
       responseData.skippedDetails = skippedDetails;
       console.warn(`Skipped ${skippedDetails.length} over-assigned details:`, skippedDetails);
@@ -3926,34 +6111,16 @@ export async function assignContainersToOrdersAll(req, res) {
     if (client) {
       try {
         await client.query('ROLLBACK');
-        console.log('Transaction rolled back successfully');
       } catch (rollbackErr) {
         console.error('Rollback failed:', rollbackErr);
       }
     }
-    if (error.code === '23505') {
-      return res.status(409).json({ error: 'Duplicate entry conflict' });
-    }
-    if (error.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value for constrained field' });
-    }
-    if (error.code === '22007' || error.code === '22008') {
-      return res.status(400).json({ error: 'Invalid date format' });
-    }
-    if (error.code === '22023') {  // NEW: JSON errors
-      return res.status(400).json({ error: 'Invalid JSON in container details' });
-    }
-    if (error.code === '42P01' || error.code === '42703') {
-      return res.status(500).json({ error: 'Database schema mismatch. Run migrations.' });
-    }
+    // Error codes as before...
     return res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
-    if (client) {   
-      client.release();
-    }
+    if (client) client.release();
   }
 }
-
 export async function assignContainersToOrders(req, res) {
   let client;
   try {
@@ -3961,6 +6128,30 @@ export async function assignContainersToOrders(req, res) {
     await client.query('BEGIN');
     const updates = req.body || {};
     const created_by = req.user?.id || 'system';  // From auth if available
+
+    // Helper: Sanitize numeric fields for JSON (prevents "" in strings)
+    function sanitizeForJson(val, isNumeric = true) {
+      if (isNumeric) {
+        const num = parseFloat(val) || parseInt(val, 10) || 0;
+        return num.toString();
+      }
+      return val || '';
+    }
+
+    // NEW: Bulk sanitize entire container_details array (cleans existing entries with "")
+    function bulkSanitizeContainerDetails(details) {
+      if (!Array.isArray(details)) return details || [];
+      return details.map(cd => {
+        if (typeof cd !== 'object' || !cd) return cd;  // Skip invalid
+        const numericFields = ['total_number', 'assign_weight', 'remaining_items', 'assign_total_box'];
+        numericFields.forEach(field => {
+          if (field in cd) {
+            cd[field] = sanitizeForJson(cd[field]);
+          }
+        });
+        return cd;
+      });
+    }
 
     // Extract assignments (support wrapped or direct)
     let assignments = updates.assignments || updates;
@@ -4039,18 +6230,16 @@ export async function assignContainersToOrders(req, res) {
       return res.status(400).json({ error: 'No valid containers specified in assignments' });
     }
 
-    // NEW: Fetch prior physical locations for each CID (default to 'karachi_port')
-    const priorLocations = new Map();
-    for (const cid of allCids) {
-      const priorQuery = `
-        SELECT location FROM container_status 
-        WHERE cid = $1 ORDER BY created_time DESC LIMIT 1
-      `;
-      const priorResult = await client.query(priorQuery, [cid]);
-      priorLocations.set(cid, priorResult.rows[0]?.location || 'karachi_port');
-    }
+    // Batched: Fetch prior physical locations for all CIDs (default to 'karachi_port')
+    const priorQuery = `
+      SELECT DISTINCT ON (cid) cid, location
+      FROM container_status 
+      WHERE cid = ANY($1) ORDER BY cid, created_time DESC
+    `;
+    const priorResult = await client.query(priorQuery, [Array.from(allCids)]);
+    const priorLocations = new Map(priorResult.rows.map(row => [row.cid, row.location || 'karachi_port']));
 
-    // Fetch full container details for all unique cids - ensure only available
+    // Fetch full container details for all unique cids - ensure only available OR assigned to job
     const containerQuery = `
       SELECT 
         cm.*,
@@ -4092,7 +6281,7 @@ export async function assignContainersToOrders(req, res) {
           WHEN cs.availability = 'Returned' THEN 'Returned'
           ELSE 'Available'
         END
-      ) = 'Available' AND cs.location IN ('karachi_port', 'dubai_port')
+      ) IN ('Available', 'Assigned to Job') AND cs.location IN ('karachi_port', 'dubai_port')
     `;
     const containerResult = await client.query(containerQuery, [Array.from(allCids)]);
     console.log('Container query for CIDs', Array.from(allCids), 'returned', containerResult.rows.length, 'rows');
@@ -4106,7 +6295,7 @@ export async function assignContainersToOrders(req, res) {
     console.log('Missing/unavailable CIDs:', missingCids);
     if (missingCids.length > 0) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Containers not found or not available: ${missingCids.join(', ')}` });
+      return res.status(400).json({ error: `Containers not found, not available, or not in eligible status: ${missingCids.join(', ')}` });
     }
 
     // Track updates
@@ -4273,6 +6462,8 @@ export async function assignContainersToOrders(req, res) {
               currentContainerDetails = orderItem.container_details;
             }
           }
+          // NEW: Bulk sanitize loaded details to clean existing "" entries
+          currentContainerDetails = bulkSanitizeContainerDetails(currentContainerDetails);
           const detailAssign = recAssignments[detailIdxStr];
           const detailCids = [];
           if (Array.isArray(detailAssign.containers)) {
@@ -4289,7 +6480,7 @@ export async function assignContainersToOrders(req, res) {
           let remainingWeightToAssign = assignedDetailWeight;
           for (let i = 0; i < numNewConts; i++) {
             const cid = detailCids[i];
-            const priorLocation = priorLocations.get(cid);  // e.g., 'karachi_port'
+            const priorLocation = priorLocations.get(cid) || 'karachi_port';  // Fallback
             const fullCont = fullContainerMap.get(cid);
             if (!fullCont) continue;
             const contNum = fullCont.container_number;
@@ -4313,20 +6504,21 @@ export async function assignContainersToOrders(req, res) {
                 cid: cid,
                 container_number: contNum
               },
-              total_number: "",
-              assign_weight: Math.round(thisWeight / 1000).toString(),
-              remaining_items: remainingItems.toString(),
-              assign_total_box: thisQty.toString()
+              total_number: sanitizeForJson(totalNumber),  // FIXED: Was ""
+              assign_weight: sanitizeForJson(Math.round(thisWeight / 1000)),
+              remaining_items: sanitizeForJson(remainingItems),
+              assign_total_box: sanitizeForJson(thisQty)
             };
             if (existingIndex !== -1) {
               const existing = currentContainerDetails[existingIndex];
-              const newBox = parseInt(existing.assign_total_box || 0) + thisQty;
-              const newW = parseFloat(existing.assign_weight || 0) + Math.round(thisWeight / 1000);
+              const newBox = parseInt(sanitizeForJson(existing.assign_total_box)) + thisQty;
+              const newW = parseFloat(sanitizeForJson(existing.assign_weight)) + Math.round(thisWeight / 1000);
               currentContainerDetails[existingIndex] = {
                 ...existing,
-                assign_total_box: newBox.toString(),
-                assign_weight: newW.toString(),
-                remaining_items: remainingItems.toString()
+                total_number: sanitizeForJson(totalNumber),
+                assign_total_box: sanitizeForJson(newBox),
+                assign_weight: sanitizeForJson(newW),
+                remaining_items: sanitizeForJson(remainingItems)
               };
             } else {
               currentContainerDetails.push(newEntry);
@@ -4344,6 +6536,11 @@ export async function assignContainersToOrders(req, res) {
             // Enhanced notes with physical location
             let enhancedStatusNotes = `Assigned ${thisQty} items from ${priorLocation.toUpperCase()} to Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} / Cont ${contNum}`;
             let enhancedLogNotes = `Assigned ${thisQty} items to container ${contNum} for Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} (remaining: ${remainingItems}) from ${priorLocation.toUpperCase()}`;
+            // Optional: Log for reassignments
+            if (fullCont.derived_status === 'Assigned to Job') {
+              console.warn(`Reassigning already 'Assigned to Job' container ${contNum} (CID ${cid}) to new detail ${actualDetailId}`);
+              enhancedLogNotes += ' (Reassignment from prior job)';
+            }
             // Collect for log
             pendingLogs.push([
               cid, contNum, orderId, recId, actualDetailId, thisQty, 'Assigned to Job',
@@ -4354,7 +6551,7 @@ export async function assignContainersToOrders(req, res) {
           }
           // Update all remaining_items in currentContainerDetails
           currentContainerDetails.forEach(cd => {
-            cd.remaining_items = remainingItems.toString();
+            cd.remaining_items = sanitizeForJson(remainingItems);
           });
           // Update order_item container_details
           const updateItemQuery = `
@@ -4502,15 +6699,48 @@ export async function assignContainersToOrders(req, res) {
       });
     }
     await client.query('COMMIT');
-    // Refetch updated data - for all affected orders
+    // Refetch updated data - for all affected orders (with safe casting)
     const enhancedUpdatedOrders = [];
+    const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+    const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT json_agg(
+          json_build_object(
+            'status', CASE WHEN ${totalAssignedSub} > 0 THEN 'Ready for Loading' ELSE 'Created' END,
+            'container', json_build_object(
+              'cid', h.cid,
+              'container_number', cm.container_number
+            ),
+            'total_number', ${safeIntCast('oi.total_number')},
+            'assign_weight', CASE 
+              WHEN ${totalAssignedSub} > 0 AND h.assigned_qty > 0 THEN 
+                ROUND((h.assigned_qty::numeric / ${totalAssignedSub}::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+              ELSE '0' 
+            END,
+            'remaining_items', (${safeIntCast('oi.total_number')} - ${totalAssignedSub})::text,
+            'assign_total_box', h.assigned_qty::text
+          ) ORDER BY cm.container_number
+        )
+        FROM (
+          SELECT cid, SUM(assigned_qty) as assigned_qty 
+          FROM container_assignment_history 
+          WHERE detail_id = oi.id 
+          GROUP BY cid
+        ) h 
+        LEFT JOIN container_master cm ON h.cid = cm.cid 
+        WHERE h.cid IS NOT NULL
+      ), '[]'::json)
+    `;
+    const safeIntFromJson = (jsonPath) => `COALESCE(CASE WHEN (${jsonPath}) ~ '^[0-9]+$' THEN (${jsonPath})::int ELSE 0 END, 0)`;
     for (const updOrder of updatedOrders) {
       const orderId = updOrder.orderId;
       // Refetch order
       const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
       // Fetch senders
       const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [orderId]);
-      // Fetch enhanced receivers with shippingDetails
+      // Fetch enhanced receivers with shippingDetails (safe casting) - using history for containerDetails
       const fetchReceiversQuery = `
         SELECT 
           r.*,
@@ -4523,11 +6753,11 @@ export async function assignContainersToOrders(req, res) {
                   'category', oi.category,
                   'subcategory', oi.subcategory,
                   'type', oi.type,
-                  'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
+                  'totalNumber', ${safeIntCast('oi.total_number')} - COALESCE((SELECT SUM(${safeIntFromJson('elem->>\'assign_total_box\'')}) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0),
                   'weight', oi.weight,
                   'itemRef', oi.item_ref,
-                  'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-                  'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
+                  'containerDetails', ${containerDetailsSub},
+                  'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
                 ) ORDER BY oi.id
               )
               FROM order_items oi 
@@ -4555,30 +6785,62 @@ export async function assignContainersToOrders(req, res) {
         console.warn('order_summary view fetch failed:', summaryErr.message);
         const fallbackQuery = `
           SELECT o.id as order_id, o.booking_ref, o.status, o.created_at, o.eta, o.etd, o.shipping_line,
-                 s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
-                 t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
-                 t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
-                 t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
-                 t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
-                 t.gatepass,
-                 ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
-                 cm.container_number,
-                 rs.receiver_summary,
-                 rss.receiver_status_summary,
-                 rc.receiver_containers_json,
-                 rt.total_items,
-                 rt.remaining_items,
-                 rd.receivers_details
+                s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
+                t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
+                t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
+                t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
+                t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
+                t.gatepass,
+                ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
+                cm.container_number,
+                rs.receiver_summary,
+                rss.receiver_status_summary,
+                rc.receiver_containers_json,
+                rt.total_items,
+                rt.remaining_items,
+                rd.receivers_details
           FROM orders o
           LEFT JOIN senders s ON o.id = s.order_id
           LEFT JOIN transport_details t ON o.id = t.order_id
           LEFT JOIN order_tracking ot ON o.id = ot.order_id
           LEFT JOIN container_master cm ON ot.container_id = cm.cid
           LEFT JOIN LATERAL (
+            SELECT 
+              json_agg(json_build_object(
+                'id', r.id,
+                'receiver_name', r.receiver_name,
+                'total_number', r.total_number,
+                'status', r.status
+              )) AS receiver_summary
+            FROM receivers r
+            WHERE r.order_id = o.id
+          ) rs ON true
+          LEFT JOIN LATERAL (
+            SELECT 
+              json_object_agg(status, count(*)::text) AS receiver_status_summary
+            FROM receivers r
+            WHERE r.order_id = o.id
+            GROUP BY status
+          ) rss ON true
+          LEFT JOIN LATERAL (
+            SELECT 
+              json_agg(DISTINCT elem) AS receiver_containers_json
+            FROM receivers re,
+                 LATERAL json_array_elements_text(re.containers::json) AS elem
+            WHERE re.order_id = o.id AND re.containers IS NOT NULL AND re.containers != '[]'
+          ) rc ON true
+          LEFT JOIN LATERAL (
+            SELECT 
+              COALESCE(SUM(r.total_number), 0) AS total_items,
+              COALESCE(SUM(r.total_number - COALESCE(r.qty_delivered, 0)), 0) AS remaining_items
+            FROM receivers r
+            WHERE r.order_id = o.id
+          ) rt ON true
+          LEFT JOIN LATERAL (
             SELECT json_agg(json_build_object(
               'id', r.id,
               'receiver_name', r.receiver_name,
-              'shippingDetails', LATERAL (
+              'shippingDetails', COALESCE((
                 SELECT json_agg(
                   json_build_object(
                     'pickupLocation', oi.pickup_location,
@@ -4586,15 +6848,16 @@ export async function assignContainersToOrders(req, res) {
                     'category', oi.category,
                     'subcategory', oi.subcategory,
                     'type', oi.type,
-                    'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
+                    'totalNumber', ${safeIntCast('oi.total_number')} - COALESCE((SELECT SUM(${safeIntFromJson('elem->>\'assign_total_box\'')}) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0),
                     'weight', oi.weight,
                     'itemRef', oi.item_ref,
-                    'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-                    'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
+                    'containerDetails', ${containerDetailsSub},
+                    'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
                   ) ORDER BY oi.id
-                ) AS sd
-                FROM order_items oi WHERE oi.receiver_id = r.id
-              ).sd
+                )
+                FROM order_items oi 
+                WHERE oi.receiver_id = r.id
+              ), '[]'::json)
             ) ORDER BY r.id) AS receivers_details
             FROM receivers r
             WHERE r.order_id = o.id
@@ -4604,11 +6867,23 @@ export async function assignContainersToOrders(req, res) {
         const fallbackResult = await client.query(fallbackQuery, [orderId]);
         orderSummary = fallbackResult.rows;
       }
+      // Fetch container_assignment_history details for this order
+      const historyQuery = `
+        SELECT 
+          h.*,
+          cm.container_number
+        FROM container_assignment_history h
+        LEFT JOIN container_master cm ON h.cid = cm.cid
+        WHERE h.order_id = $1
+        ORDER BY h.id DESC
+      `;
+      const historyResult = await client.query(historyQuery, [orderId]);
       enhancedUpdatedOrders.push({
         order: updatedOrderResult.rows[0],
         senders: updatedSenderResult.rows,
         summary: orderSummary,
         receivers: enhancedReceivers,
+        assignmentHistory: historyResult.rows,
         tracking: trackingData.filter(t => t.orderId === orderId)
       });
     }
@@ -4637,8 +6912,14 @@ export async function assignContainersToOrders(req, res) {
     if (error.code === '22007' || error.code === '22008') {
       return res.status(400).json({ error: 'Invalid date format' });
     }
-    if (error.code === '42P01' || error.code === '42703') {
-      return res.status(500).json({ error: 'Database schema mismatch. Run migrations.' });
+    if (error.code === '22023') {  // JSON errors
+      return res.status(400).json({ error: 'Invalid JSON in container details' });
+    }
+    if (error.code === '22P02') {  // Casting errors
+      return res.status(500).json({ error: 'Invalid data format in order details. Please check numeric fields.' });
+    }
+    if (error.code === '42P01' || error.code === '42703' || error.code === '42P10') {
+      return res.status(500).json({ error: 'Database schema or query scoping mismatch. Check view definitions and run migrations.' });
     }
     return res.status(500).json({ error: 'Internal server error', details: error.message });
   } finally {
@@ -4647,1935 +6928,6 @@ export async function assignContainersToOrders(req, res) {
     }
   }
 }
-
-// export async function assignContainersToOrders(req, res) {
-//   let client;
-//   try {
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-//     const updates = req.body || {};
-//     const created_by = req.user?.id || 'system';  // From auth if available
-
-//     // Extract assignments (support wrapped or direct)
-//     let assignments = updates.assignments || updates;
-//     if (!assignments || typeof assignments !== 'object') {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: 'Assignments object is required' });
-//     }
-
-//     // Infer orderIds from keys of assignments (ensure array)
-//     let orderIds = Object.keys(assignments).filter(k => !isNaN(parseInt(k)));
-//     if (orderIds.length === 0) {
-//       // Fallback: If explicit order_ids provided, use it
-//       orderIds = updates.order_ids || updates.orderIds || [];
-//       if (Array.isArray(orderIds)) {
-//         orderIds = orderIds.filter(id => !isNaN(parseInt(id)));
-//       } else {
-//         orderIds = [];
-//       }
-//     }
-
-//     // Debug log (enhanced)
-//     console.log('Assign containers body:', JSON.stringify(updates, null, 2));
-//     console.log('Extracted assignments keys (orderIds):', orderIds);
-//     console.log('Sample assignment:', assignments[orderIds[0]] ? Object.keys(assignments[orderIds[0]]).slice(0, 2) : null);
-
-//     // Validation
-//     const updateErrors = [];
-//     if (orderIds.length === 0) {
-//       updateErrors.push('orderIds array is required and must not be empty');
-//     }
-//     if (Object.keys(assignments).length === 0) {
-//       updateErrors.push('assignments object is required and must not be empty');
-//     }
-//     if (updateErrors.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({
-//         error: 'Invalid request fields',
-//         details: updateErrors.join('; ')
-//       });
-//     }
-
-//     // Collect all unique container IDs from the assignments (enhanced logging)
-//     const allCids = new Set();
-//     let parsedCount = 0;
-//     for (const [orderIdStr, orderAssign] of Object.entries(assignments)) {
-//       if (typeof orderAssign !== 'object') continue;
-//       console.log(`Parsing order ${orderIdStr}: ${Object.keys(orderAssign).length} receivers`);
-//       for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
-//         if (typeof recAssign !== 'object' || recAssign === null) continue;
-//         console.log(`  Parsing receiver ${recIdStr}: ${Object.keys(recAssign).length} details`);
-//         for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
-//           if (detailAssign && typeof detailAssign === 'object') {
-//             console.log(`    Detail ${detailIdxStr}: qty=${detailAssign.qty}, containers=${JSON.stringify(detailAssign.containers)}`);
-//             if (Array.isArray(detailAssign.containers)) {
-//               detailAssign.containers.forEach((cidStr, idx) => {
-//                 const cid = parseInt(cidStr);
-//                 if (!isNaN(cid)) {
-//                   allCids.add(cid);
-//                   parsedCount++;
-//                   console.log(`      Valid CID ${cid} from "${cidStr}"`);
-//                 } else {
-//                   console.warn(`      Invalid CID "${cidStr}" (NaN)`);
-//                 }
-//               });
-//             } else {
-//               console.warn(`    No valid containers array in detail ${detailIdxStr}`);
-//             }
-//           }
-//         }
-//       }
-//     }
-//     console.log(`Total valid CIDs extracted: ${allCids.size} (parsed ${parsedCount} items)`);
-
-//     if (allCids.size === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: 'No valid containers specified in assignments' });
-//     }
-
-//     // Fetch full container details for all unique cids - ensure only available
-//     const containerQuery = `
-//       SELECT 
-//         cm.*,
-//         cs.location as status_location,
-//         cs.availability as current_availability,
-//         chd.hire_start_date,
-//         chd.hire_end_date,
-//         CASE 
-//           WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//           WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//           WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//           WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//           WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//           WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//           WHEN cs.availability = 'Returned' THEN 'Returned'
-//           ELSE 'Available'
-//         END as derived_status
-//       FROM container_master cm
-//       LEFT JOIN LATERAL (
-//         SELECT location, availability
-//         FROM container_status css
-//         WHERE css.cid = cm.cid
-//         ORDER BY css.sid DESC NULLS LAST
-//         LIMIT 1
-//       ) cs ON true
-//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       WHERE cm.cid = ANY($1) AND (
-//         CASE 
-//           WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//           WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//           WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//           WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//           WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//           WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//           WHEN cs.availability = 'Returned' THEN 'Returned'
-//           ELSE 'Available'
-//         END
-//       ) = 'Available'
-//     `;
-//     const containerResult = await client.query(containerQuery, [Array.from(allCids)]);
-//     console.log('Container query for CIDs', Array.from(allCids), 'returned', containerResult.rows.length, 'rows');
-//     containerResult.rows.forEach(row => {
-//       console.log('  - CID', row.cid, ':', row.container_number, '(status:', row.derived_status, ')');
-//     });
-//     const fullContainerMap = new Map(containerResult.rows.map(row => [row.cid, row]));
-//     const containerNumberMap = new Map(containerResult.rows.map(row => [row.cid, row.container_number]));
-//     // Check for missing or unavailable containers
-//     const missingCids = Array.from(allCids).filter(cid => !fullContainerMap.has(cid));
-//     console.log('Missing/unavailable CIDs:', missingCids);
-//     if (missingCids.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: `Containers not found or not available: ${missingCids.join(', ')}` });
-//     }
-
-//     // Track updates
-//     const updatedOrders = [];
-//     const trackingData = [];
-//     // Accumulate total assigned qty per order for final update
-//     const orderAssignedQtys = new Map();
-//     const allReceiversForOrders = [];  // Collect for overall status update
-//     // Fetch current orders and related records for fallback
-//     const currentOrders = {};
-//     const currentReceiversByOrder = {};
-//     for (const orderIdStr of orderIds) {
-//       const orderId = parseInt(orderIdStr);
-//       if (isNaN(orderId)) {
-//         console.warn(`Invalid order_id: ${orderIdStr}`);
-//         continue;
-//       }
-//       // Fetch current order
-//       const orderQuery = `
-//         SELECT id, booking_ref, status as overall_status, total_assigned_qty, eta 
-//         FROM orders 
-//         WHERE id = $1
-//       `;
-//       const orderResult = await client.query(orderQuery, [orderId]);
-//       if (orderResult.rowCount === 0) {
-//         console.warn(`Order not found: ${orderId}`);
-//         continue;
-//       }
-//       currentOrders[orderId] = orderResult.rows[0];
-//       // Fetch current receivers for this order
-//       const receiversQuery = `
-//         SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
-//         FROM receivers 
-//         WHERE order_id = $1
-//       `;
-//       const receiversResult = await client.query(receiversQuery, [orderId]);
-//       currentReceiversByOrder[orderId] = receiversResult.rows;
-//     }
-
-//     const logQuery = `
-//       INSERT INTO container_assignment_history (
-//         cid, container_number, order_id, receiver_id, detail_id, assigned_qty, status, action_type, changed_by, notes, previous_status
-//       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-//     `;
-
-//     for (const orderIdStr of orderIds) {
-//       const orderId = parseInt(orderIdStr);
-//       if (isNaN(orderId)) {
-//         console.warn(`Invalid order_id: ${orderIdStr}`);
-//         continue;
-//       }
-//       const currentOrder = currentOrders[orderId];
-//       if (!currentOrder) {
-//         console.warn(`No current order data for: ${orderId}`);
-//         continue;
-//       }
-//       if (!assignments[orderIdStr]) {
-//         console.warn(`No assignments for order: ${orderId}`);
-//         updatedOrders.push({ orderId, assigned: 0 });
-//         continue;
-//       }
-//       let currentTotalAssigned = parseInt(currentOrder.total_assigned_qty) || 0;
-//       let assignedForThisOrder = 0; // Accumulate for this order
-//       let assignedGrossWeight = 0;  // Accumulate gross
-//       let assignedCount = 0;
-//       const orderAssignments = assignments[orderIdStr];
-//       const orderReceivers = [];  // Collect for status update
-//       for (const recIdStr of Object.keys(orderAssignments)) {
-//         const recId = parseInt(recIdStr);
-//         if (isNaN(recId)) {
-//           console.warn(`Invalid receiver_id: ${recIdStr}`);
-//           continue;
-//         }
-//         // Fetch receiver (include eta, etd, status for calculation; add total_weight for gross)
-//         const receiverQuery = `
-//           SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
-//           FROM receivers 
-//           WHERE id = $1 AND order_id = $2
-//         `;
-//         const receiverResult = await client.query(receiverQuery, [recId, orderId]);
-//         if (receiverResult.rowCount === 0) {
-//           console.warn(`Receiver not found: ${recId} for order ${orderId}`);
-//           continue;
-//         }
-//         const receiver = receiverResult.rows[0];
-//         orderReceivers.push(receiver);  // For status
-//         // Parse current containers
-//         let currentContainers = [];
-//         if (receiver.containers && typeof receiver.containers === 'string') {
-//           try {
-//             currentContainers = JSON.parse(receiver.containers);
-//             if (!Array.isArray(currentContainers)) {
-//               currentContainers = [];
-//             }
-//           } catch (parseErr) {
-//             console.warn(`Failed to parse containers for receiver ${recId}:`, parseErr.message);
-//             currentContainers = [];
-//           }
-//         }
-//         // Fetch order_items for this receiver
-//         const itemsQuery = `
-//           SELECT id, total_number, weight, container_details 
-//           FROM order_items 
-//           WHERE receiver_id = $1 
-//           ORDER BY id ASC
-//         `;
-//         const itemsResult = await client.query(itemsQuery, [recId]);
-//         const orderItemRows = itemsResult.rows;
-//         if (orderItemRows.length === 0) {
-//           console.warn(`No order_items found for receiver ${recId}`);
-//           continue;
-//         }
-//         const orderItemsIds = orderItemRows.map(row => row.id);
-//         const orderItemsMap = new Map(orderItemRows.map(row => [row.id, row]));
-//         // Collect new containers and sum qty/gross for this receiver
-//         const newContNumbers = new Set();
-//         let sumQty = 0;
-//         let sumGross = 0;
-//         const recAssignments = orderAssignments[recIdStr];
-//         // Sort detail keys numerically to process in order
-//         const sortedDetailKeys = Object.keys(recAssignments).sort((a, b) => parseInt(a) - parseInt(b));
-//         let pendingLogs = [];
-//         let pendingStatusInserts = [];
-//         for (const detailIdxStr of sortedDetailKeys) {
-//           const detailIndex = parseInt(detailIdxStr);
-//           if (isNaN(detailIndex) || detailIndex < 0 || detailIndex >= orderItemsIds.length) {
-//             console.warn(`Invalid detail index ${detailIdxStr} for receiver ${recId} (only ${orderItemsIds.length} items)`);
-//             continue;
-//           }
-//           const actualDetailId = orderItemsIds[detailIndex];
-//           const orderItem = orderItemsMap.get(actualDetailId);
-//           if (!orderItem) continue;
-//           const totalNumber = parseInt(orderItem.total_number) || 0;
-//           const detailWeight = parseFloat(orderItem.weight) || 0;
-//           const inputDetailQty = parseInt(recAssignments[detailIdxStr].qty) || 0;
-//           if (inputDetailQty === 0) continue;
-//           // Fetch current assigned from history
-//           const currentAssignedQuery = `
-//             SELECT COALESCE(SUM(assigned_qty), 0) as current_assigned
-//             FROM container_assignment_history 
-//             WHERE detail_id = $1
-//           `;
-//           const currentAssignedResult = await client.query(currentAssignedQuery, [actualDetailId]);
-//           const currentAssigned = parseInt(currentAssignedResult.rows[0].current_assigned) || 0;
-//           const remainingBefore = totalNumber - currentAssigned;
-//           let detailQty = inputDetailQty;
-//           if (detailQty > remainingBefore) {
-//             console.warn(`Capping assignment for detail ${actualDetailId}: ${detailQty} > ${remainingBefore}`);
-//             detailQty = remainingBefore;
-//             if (detailQty <= 0) continue;
-//           }
-//           const totalAssigned = currentAssigned + detailQty;
-//           const remainingItems = totalNumber - totalAssigned;
-//           const assignedDetailWeight = detailWeight * (detailQty / totalNumber || 0);
-//           let currentContainerDetails = [];
-//           if (orderItem.container_details) {
-//             if (typeof orderItem.container_details === 'string') {
-//               try {
-//                 currentContainerDetails = JSON.parse(orderItem.container_details);
-//               } catch (e) {
-//                 console.warn(`Failed to parse container_details for detail ${actualDetailId}`);
-//               }
-//             } else if (Array.isArray(orderItem.container_details)) {
-//               currentContainerDetails = orderItem.container_details;
-//             }
-//           }
-//           const detailAssign = recAssignments[detailIdxStr];
-//           const detailCids = [];
-//           if (Array.isArray(detailAssign.containers)) {
-//             detailAssign.containers.forEach(cidStr => {
-//               const cid = parseInt(cidStr);
-//               if (!isNaN(cid) && fullContainerMap.has(cid)) {
-//                 detailCids.push(cid);
-//               }
-//             });
-//           }
-//           const numNewConts = detailCids.length;
-//           if (numNewConts === 0) continue;
-//           let remainingQtyToAssign = detailQty;
-//           let remainingWeightToAssign = assignedDetailWeight;
-//           for (let i = 0; i < numNewConts; i++) {
-//             const cid = detailCids[i];
-//             const fullCont = fullContainerMap.get(cid);
-//             if (!fullCont) continue;
-//             const contNum = fullCont.container_number;
-//             newContNumbers.add(contNum);
-//             const isLast = i === numNewConts - 1;
-//             const thisQty = isLast ? remainingQtyToAssign : Math.floor(detailQty / numNewConts);
-//             const thisWeight = isLast ? remainingWeightToAssign : assignedDetailWeight * (Math.floor(detailQty / numNewConts) / detailQty);
-//             remainingQtyToAssign -= thisQty;
-//             remainingWeightToAssign -= thisWeight;
-//             // Check for existing entry
-//             let existingIndex = -1;
-//             for (let j = 0; j < currentContainerDetails.length; j++) {
-//               if (currentContainerDetails[j].container?.cid === cid) {
-//                 existingIndex = j;
-//                 break;
-//               }
-//             }
-//             const newEntry = {
-//               status: "Ready for Loading",
-//               container: {
-//                 cid: cid,
-//                 container_number: contNum
-//               },
-//               total_number: "",
-//               assign_weight: Math.round(thisWeight / 1000).toString(),
-//               remaining_items: remainingItems.toString(),
-//               assign_total_box: thisQty.toString()
-//             };
-//             if (existingIndex !== -1) {
-//               const existing = currentContainerDetails[existingIndex];
-//               const newBox = parseInt(existing.assign_total_box || 0) + thisQty;
-//               const newW = parseFloat(existing.assign_weight || 0) + Math.round(thisWeight / 1000);
-//               currentContainerDetails[existingIndex] = {
-//                 ...existing,
-//                 assign_total_box: newBox.toString(),
-//                 assign_weight: newW.toString(),
-//                 remaining_items: remainingItems.toString()
-//               };
-//             } else {
-//               currentContainerDetails.push(newEntry);
-//             }
-//             // Fetch previous status
-//             const prevStatusQuery = `
-//               SELECT availability as status
-//               FROM container_status
-//               WHERE cid = $1
-//               ORDER BY created_time DESC
-//               LIMIT 1
-//             `;
-//             const prevStatusResult = await client.query(prevStatusQuery, [cid]);
-//             const previousStatus = prevStatusResult.rows[0]?.status || 'Available';
-//             // Collect for log (notes temp without ETA)
-//             let tempNotes = `Assigned ${thisQty} items to container ${contNum} for Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} (remaining: ${remainingItems})`;
-//             pendingLogs.push([
-//               cid,
-//               contNum,
-//               orderId,
-//               recId,
-//               actualDetailId,
-//               thisQty,
-//               'Assigned to Job',
-//               'ASSIGN',
-//               created_by,
-//               tempNotes,
-//               previousStatus
-//             ]);
-//             // Collect for status insert (notes temp without ETA)
-//             let tempStatusNotes = `Assigned ${thisQty} items`;
-//             pendingStatusInserts.push([cid, `Order ${orderId} / Receiver ${recId} / Detail ${actualDetailId} / Cont ${contNum}`, tempStatusNotes, created_by]);
-//           }
-//           // Update all remaining_items in currentContainerDetails
-//           currentContainerDetails.forEach(cd => {
-//             cd.remaining_items = remainingItems.toString();
-//           });
-//           // Update order_item container_details
-//           const updateItemQuery = `
-//             UPDATE order_items 
-//             SET container_details = $1, updated_at = CURRENT_TIMESTAMP
-//             WHERE id = $2
-//           `;
-//           await client.query(updateItemQuery, [JSON.stringify(currentContainerDetails), actualDetailId]);
-//           // Accumulate
-//           sumQty += detailQty;
-//           sumGross += assignedDetailWeight;
-//         }
-//         if (sumQty === 0 && newContNumbers.size === 0) {
-//           console.warn(`No qty or containers to assign for receiver ${recId}`);
-//           continue;
-//         }
-//         // Append unique new containers
-//         const allContainers = new Set([...currentContainers, ...newContNumbers]);
-//         const updatedContainersJson = JSON.stringify(Array.from(allContainers));
-//         // Since assigned, now calculate eta/etd
-//         let newEta = receiver.eta;
-//         let newEtd = receiver.etd;
-//         let daysUntilEta = null;
-//         const nowHasContainers = allContainers.size > 0;
-//         if (nowHasContainers && !newEta) {
-//           const etaResult = await calculateETA(client, receiver.status || 'Created');
-//           newEta = etaResult.eta;
-//           daysUntilEta = etaResult.daysUntil;
-//           console.log(`[assignContainers] Calculated new ETA for receiver ${recId}: ${newEta} (status: ${receiver.status}, daysUntil: ${daysUntilEta})`);
-//         } else if (newEta) {
-//           daysUntilEta = computeDaysUntilEta(newEta);
-//         }
-//         // ETD: Set to today if not set
-//         if (nowHasContainers && !newEtd) {
-//           newEtd = new Date().toISOString().split('T')[0];
-//           console.log(`[assignContainers] Set ETD for receiver ${recId} to today: ${newEtd}`);
-//         }
-//         // Insert pending logs and status updates with ETA
-//         for (let k = 0; k < pendingLogs.length; k++) {
-//           const logValues = pendingLogs[k];
-//           const tempNotes = logValues[9];
-//           const fullNotes = `${tempNotes} (ETA: ${newEta || 'N/A'})`;
-//           logValues[9] = fullNotes;
-//           await client.query(logQuery, logValues);
-//         }
-//         const statusInsertQuery = `
-//           INSERT INTO container_status (cid, availability, location, status_notes, created_by, created_time) 
-//           VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-//         `;
-//         for (let k = 0; k < pendingStatusInserts.length; k++) {
-//           const [cid, location, tempStatusNotes, created_by_val] = pendingStatusInserts[k];
-//           const fullStatusNotes = `${tempStatusNotes} (ETA: ${newEta || 'N/A'})`;
-//           await client.query(statusInsertQuery, [cid, 'Assigned to Job', location, fullStatusNotes, created_by_val]);
-//         }
-//         // Update qty_delivered
-//         const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
-//         // Update receiver (dynamic SET) - removed total_weight update; added status
-//         const receiverSet = [];
-//         const receiverValues = [];
-//         let receiverParamIndex = 1;
-//         const receiverFields = [
-//           { key: 'containers', val: updatedContainersJson },
-//           { key: 'qty_delivered', val: newDelivered },
-//           { key: 'eta', val: newEta || null },
-//           { key: 'etd', val: newEtd || null },
-//           { key: 'status', val: 'Ready for Loading' }
-//         ];
-//         receiverFields.forEach(field => {
-//           receiverSet.push(`${field.key} = $${receiverParamIndex}`);
-//           receiverValues.push(field.val);
-//           receiverParamIndex++;
-//         });
-//         receiverSet.push('updated_at = CURRENT_TIMESTAMP');
-//         receiverValues.push(recId);
-//         const updateReceiverQuery = `
-//           UPDATE receivers 
-//           SET ${receiverSet.join(', ')} 
-//           WHERE id = $${receiverParamIndex}
-//           RETURNING id, status, eta
-//         `;
-//         const updateResult = await client.query(updateReceiverQuery, receiverValues);
-//         if (updateResult.rowCount > 0) {
-//           assignedCount++;
-//           assignedForThisOrder += sumQty;
-//           assignedGrossWeight += sumGross;
-//           const updatedRec = updateResult.rows[0];
-//           trackingData.push({
-//             receiverId: recId,
-//             receiverName: receiver.receiver_name,
-//             orderId: currentOrder.id,
-//             bookingRef: currentOrder.booking_ref,
-//             assignedQty: sumQty,
-//             assignedGross: sumGross.toFixed(2),
-//             assignedContainers: Array.from(newContNumbers),
-//             status: currentOrder.overall_status,
-//             newEta: newEta,
-//             newEtd: newEtd,
-//             daysUntilEta
-//           });
-//           console.log(`Assigned ${sumQty} qty, ${sumGross.toFixed(2)} gross, ${newContNumbers.size} containers to receiver ${recId} (order ${orderId}); ETA/ETD: ${newEta}/${newEtd} (days: ${daysUntilEta})`);
-//         } else {
-//           console.warn(`No rows updated for receiver ${recId}`);
-//         }
-//       }
-//       // After processing all receivers for this order, update the order
-//       if (assignedForThisOrder > 0) {
-//         const newTotalAssigned = currentTotalAssigned + assignedForThisOrder;
-//         orderAssignedQtys.set(orderId, newTotalAssigned);
-//         const orderSet = [];
-//         const orderValues = [];
-//         let orderParamIndex = 1;
-//         const orderFields = [
-//           { key: 'total_assigned_qty', val: newTotalAssigned },
-//           { key: 'eta', val: currentOrder.eta || new Date().toISOString().split('T')[0] }
-//         ];
-//         orderFields.forEach(field => {
-//           orderSet.push(`${field.key} = $${orderParamIndex}`);
-//           orderValues.push(field.val);
-//           orderParamIndex++;
-//         });
-//         orderSet.push('updated_at = CURRENT_TIMESTAMP');
-//         orderValues.push(orderId);
-//         const updateOrderQuery = `
-//           UPDATE orders 
-//           SET ${orderSet.join(', ')} 
-//           WHERE id = $${orderParamIndex}
-//           RETURNING id, total_assigned_qty, eta
-//         `;
-//         const orderUpdateResult = await client.query(updateOrderQuery, orderValues);
-//         if (orderUpdateResult.rowCount === 0) {
-//           console.warn(`Failed to update total_assigned_qty/eta for order ${orderId}`);
-//         } else {
-//           console.log(`Updated total_assigned_qty to ${newTotalAssigned} and ETA for order ${orderId}`);
-//         }
-//         // Cascade overall status
-//         await updateOrderOverallStatus(client, orderId, 'Loaded Into Container', orderReceivers);
-//       }
-//       allReceiversForOrders.push(...orderReceivers);
-//       updatedOrders.push({ 
-//         orderId: currentOrder.id, 
-//         bookingRef: currentOrder.booking_ref, 
-//         assignedReceivers: assignedCount,
-//         assignedQty: assignedForThisOrder,
-//         assignedGross: assignedGrossWeight.toFixed(2)
-//       });
-//     }
-//     await client.query('COMMIT');
-//     // Refetch updated data - for all affected orders
-//     const enhancedUpdatedOrders = [];
-//     for (const updOrder of updatedOrders) {
-//       const orderId = updOrder.orderId;
-//       // Refetch order
-//       const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
-//       // Fetch senders
-//       const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [orderId]);
-//       // Fetch enhanced receivers with shippingDetails
-//       const fetchReceiversQuery = `
-//         SELECT 
-//           r.*,
-//           COALESCE(
-//             (
-//               SELECT json_agg(
-//                 json_build_object(
-//                   'pickupLocation', oi.pickup_location,
-//                   'deliveryAddress', oi.delivery_address,
-//                   'category', oi.category,
-//                   'subcategory', oi.subcategory,
-//                   'type', oi.type,
-//                   'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
-//                   'weight', oi.weight,
-//                   'itemRef', oi.item_ref,
-//                   'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-//                   'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
-//                 ) ORDER BY oi.id
-//               )
-//               FROM order_items oi 
-//               WHERE oi.receiver_id = r.id
-//             ), 
-//             '[]'::json
-//           ) AS shippingDetails
-//         FROM receivers r 
-//         WHERE r.order_id = $1 
-//         ORDER BY r.id
-//       `;
-//       const enhancedReceiversResult = await client.query(fetchReceiversQuery, [orderId]);
-//       const enhancedReceivers = enhancedReceiversResult.rows.map(row => ({
-//         ...row,
-//         shippingDetails: row.shippingDetails || [],
-//         containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])
-//       }));
-//       // Fetch summary
-//       let orderSummary = [];
-//       try {
-//         const summaryQuery = 'SELECT * FROM order_summary WHERE order_id = $1';
-//         const summaryResult = await client.query(summaryQuery, [orderId]);
-//         orderSummary = summaryResult.rows;
-//       } catch (summaryErr) {
-//         console.warn('order_summary view fetch failed:', summaryErr.message);
-//         const fallbackQuery = `
-//           SELECT o.id as order_id, o.booking_ref, o.status, o.created_at, o.eta, o.etd, o.shipping_line,
-//                  s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
-//                  t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
-//                  t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
-//                  t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
-//                  t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
-//                  t.gatepass,
-//                  ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
-//                  cm.container_number,
-//                  rs.receiver_summary,
-//                  rss.receiver_status_summary,
-//                  rc.receiver_containers_json,
-//                  rt.total_items,
-//                  rt.remaining_items,
-//                  rd.receivers_details
-//           FROM orders o
-//           LEFT JOIN senders s ON o.id = s.order_id
-//           LEFT JOIN transport_details t ON o.id = t.order_id
-//           LEFT JOIN order_tracking ot ON o.id = ot.order_id
-//           LEFT JOIN container_master cm ON ot.container_id = cm.cid
-//           LEFT JOIN LATERAL (
-//             SELECT json_agg(json_build_object(
-//               'id', r.id,
-//               'receiver_name', r.receiver_name,
-//               'shippingDetails', LATERAL (
-//                 SELECT json_agg(
-//                   json_build_object(
-//                     'pickupLocation', oi.pickup_location,
-//                     'deliveryAddress', oi.delivery_address,
-//                     'category', oi.category,
-//                     'subcategory', oi.subcategory,
-//                     'type', oi.type,
-//                     'totalNumber', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0)),
-//                     'weight', oi.weight,
-//                     'itemRef', oi.item_ref,
-//                     'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-//                     'remainingItems', (COALESCE(oi.total_number::int, 0) - COALESCE((SELECT SUM((elem->>'assign_total_box')::int) FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem), 0))
-//                   ) ORDER BY oi.id
-//                 ) AS sd
-//                 FROM order_items oi WHERE oi.receiver_id = r.id
-//               ).sd
-//             ) ORDER BY r.id) AS receivers_details
-//             FROM receivers r
-//             WHERE r.order_id = o.id
-//           ) rd ON true
-//           WHERE o.id = $1
-//         `;
-//         const fallbackResult = await client.query(fallbackQuery, [orderId]);
-//         orderSummary = fallbackResult.rows;
-//       }
-//       enhancedUpdatedOrders.push({
-//         order: updatedOrderResult.rows[0],
-//         senders: updatedSenderResult.rows,
-//         summary: orderSummary,
-//         receivers: enhancedReceivers,
-//         tracking: trackingData.filter(t => t.orderId === orderId)
-//       });
-//     }
-//     res.status(200).json({ 
-//       success: true, 
-//       message: `Assigned containers to ${trackingData.length} receivers across ${updatedOrders.length} orders`,
-//       updatedOrders: enhancedUpdatedOrders,
-//       tracking: trackingData 
-//     });
-//   } catch (error) {
-//     console.error('Error assigning containers:', error);
-//     if (client) {
-//       try {
-//         await client.query('ROLLBACK');
-//         console.log('Transaction rolled back successfully');
-//       } catch (rollbackErr) {
-//         console.error('Rollback failed:', rollbackErr);
-//       }
-//     }
-//     if (error.code === '23505') {
-//       return res.status(409).json({ error: 'Duplicate entry conflict' });
-//     }
-//     if (error.code === '23514') {
-//       return res.status(400).json({ error: 'Invalid value for constrained field' });
-//     }
-//     if (error.code === '22007' || error.code === '22008') {
-//       return res.status(400).json({ error: 'Invalid date format' });
-//     }
-//     if (error.code === '42P01' || error.code === '42703') {
-//       return res.status(500).json({ error: 'Database schema mismatch. Run migrations.' });
-//     }
-//     return res.status(500).json({ error: 'Internal server error', details: error.message });
-//   } finally {
-//     if (client) {
-//       client.release();
-//     }
-//   }
-// }
-
-// export async function assignContainersToOrders(req, res) {
-//   let client;
-//   try {
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-//     const updates = req.body || {};
-//     const created_by = req.user?.id || 'system';  // From auth if available
-
-//     // Extract assignments (support wrapped or direct)
-//     let assignments = updates.assignments || updates;
-//     if (!assignments || typeof assignments !== 'object') {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: 'Assignments object is required' });
-//     }
-
-//     // Infer orderIds from keys of assignments (ensure array)
-//     let orderIds = Object.keys(assignments).filter(k => !isNaN(parseInt(k)));
-//     if (orderIds.length === 0) {
-//       // Fallback: If explicit order_ids provided, use it
-//       orderIds = updates.order_ids || updates.orderIds || [];
-//       if (Array.isArray(orderIds)) {
-//         orderIds = orderIds.filter(id => !isNaN(parseInt(id)));
-//       } else {
-//         orderIds = [];
-//       }
-//     }
-
-//     // Debug log (enhanced)
-//     console.log('Assign containers body:', JSON.stringify(updates, null, 2));
-//     console.log('Extracted assignments keys (orderIds):', orderIds);
-//     console.log('Sample assignment:', assignments[orderIds[0]] ? Object.keys(assignments[orderIds[0]]).slice(0, 2) : null);
-
-//     // Validation
-//     const updateErrors = [];
-//     if (orderIds.length === 0) {
-//       updateErrors.push('orderIds array is required and must not be empty');
-//     }
-//     if (Object.keys(assignments).length === 0) {
-//       updateErrors.push('assignments object is required and must not be empty');
-//     }
-//     if (updateErrors.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({
-//         error: 'Invalid request fields',
-//         details: updateErrors.join('; ')
-//       });
-//     }
-
-//     // Collect all unique container IDs from the assignments (enhanced logging)
-//     const allCids = new Set();
-//     let parsedCount = 0;
-//     for (const [orderIdStr, orderAssign] of Object.entries(assignments)) {
-//       if (typeof orderAssign !== 'object') continue;
-//       console.log(`Parsing order ${orderIdStr}: ${Object.keys(orderAssign).length} receivers`);
-//       for (const [recIdStr, recAssign] of Object.entries(orderAssign)) {
-//         if (typeof recAssign !== 'object' || recAssign === null) continue;
-//         console.log(`  Parsing receiver ${recIdStr}: ${Object.keys(recAssign).length} details`);
-//         for (const [detailIdxStr, detailAssign] of Object.entries(recAssign)) {
-//           if (detailAssign && typeof detailAssign === 'object') {
-//             console.log(`    Detail ${detailIdxStr}: qty=${detailAssign.qty}, containers=${JSON.stringify(detailAssign.containers)}`);
-//             if (Array.isArray(detailAssign.containers)) {
-//               detailAssign.containers.forEach((cidStr, idx) => {
-//                 const cid = parseInt(cidStr);
-//                 if (!isNaN(cid)) {
-//                   allCids.add(cid);
-//                   parsedCount++;
-//                   console.log(`      Valid CID ${cid} from "${cidStr}"`);
-//                 } else {
-//                   console.warn(`      Invalid CID "${cidStr}" (NaN)`);
-//                 }
-//               });
-//             } else {
-//               console.warn(`    No valid containers array in detail ${detailIdxStr}`);
-//             }
-//           }
-//         }
-//       }
-//     }
-//     console.log(`Total valid CIDs extracted: ${allCids.size} (parsed ${parsedCount} items)`);
-
-//     if (allCids.size === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: 'No valid containers specified in assignments' });
-//     }
-
-//     // Fetch container details (numbers) for all unique cids - ensure only available
-//     const containerQuery = `
-//       SELECT 
-//         cm.cid, 
-//         cm.container_number,
-//         CASE 
-//           WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//           WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//           WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//           WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//           WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//           WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//           WHEN cs.availability = 'Returned' THEN 'Returned'
-//           ELSE 'Available'
-//         END as derived_status
-//       FROM container_master cm
-//       LEFT JOIN LATERAL (
-//         SELECT location, availability
-//         FROM container_status css
-//         WHERE css.cid = cm.cid
-//         ORDER BY css.sid DESC NULLS LAST
-//         LIMIT 1
-//       ) cs ON true
-//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       WHERE cm.cid = ANY($1) AND (
-//         CASE 
-//           WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//           WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//           WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//           WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//           WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//           WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//           WHEN cs.availability = 'Returned' THEN 'Returned'
-//           ELSE 'Available'
-//         END
-//       ) = 'Available'
-//     `;
-//     const containerResult = await client.query(containerQuery, [Array.from(allCids)]);
-//     console.log('Container query for CIDs', Array.from(allCids), 'returned', containerResult.rows.length, 'rows');
-//     containerResult.rows.forEach(row => {
-//       console.log('  - CID', row.cid, ':', row.container_number, '(status:', row.derived_status, ')');
-//     });
-//     const containerMap = new Map(containerResult.rows.map(row => [row.cid, row.container_number]));
-//     // Check for missing or unavailable containers
-//     const missingCids = Array.from(allCids).filter(cid => !containerMap.has(cid));
-//     console.log('Missing/unavailable CIDs:', missingCids);
-//     if (missingCids.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: `Containers not found or not available: ${missingCids.join(', ')}` });
-//     }
-
-//     // Track updates
-//     const updatedOrders = [];
-//     const trackingData = [];
-//     // Accumulate total assigned qty per order for final update
-//     const orderAssignedQtys = new Map();
-//     const allReceiversForOrders = [];  // Collect for overall status update
-//     // Fetch current orders and related records for fallback
-//     const currentOrders = {};
-//     const currentReceiversByOrder = {};
-//     for (const orderIdStr of orderIds) {
-//       const orderId = parseInt(orderIdStr);
-//       if (isNaN(orderId)) {
-//         console.warn(`Invalid order_id: ${orderIdStr}`);
-//         continue;
-//       }
-//       // Fetch current order
-//       const orderQuery = `
-//         SELECT id, booking_ref, status as overall_status, total_assigned_qty, eta 
-//         FROM orders 
-//         WHERE id = $1
-//       `;
-//       const orderResult = await client.query(orderQuery, [orderId]);
-//       if (orderResult.rowCount === 0) {
-//         console.warn(`Order not found: ${orderId}`);
-//         continue;
-//       }
-//       currentOrders[orderId] = orderResult.rows[0];
-//       // Fetch current receivers for this order
-//       const receiversQuery = `
-//         SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
-//         FROM receivers 
-//         WHERE order_id = $1
-//       `;
-//       const receiversResult = await client.query(receiversQuery, [orderId]);
-//       currentReceiversByOrder[orderId] = receiversResult.rows;
-//     }
-
-//     for (const orderIdStr of orderIds) {
-//       const orderId = parseInt(orderIdStr);
-//       if (isNaN(orderId)) {
-//         console.warn(`Invalid order_id: ${orderIdStr}`);
-//         continue;
-//       }
-//       const currentOrder = currentOrders[orderId];
-//       if (!currentOrder) {
-//         console.warn(`No current order data for: ${orderId}`);
-//         continue;
-//       }
-//       if (!assignments[orderIdStr]) {
-//         console.warn(`No assignments for order: ${orderId}`);
-//         updatedOrders.push({ orderId, assigned: 0 });
-//         continue;
-//       }
-//       let currentTotalAssigned = parseInt(currentOrder.total_assigned_qty) || 0;
-//       let assignedForThisOrder = 0; // Accumulate for this order
-//       let assignedGrossWeight = 0;  // Accumulate gross
-//       let assignedCount = 0;
-//       const orderAssignments = assignments[orderIdStr];
-//       const orderReceivers = [];  // Collect for status update
-//       for (const recIdStr of Object.keys(orderAssignments)) {
-//         const recId = parseInt(recIdStr);
-//         if (isNaN(recId)) {
-//           console.warn(`Invalid receiver_id: ${recIdStr}`);
-//           continue;
-//         }
-//         // Fetch receiver (include eta, etd, status for calculation; add total_weight for gross)
-//         const receiverQuery = `
-//           SELECT id, receiver_name, containers, qty_delivered, eta, etd, status, total_weight, total_number 
-//           FROM receivers 
-//           WHERE id = $1 AND order_id = $2
-//         `;
-//         const receiverResult = await client.query(receiverQuery, [recId, orderId]);
-//         if (receiverResult.rowCount === 0) {
-//           console.warn(`Receiver not found: ${recId} for order ${orderId}`);
-//           continue;
-//         }
-//         const receiver = receiverResult.rows[0];
-//         orderReceivers.push(receiver);  // For status
-//         // Parse current containers
-//         let currentContainers = [];
-//         if (receiver.containers && typeof receiver.containers === 'string') {
-//           try {
-//             currentContainers = JSON.parse(receiver.containers);
-//             if (!Array.isArray(currentContainers)) {
-//               currentContainers = [];
-//             }
-//           } catch (parseErr) {
-//             console.warn(`Failed to parse containers for receiver ${recId}:`, parseErr.message);
-//             currentContainers = [];
-//           }
-//         }
-//         // Fetch order_items IDs for this receiver, sorted by id to map indices
-//         const itemsQuery = `
-//           SELECT id FROM order_items 
-//           WHERE receiver_id = $1 
-//           ORDER BY id ASC
-//         `;
-//         const itemsResult = await client.query(itemsQuery, [recId]);
-//         const orderItemsIds = itemsResult.rows.map(row => row.id);
-//         if (orderItemsIds.length === 0) {
-//           console.warn(`No order_items found for receiver ${recId}`);
-//           continue;
-//         }
-//         // Collect detail assignments for later history inserts
-//         const detailAssignments = [];
-//         let sumQty = 0;
-//         let sumGross = 0;
-//         const newContNumbers = new Set();
-//         const recAssignments = orderAssignments[recIdStr];
-//         // Sort detail keys numerically to process in order
-//         const sortedDetailKeys = Object.keys(recAssignments).sort((a, b) => parseInt(a) - parseInt(b));
-//         for (const detailIdxStr of sortedDetailKeys) {
-//           const detailIndex = parseInt(detailIdxStr);
-//           if (isNaN(detailIndex) || detailIndex < 0 || detailIndex >= orderItemsIds.length) {
-//             console.warn(`Invalid detail index ${detailIdxStr} for receiver ${recId} (only ${orderItemsIds.length} items)`);
-//             continue;
-//           }
-//           const actualDetailId = orderItemsIds[detailIndex];
-//           const detailAssign = recAssignments[detailIdxStr];
-//           if (!detailAssign || typeof detailAssign !== 'object') continue;
-//           const detailQty = parseInt(detailAssign.qty) || 0;
-//           if (detailQty === 0) continue;
-//           const detailGross = parseFloat(detailAssign.gross_weight || (receiver.total_weight * (detailQty / (receiver.total_number || 1))));
-//           const detailCids = [];
-//           if (Array.isArray(detailAssign.containers)) {
-//             detailAssign.containers.forEach(cidStr => {
-//               const cid = parseInt(cidStr);
-//               if (!isNaN(cid) && containerMap.has(cid)) {
-//                 const contNum = containerMap.get(cid);
-//                 newContNumbers.add(contNum);
-//                 detailCids.push(cid);
-//               }
-//             });
-//           }
-//           if (detailQty > 0 || detailCids.length > 0) {
-//             detailAssignments.push({
-//               actualDetailId,
-//               detailQty,
-//               detailGross,
-//               cids: detailCids
-//             });
-//           }
-//           sumQty += detailQty;
-//           sumGross += detailGross;
-//         }
-//         if (sumQty === 0 && newContNumbers.size === 0) {
-//           console.warn(`No qty or containers to assign for receiver ${recId}`);
-//           continue;
-//         }
-//         // Append unique new containers
-//         const allContainers = new Set([...currentContainers, ...newContNumbers]);
-//         const updatedContainersJson = JSON.stringify(Array.from(allContainers));
-//         // Dynamically assign eta/etd if containers now assigned (and eta null)
-//         let newEta = receiver.eta;
-//         let newEtd = receiver.etd;
-//         let daysUntilEta = null;
-//         if (allContainers.size > 0 && (!newEta || newEta === null)) {
-//           const etaResult = await calculateETA(client, receiver.status || 'Created');
-//           newEta = etaResult.eta;
-//           daysUntilEta = etaResult.daysUntil;
-//           console.log(`[assignContainers] Calculated new ETA for receiver ${recId}: ${newEta} (status: ${receiver.status}, daysUntil: ${daysUntilEta})`);
-//         } else if (newEta) {
-//           daysUntilEta = computeDaysUntilEta(newEta);
-//         }
-//         // ETD: Set to today if not set
-//         if (allContainers.size > 0 && (!newEtd || newEtd === null)) {
-//           newEtd = new Date().toISOString().split('T')[0];
-//           console.log(`[assignContainers] Set ETD for receiver ${recId} to today: ${newEtd}`);
-//         }
-//         // Update qty_delivered + gross_weight
-//         const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
-//         // Update receiver (dynamic SET)
-//         const receiverSet = [];
-//         const receiverValues = [];
-//         let receiverParamIndex = 1;
-//         const receiverFields = [
-//           { key: 'containers', val: updatedContainersJson },
-//           { key: 'qty_delivered', val: newDelivered },
-//           { key: 'eta', val: newEta || null },
-//           { key: 'etd', val: newEtd || null },
-//           { key: 'total_weight', val: (parseFloat(receiver.total_weight) || 0) + sumGross }
-//         ];
-//         receiverFields.forEach(field => {
-//           receiverSet.push(`${field.key} = $${receiverParamIndex}`);
-//           receiverValues.push(field.val);
-//           receiverParamIndex++;
-//         });
-//         receiverSet.push('updated_at = CURRENT_TIMESTAMP');
-//         receiverValues.push(recId);
-//         const updateReceiverQuery = `
-//           UPDATE receivers 
-//           SET ${receiverSet.join(', ')} 
-//           WHERE id = $${receiverParamIndex}
-//           RETURNING id, status, eta
-//         `;
-//         const updateResult = await client.query(updateReceiverQuery, receiverValues);
-//         if (updateResult.rowCount > 0) {
-//           assignedCount++;
-//           assignedForThisOrder += sumQty;
-//           assignedGrossWeight += sumGross;
-//           const updatedRec = updateResult.rows[0];
-//           // Now insert history and status for each detail's containers
-//           for (const detailAssign of detailAssignments) {
-//             for (const cid of detailAssign.cids) {
-//               const contNum = containerMap.get(cid);
-//               if (!contNum) continue;
-              
-//               // Fetch previous status
-//               const prevStatusQuery = `
-//                 SELECT availability as status
-//                 FROM container_status
-//                 WHERE cid = $1
-//                 ORDER BY created_time DESC  -- Assuming created_time is the timestamp
-//                 LIMIT 1
-//               `;
-//               const prevStatusResult = await client.query(prevStatusQuery, [cid]);
-//               const previousStatus = prevStatusResult.rows[0]?.status || 'Available';
-              
-//               // Insert history log
-//               const logQuery = `
-//                 INSERT INTO container_assignment_history (
-//                   cid, container_number, order_id, receiver_id, detail_id, assigned_qty, status, action_type, changed_by, notes, previous_status
-//                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-//               `;
-//               const logValues = [
-//                 cid,
-//                 contNum,
-//                 orderId,
-//                 recId,
-//                 detailAssign.actualDetailId,
-//                 detailAssign.detailQty,
-//                 'Assigned to Job',
-//                 'ASSIGN',
-//                 created_by,
-//                 `Assigned to Order ${orderId} / Receiver ${recId} / Detail ${detailAssign.actualDetailId} (ETA: ${newEta || 'N/A'})`,
-//                 previousStatus
-//               ];
-//               await client.query(logQuery, logValues);
-              
-//               // Insert status update to container_status
-//               await client.query(
-//                 `INSERT INTO container_status (cid, availability, location, status_notes, created_by, created_time) 
-//                  VALUES ($1, 'Assigned to Job', $2, $3, $4, CURRENT_TIMESTAMP)`,
-//                 [cid, `Order ${orderId} / Receiver ${recId} / Detail ${detailAssign.actualDetailId}`, `Assigned for loading (ETA: ${newEta})`, created_by]
-//               );
-//             }
-//           }
-//           trackingData.push({
-//             receiverId: recId,
-//             receiverName: receiver.receiver_name,
-//             orderId: currentOrder.id,
-//             bookingRef: currentOrder.booking_ref,
-//             assignedQty: sumQty,
-//             assignedGross: sumGross.toFixed(2),
-//             assignedContainers: Array.from(newContNumbers),
-//             status: currentOrder.overall_status,
-//             newEta: newEta,
-//             newEtd: newEtd,
-//             daysUntilEta
-//           });
-//           console.log(`Assigned ${sumQty} qty, ${sumGross.toFixed(2)} gross, ${newContNumbers.size} containers to receiver ${recId} (order ${orderId}); ETA/ETD: ${newEta}/${newEtd} (days: ${daysUntilEta})`);
-//         } else {
-//           console.warn(`No rows updated for receiver ${recId}`);
-//         }
-//       }
-//       // After processing all receivers for this order, update the order
-//       if (assignedForThisOrder > 0) {
-//         const newTotalAssigned = currentTotalAssigned + assignedForThisOrder;
-//         orderAssignedQtys.set(orderId, newTotalAssigned);
-//         const orderSet = [];
-//         const orderValues = [];
-//         let orderParamIndex = 1;
-//         const orderFields = [
-//           { key: 'total_assigned_qty', val: newTotalAssigned },
-//           { key: 'eta', val: currentOrder.eta || new Date().toISOString().split('T')[0] }
-//         ];
-//         orderFields.forEach(field => {
-//           orderSet.push(`${field.key} = $${orderParamIndex}`);
-//           orderValues.push(field.val);
-//           orderParamIndex++;
-//         });
-//         orderSet.push('updated_at = CURRENT_TIMESTAMP');
-//         orderValues.push(orderId);
-//         const updateOrderQuery = `
-//           UPDATE orders 
-//           SET ${orderSet.join(', ')} 
-//           WHERE id = $${orderParamIndex}
-//           RETURNING id, total_assigned_qty, eta
-//         `;
-//         const orderUpdateResult = await client.query(updateOrderQuery, orderValues);
-//         if (orderUpdateResult.rowCount === 0) {
-//           console.warn(`Failed to update total_assigned_qty/eta for order ${orderId}`);
-//         } else {
-//           console.log(`Updated total_assigned_qty to ${newTotalAssigned} and ETA for order ${orderId}`);
-//         }
-//         // Cascade overall status
-//         await updateOrderOverallStatus(client, orderId, 'Loaded Into Container', orderReceivers);
-//       }
-//       allReceiversForOrders.push(...orderReceivers);
-//       updatedOrders.push({ 
-//         orderId: currentOrder.id, 
-//         bookingRef: currentOrder.booking_ref, 
-//         assignedReceivers: assignedCount,
-//         assignedQty: assignedForThisOrder,
-//         assignedGross: assignedGrossWeight.toFixed(2)
-//       });
-//     }
-//     await client.query('COMMIT');
-//     // Refetch updated data - for all affected orders
-//     const enhancedUpdatedOrders = [];
-//     for (const updOrder of updatedOrders) {
-//       const orderId = updOrder.orderId;
-//       // Refetch order
-//       const updatedOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [orderId]);
-//       // Fetch senders
-//       const updatedSenderResult = await client.query('SELECT * FROM senders WHERE order_id = $1', [orderId]);
-//       // Fetch enhanced receivers with shippingDetails
-//       const fetchReceiversQuery = `
-//         SELECT 
-//           r.*,
-//           COALESCE(
-//             (
-//               SELECT json_agg(
-//                 json_build_object(
-//                   'pickupLocation', oi.pickup_location,
-//                   'deliveryAddress', oi.delivery_address,
-//                   'category', oi.category,
-//                   'subcategory', oi.subcategory,
-//                   'type', oi.type,
-//                   'totalNumber', oi.total_number,
-//                   'weight', oi.weight,
-//                   'itemRef', oi.item_ref,
-//                   'containerDetails', COALESCE(oi.container_details, '[]'::jsonb)
-//                 ) ORDER BY oi.id
-//               )
-//               FROM order_items oi 
-//               WHERE oi.receiver_id = r.id
-//             ), 
-//             '[]'::json
-//           ) AS shippingDetails
-//         FROM receivers r 
-//         WHERE r.order_id = $1 
-//         ORDER BY r.id
-//       `;
-//       const enhancedReceiversResult = await client.query(fetchReceiversQuery, [orderId]);
-//       const enhancedReceivers = enhancedReceiversResult.rows.map(row => ({
-//         ...row,
-//         shippingDetails: row.shippingDetails || [],
-//         containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])
-//       }));
-//       // Fetch summary
-//       let orderSummary = [];
-//       try {
-//         const summaryQuery = 'SELECT * FROM order_summary WHERE order_id = $1';
-//         const summaryResult = await client.query(summaryQuery, [orderId]);
-//         orderSummary = summaryResult.rows;
-//       } catch (summaryErr) {
-//         console.warn('order_summary view fetch failed:', summaryErr.message);
-//         const fallbackQuery = `
-//           SELECT o.id as order_id, o.booking_ref, o.status, o.created_at, o.eta, o.etd, o.shipping_line,
-//                  s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
-//                  t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic,
-//                  t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic,
-//                  t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method,
-//                  t.qty_delivered, t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date,
-//                  t.gatepass,
-//                  ot.status AS tracking_status, ot.created_time AS tracking_created_time, ot.container_id,
-//                  cm.container_number,
-//                  rs.receiver_summary,
-//                  rss.receiver_status_summary,
-//                  rc.receiver_containers_json,
-//                  rt.total_items,
-//                  rt.remaining_items,
-//                  rd.receivers_details
-//           FROM orders o
-//           LEFT JOIN senders s ON o.id = s.order_id
-//           LEFT JOIN transport_details t ON o.id = t.order_id
-//           LEFT JOIN order_tracking ot ON o.id = ot.order_id
-//           LEFT JOIN container_master cm ON ot.container_id = cm.cid
-//           LEFT JOIN LATERAL (
-//             SELECT json_agg(json_build_object(
-//               'id', r.id,
-//               'receiver_name', r.receiver_name,
-//               'shippingDetails', LATERAL (
-//                 SELECT json_agg(
-//                   json_build_object(
-//                     'pickupLocation', oi.pickup_location,
-//                     'deliveryAddress', oi.delivery_address,
-//                     'category', oi.category,
-//                     'subcategory', oi.subcategory,
-//                     'type', oi.type,
-//                     'totalNumber', oi.total_number,
-//                     'weight', oi.weight,
-//                     'itemRef', oi.item_ref,
-//                     'containerDetails', COALESCE(oi.container_details, '[]'::jsonb)
-//                   ) ORDER BY oi.id
-//                 ) AS sd
-//                 FROM order_items oi WHERE oi.receiver_id = r.id
-//               ).sd
-//             ) ORDER BY r.id) AS receivers_details
-//             FROM receivers r
-//             WHERE r.order_id = o.id
-//           ) rd ON true
-//           WHERE o.id = $1
-//         `;
-//         const fallbackResult = await client.query(fallbackQuery, [orderId]);
-//         orderSummary = fallbackResult.rows;
-//       }
-//       enhancedUpdatedOrders.push({
-//         order: updatedOrderResult.rows[0],
-//         senders: updatedSenderResult.rows,
-//         summary: orderSummary,
-//         receivers: enhancedReceivers,
-//         tracking: trackingData.filter(t => t.orderId === orderId)
-//       });
-//     }
-//     res.status(200).json({ 
-//       success: true, 
-//       message: `Assigned containers to ${trackingData.length} receivers across ${updatedOrders.length} orders`,
-//       updatedOrders: enhancedUpdatedOrders,
-//       tracking: trackingData 
-//     });
-//   } catch (error) {
-//     console.error('Error assigning containers:', error);
-//     if (client) {
-//       try {
-//         await client.query('ROLLBACK');
-//         console.log('Transaction rolled back successfully');
-//       } catch (rollbackErr) {
-//         console.error('Rollback failed:', rollbackErr);
-//       }
-//     }
-//     if (error.code === '23505') {
-//       return res.status(409).json({ error: 'Duplicate entry conflict' });
-//     }
-//     if (error.code === '23514') {
-//       return res.status(400).json({ error: 'Invalid value for constrained field' });
-//     }
-//     if (error.code === '22007' || error.code === '22008') {
-//       return res.status(400).json({ error: 'Invalid date format' });
-//     }
-//     if (error.code === '42P01' || error.code === '42703') {
-//       return res.status(500).json({ error: 'Database schema mismatch. Run migrations.' });
-//     }
-//     return res.status(500).json({ error: 'Internal server error', details: error.message });
-//   } finally {
-//     if (client) {
-//       client.release();
-//     }
-//   }
-// }
-// export async function updateReceiverStatus(req, res) {
-//   let client;
-//   try {
-//     const orderId = req.params.orderId;
-//     const receiverId = req.params.id;
-//     const { status, notifyClient = true, notifyParties = false, forceRecalcEta = false } = req.body || {}; // New: Optional flag for recalc
-//     const created_by = req.user?.id || 'system';
-//     console.log('Received request to update receiver status:', { orderId, receiverId }, { status, notifyClient, notifyParties, forceRecalcEta });
-//     // Validation (unchanged)
-//     const validStatuses = [
-//       'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-//       'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
-//       'Ready for Delivery', 'Shipment Delivered'
-//     ];
-//     if (!orderId || isNaN(parseInt(orderId))) {
-//       return res.status(400).json({ error: 'Valid order ID is required' });
-//     }
-//     if (!receiverId || isNaN(parseInt(receiverId))) {
-//       return res.status(400).json({ error: 'Valid receiver ID is required' });
-//     }
-//     if (!status || !validStatuses.includes(status)) {
-//       return res.status(400).json({ error: 'Valid status is required', validStatuses });
-//     }
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-//     // Fetch order, receiver, and ALL receivers (unchanged)
-//     const detailsQuery = `
-//       SELECT o.*, s.sender_email, s.sender_contact,
-//              r.id as receiver_id, r.receiver_name, r.receiver_email, r.receiver_contact, r.status as receiver_status, r.eta, r.total_weight, r.containers
-//       FROM orders o
-//       LEFT JOIN senders s ON o.id = s.order_id
-//       LEFT JOIN receivers r ON o.id = r.order_id AND r.id = $2
-//       WHERE o.id = $1
-//     `;
-//     const detailsResult = await client.query(detailsQuery, [parseInt(orderId), parseInt(receiverId)]);
-//     if (detailsResult.rowCount === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(404).json({ error: 'Order or Receiver not found' });
-//     }
-//     const order = detailsResult.rows[0];
-//     const oldStatus = order.receiver_status;
-//     const allReceiversQuery = `SELECT id, status, eta FROM receivers WHERE order_id = $1`;
-//     const allRecResult = await client.query(allReceiversQuery, [parseInt(orderId)]);
-//     let allReceivers = allRecResult.rows;
-//     // Update receiver status (unchanged)
-//     const updateQuery = `
-//       UPDATE receivers
-//       SET status = $1, updated_at = CURRENT_TIMESTAMP
-//       WHERE id = $2 AND order_id = $3
-//       RETURNING id, status, eta, containers
-//     `;
-//     const updateResult = await client.query(updateQuery, [status, parseInt(receiverId), parseInt(orderId)]);
-//     if (updateResult.rowCount === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(500).json({ error: 'Failed to update receiver status' });
-//     }
-//     let updatedReceiver = updateResult.rows[0];
-//     let daysUntilEta = computeDaysUntilEta(updatedReceiver.eta);
-//     let finalStatus = status;
-//     // Auto-upgrade if past ETA (now allows negative daysUntilEta)
-//     if (daysUntilEta !== null && daysUntilEta <= 0 && status !== 'Shipment Delivered') {
-//       finalStatus = 'Shipment Delivered';
-//       await client.query(`UPDATE receivers SET status = $1 WHERE id = $2`, [finalStatus, parseInt(receiverId)]);
-//       console.log(`Auto-upgraded receiver ${receiverId} to ${finalStatus} (past ETA: ${daysUntilEta} days)`);
-//       const refetchResult = await client.query(`SELECT id, status, eta, containers FROM receivers WHERE id = $1`, [parseInt(receiverId)]);
-//       updatedReceiver = refetchResult.rows[0];
-//       daysUntilEta = computeDaysUntilEta(updatedReceiver.eta);
-//     }
-//     // NEW: Dynamically fetch offsets from eta_config to check if advanced (lower offset = later stage)
-//     const oldOffsetQuery = `SELECT days_offset FROM eta_config WHERE status = $1 LIMIT 1`;
-//     const oldOffsetResult = await client.query(oldOffsetQuery, [oldStatus || 'In Process']);
-//     const oldOffset = oldOffsetResult.rowCount > 0 ? oldOffsetResult.rows[0].days_offset : Infinity;  // Use Infinity for unknown old status
-    
-//     const newOffsetQuery = `SELECT days_offset FROM eta_config WHERE status = $1 LIMIT 1`;
-//     const newOffsetResult = await client.query(newOffsetQuery, [finalStatus]);
-//     const newOffset = newOffsetResult.rowCount > 0 ? newOffsetResult.rows[0].days_offset : 0;
-    
-//     const statusAdvanced = newOffset < oldOffset;  // Advanced if fewer days left (lower offset)
-    
-//     // NEW: Recalculate ETA based on new finalStatus (if null, forced, or status advanced)
-//     let newEta = updatedReceiver.eta;
-//     if (!updatedReceiver.eta || forceRecalcEta || statusAdvanced) {
-//       const etaResult = await calculateETA(client, finalStatus);
-//       newEta = etaResult.eta;
-//       // Update receiver ETA if changed
-//       if (newEta !== updatedReceiver.eta) {
-//         await client.query(`UPDATE receivers SET eta = $1 WHERE id = $2`, [newEta, parseInt(receiverId)]);
-//         console.log(`Recalculated ETA for receiver ${receiverId} (status: ${finalStatus}): ${newEta} (days until: ${etaResult.daysUntil})`);
-//         // Refetch for consistency
-//         const refetchResult = await client.query(`SELECT id, status, eta, containers FROM receivers WHERE id = $1`, [parseInt(receiverId)]);
-//         updatedReceiver = refetchResult.rows[0];
-//         daysUntilEta = etaResult.daysUntil;
-//       }
-//     }
-//     // Update allReceivers with new status/eta (updated to include newEta)
-//     allReceivers = allReceivers.map(r =>
-//       r.id === parseInt(receiverId)
-//         ? { ...r, status: finalStatus, eta: newEta }
-//         : r
-//     );
-//     // NEW: Cascade to linked containers (bidirectional sync)
-//     await updateLinkedContainersStatus(client, parseInt(receiverId), finalStatus, created_by);
-//     // Cascade: Update order_items (unchanged)
-//     await client.query(`
-//       UPDATE order_items
-//       SET consignment_status = $1, updated_at = CURRENT_TIMESTAMP
-//       WHERE receiver_id = $2
-//     `, [finalStatus, parseInt(receiverId)]);
-//     // Cascade: Update overall order status (unchanged)
-//     await updateOrderOverallStatus(client, parseInt(orderId), finalStatus, allReceivers);
-//     // NEW: Recalc and update order-level ETA (e.g., earliest receiver ETA)
-//     const minEtaQuery = `SELECT MIN(eta) as min_eta FROM receivers WHERE order_id = $1`;
-//     const minEtaResult = await client.query(minEtaQuery, [parseInt(orderId)]);
-//     const orderNewEta = minEtaResult.rows[0].min_eta;
-//     if (orderNewEta && orderNewEta !== order.eta) {
-//       await client.query(`UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [orderNewEta, parseInt(orderId)]);
-//       console.log(`Updated order ${orderId} ETA to earliest receiver: ${orderNewEta}`);
-//     }
-//     // Log to order_tracking (unchanged)
-//     await client.query(`
-//       INSERT INTO order_tracking (order_id, receiver_id, status, old_status, created_by, created_time)
-//       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-//     `, [parseInt(orderId), parseInt(receiverId), finalStatus, oldStatus, created_by]);
-//     await client.query('COMMIT');
-//     // Non-critical cascades/notifications (unchanged from prior version)
-//     // ... (include your container cascade and notifications here)
-//     res.status(200).json({
-//       success: true,
-//       message: `Receiver status updated to "${finalStatus}". ETA recalculated to "${newEta}". Cascades (incl. containers) and notifications triggered.`,
-//       updatedReceiver: {
-//         id: updatedReceiver.id,
-//         status: finalStatus,
-//         eta: newEta,
-//         days_until_eta: daysUntilEta,
-//         containers: updatedReceiver.containers  // Include for frontend
-//       }
-//     });
-//   } catch (error) {
-//     console.error('Error updating receiver status:', error);
-//     if (client) {
-//       try {
-//         await client.query('ROLLBACK');
-//       } catch (rollbackErr) {
-//         console.error('Rollback failed:', rollbackErr);
-//       }
-//     }
-//     return res.status(500).json({ error: 'Internal server error', details: error.message });
-//   } finally {
-//     if (client) client.release();
-//   }
-// }
-
-
-
-
-
-
-
-
-// export async function assignContainersToOrders(req, res) {
-//   let client;
-//   try {
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-//     const updates = req.body || {};
-//     const created_by = 'system'; // Or from auth
-//     // Map incoming snake_case to camelCase for consistency (for fixed fields)
-//     const camelUpdates = {
-//       orderIds: updates.order_ids || updates.orderIds,
-//       containerId: updates.container_id || updates.containerId,
-//       // Dynamic assignments object remains as-is
-//     };
-//     // Extract orderIds and assignments
-//     let orderIds = camelUpdates.orderIds || Object.keys(updates).filter(k => !isNaN(parseInt(k)));
-//     let assignments = camelUpdates.containerId || updates; // Fallback to full body if nested
-//     if (Array.isArray(orderIds)) {
-//       orderIds = orderIds.filter(id => !isNaN(parseInt(id)));
-//     } else {
-//       orderIds = Array.isArray(orderIds) ? orderIds : [];
-//     }
-//     // Debug log
-//     console.log('Assign containers body (key fields):', updates, {
-//       orderIds: orderIds.slice(0, 3), // Sample for log
-//       numOrders: orderIds.length,
-//       sampleAssignment: assignments && Object.keys(assignments).length > 0 ? { [Object.keys(assignments)[0]]: Object.keys(assignments[Object.keys(assignments)[0]] || {}).slice(0, 1) } : null
-//     });
-//     // Validation
-//     const updateErrors = [];
-//     if (orderIds.length === 0) {
-//       updateErrors.push('orderIds array is required and must not be empty');
-//     }
-//     if (!assignments || typeof assignments !== 'object' || Object.keys(assignments).length === 0) {
-//       updateErrors.push('assignments object is required and must not be empty');
-//     }
-//     if (updateErrors.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({
-//         error: 'Invalid request fields',
-//         details: updateErrors.join('; ')
-//       });
-//     }
-//     // Collect all unique container IDs from the assignments
-//     const allCids = new Set();
-//     for (const orderAssign of Object.values(assignments)) {
-//       if (typeof orderAssign === 'object') {
-//         for (const recAssign of Object.values(orderAssign)) {
-//           if (typeof recAssign === 'object' && recAssign !== null) {
-//             for (const detailAssign of Object.values(recAssign)) {
-//               if (detailAssign && typeof detailAssign === 'object' && Array.isArray(detailAssign.containers)) {
-//                 detailAssign.containers.forEach(cidStr => {
-//                   const cid = parseInt(cidStr);
-//                   if (!isNaN(cid)) {
-//                     allCids.add(cid);
-//                   }
-//                 });
-//               }
-//             }
-//           }
-//         }
-//       }
-//     }
-//     if (allCids.size === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: 'No valid containers specified in assignments' });
-//     }
-//     // Fetch container details (numbers) for all unique cids
-//     // Fetch container details (numbers) for all unique cids
-// const containerQuery = `
-//   SELECT 
-//     cm.cid, 
-//     cm.container_number,
-//     CASE 
-//       WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//       WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//       WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//       WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//       WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//       WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//       WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//       WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//       WHEN cs.availability = 'Returned' THEN 'Returned'
-//       ELSE 'Available'
-//     END as derived_status
-//   FROM container_master cm
-//   LEFT JOIN LATERAL (
-//     SELECT location, availability
-//     FROM container_status css
-//     WHERE css.cid = cm.cid
-//     ORDER BY css.sid DESC NULLS LAST
-//     LIMIT 1
-//   ) cs ON true
-//   LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//   WHERE cm.cid = ANY($1) AND (
-//     CASE 
-//       WHEN cs.availability = 'Cleared' THEN 'Cleared'
-//       WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
-//       WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-//       WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-//       WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
-//       WHEN cs.availability = 'Arrived' THEN 'Arrived'
-//       WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
-//       WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
-//       WHEN cs.availability = 'Returned' THEN 'Returned'
-//       ELSE 'Available'
-//     END
-//   ) = 'Available'
-// `;
-// const containerResult = await client.query(containerQuery, [Array.from(allCids)]);
-// const containerMap = new Map(containerResult.rows.map(row => [row.cid, row.container_number]));
-// // Check for missing or unavailable containers
-//     const missingCids = Array.from(allCids).filter(cid => !containerMap.has(cid));
-//     if (missingCids.length > 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(400).json({ error: `Containers not found or not available: ${missingCids.join(', ')}` });
-//     }
-//     // Track updates
-//     const updatedOrders = [];
-//     const trackingData = [];
-//     // MODIFICATION: Accumulate total assigned qty per order for final update
-//     const orderAssignedQtys = new Map();
-//     for (const orderIdStr of orderIds) {
-//       const orderId = parseInt(orderIdStr);
-//       if (isNaN(orderId)) {
-//         console.warn(`Invalid order_id: ${orderIdStr}`);
-//         continue;
-//       }
-//       if (!assignments[orderIdStr]) {
-//         console.warn(`No assignments for order: ${orderId}`);
-//         updatedOrders.push({ orderId, assigned: 0 });
-//         continue;
-//       }
-//       // Fetch order
-//       const orderQuery = `
-//         SELECT id, booking_ref, status as overall_status, total_assigned_qty 
-//         FROM orders 
-//         WHERE id = $1
-//       `;
-//       const orderResult = await client.query(orderQuery, [orderId]);
-//       if (orderResult.rowCount === 0) {
-//         console.warn(`Order not found: ${orderId}`);
-//         continue;
-//       }
-//       const order = orderResult.rows[0];
-//       let currentTotalAssigned = parseInt(order.total_assigned_qty) || 0;
-//       let assignedForThisOrder = 0; // Accumulate for this order
-//       let assignedCount = 0;
-//       const orderAssignments = assignments[orderIdStr];
-//       for (const recIdStr of Object.keys(orderAssignments)) {
-//         const recId = parseInt(recIdStr);
-//         if (isNaN(recId)) {
-//           console.warn(`Invalid receiver_id: ${recIdStr}`);
-//           continue;
-//         }
-//         // Fetch receiver (include eta, etd, status for calculation)
-//         const receiverQuery = `
-//           SELECT id, receiver_name, containers, qty_delivered, eta, etd, status 
-//           FROM receivers 
-//           WHERE id = $1 AND order_id = $2
-//         `;
-//         const receiverResult = await client.query(receiverQuery, [recId, orderId]);
-//         if (receiverResult.rowCount === 0) {
-//           console.warn(`Receiver not found: ${recId} for order ${orderId}`);
-//           continue;
-//         }
-//         const receiver = receiverResult.rows[0];
-//         // Parse current containers
-//         let currentContainers = [];
-//         if (receiver.containers && typeof receiver.containers === 'string') {
-//           try {
-//             currentContainers = JSON.parse(receiver.containers);
-//             if (!Array.isArray(currentContainers)) {
-//               currentContainers = [];
-//             }
-//           } catch (parseErr) {
-//             console.warn(`Failed to parse containers for receiver ${recId}:`, parseErr.message);
-//             currentContainers = [];
-//           }
-//         }
-//         // Collect new containers and sum qty for this receiver
-//         const newContNumbers = new Set();
-//         let sumQty = 0;
-//         const recAssignments = orderAssignments[recIdStr];
-//         for (const detailIdxStr of Object.keys(recAssignments)) {
-//           const detailAssign = recAssignments[detailIdxStr];
-//           if (detailAssign && typeof detailAssign === 'object') {
-//             sumQty += parseInt(detailAssign.qty) || 0;
-//             if (Array.isArray(detailAssign.containers)) {
-//               detailAssign.containers.forEach(cidStr => {
-//                 const cid = parseInt(cidStr);
-//                 if (!isNaN(cid) && containerMap.has(cid)) {
-//                   newContNumbers.add(containerMap.get(cid));
-//                 }
-//               });
-//             }
-//           }
-//         }
-//         if (sumQty === 0 && newContNumbers.size === 0) {
-//           console.warn(`No qty or containers to assign for receiver ${recId}`);
-//           continue;
-//         }
-//         // Append unique new containers (now containers assigned, so calculate/set eta if needed)
-//         const allContainers = new Set([...currentContainers, ...newContNumbers]);
-//         const updatedContainersJson = JSON.stringify(Array.from(allContainers));
-//         // Dynamically assign eta/etd if containers now assigned (and eta null)
-//         let newEta = receiver.eta;
-//         let newEtd = receiver.etd;
-//         if (allContainers.size > 0 && (!newEta || newEta === null)) {
-//           // Calculate eta based on current receiver status
-//           newEta = await calculateETA(client, receiver.status || 'Created');
-//           console.log(`[assignContainers] Calculated new ETA for receiver ${recId}: ${newEta} (status: ${receiver.status})`);
-//         }
-//         // ETD: Similar logic if needed (e.g., set to today or calculate differently); here assuming null/unchanged
-//         // Update qty_delivered
-//         const newDelivered = (parseInt(receiver.qty_delivered) || 0) + sumQty;
-//         // Update receiver with eta/etd if changed
-//         const updateReceiverQuery = `
-//           UPDATE receivers 
-//           SET containers = $1, qty_delivered = $2, eta = COALESCE(eta, $3), etd = $4
-//           WHERE id = $5
-//           RETURNING id
-//         `;
-//         const updateResult = await client.query(updateReceiverQuery, [updatedContainersJson, newDelivered, newEta, newEtd, recId]);
-//         if (updateResult.rowCount > 0) {
-//           assignedCount++;
-//           assignedForThisOrder += sumQty; // Accumulate for order
-//           trackingData.push({
-//             receiverId: recId,
-//             receiverName: receiver.receiver_name,
-//             orderId: order.id,
-//             bookingRef: order.booking_ref,
-//             assignedQty: sumQty,
-//             assignedContainers: Array.from(newContNumbers),
-//             status: order.overall_status,
-//             newEta: newEta  // Include new eta in tracking for logs/response
-//           });
-//           console.log(`Assigned ${sumQty} qty and ${newContNumbers.size} containers to receiver ${recId} (order ${orderId}); ETA set to ${newEta}`);
-//         } else {
-//           console.warn(`No rows updated for receiver ${recId}`);
-//         }
-//       }
-//       // After processing all receivers for this order, update the order's total_assigned_qty
-//       if (assignedForThisOrder > 0) {
-//         const newTotalAssigned = currentTotalAssigned + assignedForThisOrder;
-//         orderAssignedQtys.set(orderId, newTotalAssigned);
-//         const updateOrderQuery = `
-//           UPDATE orders 
-//           SET total_assigned_qty = $1
-//           WHERE id = $2
-//           RETURNING id, total_assigned_qty
-//         `;
-//         const orderUpdateResult = await client.query(updateOrderQuery, [newTotalAssigned, orderId]);
-//         if (orderUpdateResult.rowCount === 0) {
-//           console.warn(`Failed to update total_assigned_qty for order ${orderId}`);
-//         } else {
-//           console.log(`Updated total_assigned_qty for order ${orderId} to ${newTotalAssigned}`);
-//         }
-//       }
-//       updatedOrders.push({ 
-//         orderId: order.id, 
-//         bookingRef: order.booking_ref, 
-//         assignedReceivers: assignedCount,
-//         assignedQty: assignedForThisOrder
-//       });
-//     }
-//     await client.query('COMMIT');
-//     res.status(200).json({ 
-//       success: true, 
-//       message: `Assigned containers to ${trackingData.length} receivers across ${updatedOrders.length} orders`,
-//       updatedOrders,
-//       tracking: trackingData 
-//     });
-//   } catch (error) {
-//     console.error('Error assigning containers:', error);
-//     if (client) {
-//       try {
-//         await client.query('ROLLBACK');
-//         console.log('Transaction rolled back successfully');
-//       } catch (rollbackErr) {
-//         console.error('Rollback failed:', rollbackErr);
-//       }
-//     }
-//     return res.status(500).json({ error: 'Internal server error', details: error.message });
-//   } finally {
-//     if (client) {
-//       client.release();
-//     }
-//   }
-// }
-// export async function updateReceiverStatus(req, res) {
-//   let client;
-//   try {
-//     const orderId = req.params.orderId;
-//     const receiverId = req.params.id;
-//     const { status, notifyClient = true, notifyParties = false } = req.body || {};
-
-//     console.log('Received request to update receiver status:', { orderId, receiverId }, { status, notifyClient, notifyParties });
-
-//     // Validation
-//     const validStatuses = [
-//       'Ready for Loading', 'Loaded Into container', 'Shipment Processing',
-//       'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
-//       'Ready for Delivery', 'Shipment Delivered'
-//     ];
-//     if (!orderId || isNaN(parseInt(orderId))) {
-//       return res.status(400).json({ error: 'Valid order ID is required' });
-//     }
-//     if (!receiverId || isNaN(parseInt(receiverId))) {
-//       return res.status(400).json({ error: 'Valid receiver ID is required' });
-//     }
-//     if (!status || !validStatuses.includes(status)) {
-//       return res.status(400).json({ error: 'Valid status is required', validStatuses });
-//     }
-
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-
-//     // Fetch order and receiver details (for notifications and old status)
-//     const detailsQuery = `
-//       SELECT o.*, s.sender_email, s.sender_contact,
-//              r.id as receiver_id, r.receiver_name, r.receiver_email, r.receiver_contact, r.status as receiver_status
-//       FROM orders o
-//       LEFT JOIN senders s ON o.id = s.order_id
-//       LEFT JOIN receivers r ON o.id = r.order_id AND r.id = $2
-//       WHERE o.id = $1
-//     `;
-//     const detailsResult = await client.query(detailsQuery, [parseInt(orderId), parseInt(receiverId)]);
-//     if (detailsResult.rowCount === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(404).json({ error: 'Order or Receiver not found' });
-//     }
-//     const order = detailsResult.rows[0];
-//     const oldStatus = order.receiver_status;
-
-//     // Update receiver status
-//     const updateQuery = `
-//       UPDATE receivers
-//       SET status = $1, updated_at = CURRENT_TIMESTAMP
-//       WHERE id = $2 AND order_id = $3
-//       RETURNING id, status
-//     `;
-//     const updateResult = await client.query(updateQuery, [status, parseInt(receiverId), parseInt(orderId)]);
-//     if (updateResult.rowCount === 0) {
-//       await client.query('ROLLBACK');
-//       return res.status(500).json({ error: 'Failed to update receiver status' });
-//     }
-
-//     const updatedReceiver = updateResult.rows[0];
-
-//     // Cascade: Update related order_items' consignment_status
-//     await client.query(`
-//       UPDATE order_items 
-//       SET consignment_status = $1, updated_at = CURRENT_TIMESTAMP 
-//       WHERE receiver_id = $2
-//     `, [status, parseInt(receiverId)]);
-
-//     // Cascade: Update overall order status (enhanced with propagation)
-//     await updateOrderOverallStatus(client, parseInt(orderId), status);
-
-//     // Cascade: To linked containers (if any) - Safe implementation to avoid "relation containers does not exist"
-//     try {
-//       const recQuery = `
-//         SELECT containers FROM receivers WHERE order_id = $1 AND id = $2
-//       `;
-//       const recResult = await client.query(recQuery, [parseInt(orderId), parseInt(receiverId)]);
-//       if (recResult.rowCount > 0 && recResult.rows[0].containers) {
-//         let contNums = [];
-//         const containersJson = recResult.rows[0].containers;
-//         if (typeof containersJson === 'string') {
-//           try {
-//             contNums = JSON.parse(containersJson);
-//           } catch (e) {
-//             if (containersJson.trim() && containersJson.trim() !== '[]') {
-//               contNums = [containersJson.trim()];
-//             }
-//           }
-//         } else if (Array.isArray(containersJson)) {
-//           contNums = containersJson;
-//         }
-//         if (contNums.length > 0) {
-//           // Map receiver status to container derived_status
-//           const statusMap = {
-//             'Ready for Loading': 'Ready for Loading',
-//             'Loaded Into container': 'Loaded',
-//             'Shipment Processing': 'In Transit',
-//             'Shipment In Transit': 'In Transit',
-//             'Under Processing': 'Under Processing',
-//             'Arrived at Sort Facility': 'Arrived',
-//             'Ready for Delivery': 'Ready for Delivery',
-//             'Shipment Delivered': 'Delivered'
-//           };
-//           const containerStatus = statusMap[status] || 'In Transit';
-//           // Update each matching container in container_master
-//           for (const contNum of contNums) {
-//             await client.query(
-//               'UPDATE container_master SET derived_status = $1 WHERE container_number = $2',
-//               [containerStatus, contNum]
-//             );
-//           }
-//           console.log(`Cascaded status "${containerStatus}" to ${contNums.length} containers for receiver ${receiverId}`);
-//         }
-//       }
-//     } catch (cascadeErr) {
-//       console.warn('Cascade to containers failed (non-critical):', cascadeErr.message);
-//       // Continue without failing the transaction
-//     }
-
-//     // Log to order_tracking with old_status
-//     await client.query(`
-//       INSERT INTO order_tracking (order_id, receiver_id, status, old_status, created_by, created_time)
-//       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-//     `, [parseInt(orderId), parseInt(receiverId), status, oldStatus, req.user?.id || 'system']);
-
-//     await client.query('COMMIT');
-
-//     // Trigger notifications (GAS-style: client/parties + subscribers)
-//     await triggerNotifications(order, status, notifyClient, notifyParties, { receiver: updatedReceiver, oldStatus });
-//     await sendUpdateToSubscribers(orderId, status, oldStatus); // New: Send to subscribers
-
-//     res.status(200).json({  
-//       success: true,
-//       message: `Receiver status updated to "${status}". Cascades and notifications triggered.`,
-//       updatedReceiver: { id: updatedReceiver.id, status: updatedReceiver.status }
-//     });
-//   } catch (error) {
-//     console.error('Error updating receiver status:', error);
-//     if (client) {
-//       try {
-//         await client.query('ROLLBACK');
-//       } catch (rollbackErr) {
-//         console.error('Rollback failed:', rollbackErr);
-//       }
-//     }
-//     return res.status(500).json({ error: 'Internal server error', details: error.message });
-//   } finally {
-//     if (client) client.release();
-//   }
-// }
-// async function updateOrderOverallStatus(client, orderId, newReceiverStatus) {
-//   try {
-//     // Fetch all receivers
-//     const receiversQuery = `SELECT status FROM receivers WHERE order_id = $1`;
-//     const receiversResult = await client.query(receiversQuery, [orderId]);
-//     const receiverStatuses = receiversResult.rows.map(r => r.status);
-
-//     // Logic: Propagate if all match newReceiverStatus; else derive
-//     let overallStatus = 'In Process'; // Default
-//     if (receiverStatuses.every(s => s === newReceiverStatus)) {
-//       overallStatus = newReceiverStatus; // Full cascade to order
-//     } else if (receiverStatuses.every(s => s === 'Delivered')) {
-//       overallStatus = 'Delivered';
-//     } else if (receiverStatuses.some(s => s === 'Cancelled')) {
-//       overallStatus = 'Cancelled';
-//     } else if (receiverStatuses.some(s => s === 'Hold')) {
-//       overallStatus = 'Hold';
-//     } // Extend with more GAS-like phases (e.g., 'Shipment In Transit')
-
-//     const orderUpdateQuery = `
-//       UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, status
-//     `;
-//     const orderResult = await client.query(orderUpdateQuery, [overallStatus, orderId]);
-//     if (orderResult.rowCount > 0) {
-//       console.log(`Cascaded order status to: ${overallStatus} for order ${orderId}`);
-//     }
-//   } catch (err) {
-//     console.error('Error updating overall order status:', err);
-//   }
-// }
-
-// async function calculateETA(client, status, baseDate = new Date()) {
-//   try {
-//     const configQuery = `SELECT days_offset FROM eta_config WHERE status = $1`;
-//     const configResult = await client.query(configQuery, [status]);
-//     if (configResult.rowCount === 0) {
-//       console.log(`No ETA config for status: ${status}; using baseDate`);
-//       return baseDate.toISOString().split('T')[0]; // YYYY-MM-DD
-//     }
-//     const days = configResult.rows[0].days_offset;
-//     if (status.toLowerCase().includes('delivered')) return baseDate.toISOString().split('T')[0]; // No offset
-//     const etaDate = new Date(baseDate.getTime() + days * 86400000); // ms per day
-//     return etaDate.toISOString().split('T')[0];
-//   } catch (err) {
-//     console.error('ETA calc error:', err);
-//     return new Date().toISOString().split('T')[0];
-//   }
-// }
-
-// Updated sendUpdateToSubscribers - fetches order/subscriber details, uses enhanced email with full template
 async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
   console.log(`Preparing to send update to subscribers for order ${orderId}: ${oldStatus} -> ${newStatus}`);  
   try {
