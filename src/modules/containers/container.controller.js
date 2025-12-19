@@ -279,14 +279,9 @@ export async function getTypes(req, res) {
   try {
     // Hardcode the full list to match frontend options
     const types = [
-      { value: 'Dry High', label: 'Dry High' },
-      { value: 'Dry Standard', label: 'Dry Standard' },
-      { value: 'Flat High', label: 'Flat High' },
-      { value: 'Flat Standard', label: 'Flat Standard' },
-      { value: 'Open Top', label: 'Open Top' },
-      { value: 'Open Top High', label: 'Open Top High' },
-      { value: 'Reefer High', label: 'Reefer High' },
-      { value: 'Reefer Standard', label: 'Reefer Standard' },
+      { value: 'RF', label: 'RF' },
+      { value: 'HC', label: 'HC' },
+      { value: 'Ft', label: 'FT' },
       { value: 'Tank', label: 'Tank' }
     ];
     res.json(types);
@@ -764,7 +759,7 @@ export async function getAllContainers(req, res) {
         WITH container_summary AS (${innerQuery})
         SELECT * FROM container_summary 
         ${statusWhere}
-        ORDER BY container_number 
+        ORDER BY created_time DESC
         LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
       `;
     } else {
@@ -772,7 +767,7 @@ export async function getAllContainers(req, res) {
       fullQuery = `
         WITH container_summary AS (${innerQuery})
         SELECT * FROM container_summary 
-        ORDER BY container_number 
+        ORDER BY created_time DESC
         LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
       `;
     }

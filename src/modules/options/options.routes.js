@@ -37,7 +37,11 @@ import {
   updateThirdParty,
   createBank,
   updateBank,
-  deleteBank
+  deleteBank,
+  createEtaConfig,
+  deleteEtaConfig,
+  getEtaConfigs,
+  updateEtaConfig
 } from './options.controllers.js';
 
 const router = express.Router();
@@ -84,5 +88,11 @@ router.get('/banks/crud', getBanks); // Keep for full CRUD if needed, but primar
 router.post('/banks', createBank);
 router.put('/banks/:id', updateBank);
 router.delete('/banks/:id', deleteBank);
+router.post('/eta-configs', createEtaConfig);
+router.put('/eta-configs/:id', updateEtaConfig);
+router.delete('/eta-configs/:id', deleteEtaConfig);
+router.get('/eta-configs', getEtaConfigs);
+
+
 
 export default router;

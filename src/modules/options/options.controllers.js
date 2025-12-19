@@ -644,6 +644,75 @@ export async function getCurrencies(req, res) {
   }
 }
 
+
+// GET all ETA configs
+export async function getEtaConfigs(req, res) {
+  try {
+    const { rows } = await pool.query('SELECT * FROM eta_config ORDER BY id ASC');
+    res.json(rows);
+  } catch (err) {
+    console.error('Error fetching eta configs:', err);
+    res.status(500).json({ error: 'Failed to fetch eta configs' });
+  }
+}
+
+// POST new ETA config
+export async function createEtaConfig(req, res) {
+  const { status, days_offset } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO eta_config (status, days_offset) VALUES ($1, $2) RETURNING *',
+      [status, days_offset || 0] // Default handled by DB, but explicit for safety
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Error creating eta config:', err);
+    if (err.code === '23505') { // Unique violation on status
+      return res.status(409).json({ error: 'Status already exists' });
+    }
+    res.status(500).json({ error: 'Failed to create eta config' });
+  }
+}
+
+// PUT update ETA config
+export async function updateEtaConfig(req, res) {
+  const { id } = req.params;
+  const { status, days_offset } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'UPDATE eta_config SET status = $1, days_offset = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *',
+      [status, days_offset || 0, id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Eta config not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating eta config:', err);
+    if (err.code === '23505') { // Unique violation on status
+      return res.status(409).json({ error: 'Status already exists' });
+    }
+    res.status(500).json({ error: 'Failed to update eta config' });
+  }
+}
+
+// DELETE ETA config
+export async function deleteEtaConfig(req, res) {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      'DELETE FROM eta_config WHERE id = $1 RETURNING *',
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Eta config not found' });
+    }
+    res.json({ message: 'Eta config deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting eta config:', err);
+    res.status(500).json({ error: 'Failed to delete eta config' });
+  }
+}
 // GET Statuses (from enum)
 export async function getStatuses(req, res) {
   try {
