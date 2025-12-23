@@ -1907,6 +1907,251 @@ let selectFields = [
   }
 }
 
+
+export async function getOrdersConsignments(req, res) {
+  try {
+    // FIXED: Sanitize page and limit early to avoid NaN in offset calc
+    const rawPage = req.query.page || '1';
+    const rawLimit = req.query.limit || '10';
+    const safePage = Math.max(1, parseInt(rawPage) || 1);
+    const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit) || 10)); // Clamp 1-100
+    const safeOffset = (parseInt(safePage) - 1) * safeLimit;
+    const { status, booking_ref, container_id } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (status) {
+      whereClause += ' AND o.status = $' + (params.length + 1);
+      params.push(status);
+    }
+    if (booking_ref) {
+      whereClause += ' AND o.booking_ref ILIKE $' + (params.length + 1);
+      params.push(`%${booking_ref}%`);
+    }
+    let containerNumbers = []; // To store looked-up container numbers
+    if (container_id) {
+      const containerIds = container_id.split(',').map(id => id.trim()).filter(Boolean);
+      if (containerIds.length > 0) {
+        // FIXED: Filter valid numeric IDs to avoid NaN/empty in array
+        const validIds = containerIds.filter(id => !isNaN(parseInt(id)));
+        if (validIds.length === 0) {
+          // No valid containers, early return empty
+          return res.json({
+            data: [],
+            pagination: {
+              page: safePage,
+              limit: safeLimit,
+              total: 0,
+              totalPages: 0
+            }
+          });
+        }
+        const idArray = validIds.map(id => parseInt(id)); // Now safe: all ints
+        const containerQuery = {
+          text: 'SELECT container_number FROM container_master WHERE cid = ANY($1::int[])',
+          values: [idArray]
+        };
+        const containerResult = await pool.query(containerQuery);
+        containerNumbers = containerResult.rows.map(row => row.container_number).filter(Boolean);
+        if (containerNumbers.length === 0) {
+          // No containers found, early return empty
+          return res.json({
+            data: [],
+            pagination: {
+              page: safePage,
+              limit: safeLimit,
+              total: 0,
+              totalPages: 0
+            }
+          });
+        }
+        // Conditions for ot.container_id (exact numeric match on CIDs)
+        const otConditions = validIds.map((idStr) => {
+          const paramIdx = params.length + 1;
+          params.push(parseInt(idStr));
+          return `ot.container_id = $${paramIdx}`;
+        }).join(' OR ');
+        // Conditions for cm.container_number (partial ILIKE on looked-up numbers)
+        const cmConditions = containerNumbers.map((num) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `cm.container_number ILIKE $${paramIdx}`;
+        }).join(' OR ');
+        // FIXED: Conditions for receivers JSONB (add jsonb_typeof check for safety)
+        const receiverExists = containerNumbers.map((num) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
+            WHERE cont ILIKE $${paramIdx}
+          )`;
+        }).join(' OR ');
+        whereClause += ` AND (
+          (${otConditions}) OR
+          (${cmConditions}) OR
+          EXISTS (
+            SELECT 1 FROM receivers r
+            WHERE r.order_id = o.id
+            AND r.containers IS NOT NULL
+            AND jsonb_typeof(r.containers) = 'array'
+            AND (${receiverExists})
+          )
+        )`;
+      }
+    }
+    const safeIntCast = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+    const totalAssignedSub = `(SELECT COALESCE(SUM(assigned_qty), 0) FROM container_assignment_history WHERE detail_id = oi.id)`;
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT json_agg(
+          json_build_object(
+            'status', COALESCE(cs.derived_status, CASE WHEN ass.assigned_qty > 0 THEN 'Ready for Loading' ELSE 'Created' END),
+            'container', json_build_object(
+              'cid', u.cid,
+              'container_number', COALESCE(cm.container_number, '')
+            ),
+            'total_number', ${safeIntCast('oi.total_number')},
+            'assign_weight', CASE 
+              WHEN tot.total_ass > 0 AND ass.assigned_qty > 0 THEN 
+                ROUND((ass.assigned_qty::numeric / tot.total_ass::numeric * ${safeNumericCast('oi.weight')} / 1000), 2)::text 
+              ELSE '0' 
+            END,
+            'remaining_items', (${safeIntCast('oi.total_number')} - COALESCE(tot.total_ass, 0))::text,
+            'assign_total_box', COALESCE(ass.assigned_qty, 0)::text
+          ) ORDER BY COALESCE(cm.container_number, '')
+        )
+        FROM (
+          SELECT (cd_obj->>'cid')::int AS cid
+          FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS cd_obj
+          WHERE (cd_obj->>'cid') ~ '^\\d+$'
+          UNION
+          SELECT cid
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+          GROUP BY cid
+        ) u (cid)
+        LEFT JOIN container_master cm ON u.cid = cm.cid
+        LEFT JOIN LATERAL (
+          SELECT availability AS derived_status
+          FROM container_status
+          WHERE cid = u.cid
+          ORDER BY sid DESC NULLS LAST
+          LIMIT 1
+        ) cs ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS assigned_qty
+          FROM container_assignment_history
+          WHERE detail_id = oi.id AND cid = u.cid
+        ) ass ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(assigned_qty), 0) AS total_ass
+          FROM container_assignment_history
+          WHERE detail_id = oi.id
+        ) tot ON true
+        WHERE u.cid IS NOT NULL
+      ), '[]'::json)
+    `;
+let selectFields = [
+  'o.*', // Core orders
+  's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner', // From senders
+  't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic', // From transport_details
+  't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
+  't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered', // From transport_details
+  't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
+  't.gatepass', // From transport_details
+  'ot.status AS tracking_status, ot.created_time AS tracking_created_time', // Latest tracking
+  'ot.container_id', // Explicit for join
+  'cm.container_number', // From container_master
+  // FIXED: Subquery for aggregated containers from all receivers (add jsonb_typeof for safety)
+  'COALESCE((SELECT string_agg(DISTINCT elem, \', \') FROM (SELECT jsonb_array_elements_text(r3.containers) AS elem FROM receivers r3 WHERE r3.order_id = o.id AND r3.containers IS NOT NULL AND jsonb_typeof(r3.containers) = \'array\' AND jsonb_array_length(r3.containers) > 0) AS unnested), \'\') AS receiver_containers_json',
+  // Updated subquery for full receivers as JSON array per order, using LATERAL with fixed ORDER BY position
+  // FIXED: Ensure shippingDetails is always an array (COALESCE to '[]' if null)
+  `(SELECT COALESCE(json_agg(r2_full ORDER BY COALESCE(r2_full.id, 0)), '[]') FROM (
+    SELECT 
+      r2.id, r2.order_id, r2.receiver_name, r2.receiver_contact, r2.receiver_address, r2.receiver_email,
+      r2.total_number, r2.total_weight, r2.receiver_ref, r2.remarks, r2.containers,
+      r2.status, r2.eta, r2.etd, r2.shipping_line, r2.consignment_vessel, r2.consignment_number,
+      r2.consignment_marks, r2.consignment_voyage, r2.full_partial, r2.qty_delivered,
+      COALESCE(sd_full.shippingDetails, '[]'::json) AS shippingDetails
+    FROM receivers r2
+    LEFT JOIN LATERAL (
+      SELECT json_agg(
+        json_build_object(
+          'id', oi.id,
+          'order_id', oi.order_id,
+          'sender_id', oi.sender_id,
+          'category', COALESCE(oi.category, ''),
+          'subcategory', COALESCE(oi.subcategory, ''),
+          'type', COALESCE(oi.type, ''),
+          'pickupLocation', COALESCE(oi.pickup_location, ''),
+          'deliveryAddress', COALESCE(oi.delivery_address, ''),
+          'totalNumber', ${safeIntCast('oi.total_number')},
+          'weight', ${safeNumericCast('oi.weight')},
+          'totalWeight', ${safeNumericCast('oi.total_weight')},
+          'itemRef', COALESCE(oi.item_ref, ''),
+          'consignmentStatus', COALESCE(oi.consignment_status, ''),
+          'shippingLine', COALESCE(oi.shipping_line, ''),
+          'containerDetails', ${containerDetailsSub},
+          'remainingItems', ${safeIntCast('oi.total_number')} - ${totalAssignedSub}
+        ) ORDER BY oi.id
+      ) AS shippingDetails
+      FROM order_items oi
+      WHERE oi.receiver_id = r2.id
+    ) sd_full ON true
+    WHERE r2.order_id = o.id
+      AND r2.id IS NOT NULL  -- FIXED: Exclude any null/ghost receivers
+  ) r2_full) AS receivers`
+].join(', ');
+    // Build joins as array for easier extension (removed receivers join, now in subquery)
+    let joinsArray = [
+      'LEFT JOIN senders s ON o.id = s.order_id',
+      'LEFT JOIN transport_details t ON o.id = t.order_id',
+      'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true', // Latest tracking
+      'LEFT JOIN container_master cm ON ot.container_id = cm.cid' // Join to container_master on cid
+    ];
+    const joins = joinsArray.join('\n ');
+    // For count, no need for subqueries or receivers join, but conditions on ot/cm/r are handled via the whereClause (which includes subqueries for r)
+    const countQuery = `
+      SELECT COUNT(DISTINCT o.id) as total_count
+      FROM orders o
+      ${joins}
+      ${whereClause}
+    `;
+    // Main query (no GROUP BY needed now with subqueries)
+    const query = `
+      SELECT ${selectFields}
+      FROM orders o
+      ${joins}
+      ${whereClause}
+      ORDER BY o.created_at DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+    // const safeOffset = (parseInt(safePage) - 1) * safeLimit;
+    // FIXED: Ensure limit/offset are always valid ints (fallback if NaN)
+    params.push(safeLimit, safeOffset);
+    const [result, countResult] = await Promise.all([
+      pool.query(query, params),
+      pool.query(countQuery, params.slice(0, -2)) // without limit offset
+    ]);
+    const total = parseInt(countResult.rows[0].total_count || 0);
+    res.json({
+      data: result.rows,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: total === 0 ? 0 : Math.ceil(total / safeLimit)
+      }
+    });
+  } catch (err) {
+    console.error("Error fetching orders:", err);
+    if (err.code === '42703') {
+      return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
+    }
+    res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
+  }
+}
+
 export async function getOrderById(req, res) {
   let client; // For potential tx if needed for calculateETA
   try {

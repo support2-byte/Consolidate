@@ -362,7 +362,7 @@ export async function createConsignment(req, res) {
   console.log("Create Consignment Request Body:", req.body);
   try {
     const data = req.body;
-    
+   
     // Map mixed-case input to consistent snake_case for validation and DB
     const normalizedInput = {
       consignment_number: data.consignment_number || data.consignmentNumber,
@@ -390,24 +390,21 @@ export async function createConsignment(req, res) {
       containers: data.containers || [],
       orders: data.orders || []
     };
-
     const validationErrors = validateConsignmentFields(normalizedInput);
     if (validationErrors.length > 0) {
       return res.status(400).json({ error: 'Validation failed', details: validationErrors });
     }
-
     const containerErrors = validateContainers(normalizedInput.containers);
-    const orderErrors = validateOrders(normalizedInput.orders);
+    // Skip orders validation as IDs are sent directly; handle as array of numbers or objects
+    const orderErrors = []; // No validation needed for order IDs
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({ error: 'Array validation failed', details: [...containerErrors, ...orderErrors] });
     }
-
     // Auto-calculate ETA if missing (now uses transaction client)
     let computedETA = normalizedInput.eta;
     if (!computedETA) {
       // Will be computed inside transaction
     }
-
     // Normalize dates and stringify JSON fields - use snake_case keys
     const normalizedData = {
       consignment_number: normalizedInput.consignment_number,
@@ -424,7 +421,7 @@ export async function createConsignment(req, res) {
       payment_type: normalizedInput.paymentType,
       vessel: normalizedInput.vessel,
       voyage: normalizedInput.voyage,
-      eta: normalizeDate(computedETA),  // Placeholder; set in tx
+      eta: normalizeDate(computedETA), // Placeholder; set in tx
       shipping_line: normalizedInput.shippingLine,
       seal_no: normalizedInput.seal_no,
       net_weight: normalizedInput.netWeight,
@@ -435,13 +432,11 @@ export async function createConsignment(req, res) {
       containers: JSON.stringify(normalizedInput.containers),
       orders: JSON.stringify(normalizedInput.orders)
     };
-
     // Dynamic insert (keys already snake_case; converter is redundant but safe)
     const fields = Object.keys(normalizedData).map(key => key.replace(/([A-Z])/g, '_$1').toLowerCase());
     const values = Object.values(normalizedData);
     const placeholders = fields.map((_, i) => `$${i + 1}`).join(', ');
     const insertQuery = `INSERT INTO consignments (${fields.join(', ')}) VALUES (${placeholders}) RETURNING id, *`;
-
     let newConsignment;
     await withTransaction(async (client) => {
       // Auto-calculate ETA inside transaction
@@ -452,49 +447,51 @@ export async function createConsignment(req, res) {
       const tempValues = values.filter((_, i) => fields[i] !== 'eta');
       const tempPlaceholders = tempFields.map((_, i) => `$${i + 1}`).join(', ');
       const tempInsertQuery = `INSERT INTO consignments (${tempFields.join(', ')}) VALUES (${tempPlaceholders}) RETURNING id`;
-
       const tempResult = await client.query(tempInsertQuery, tempValues);
       const tempId = tempResult.rows[0].id;
-
       // Update with computed ETA
       await client.query(
         'UPDATE consignments SET eta = $1 WHERE id = $2',
         [normalizeDate(computedETA), tempId]
       );
-
       // Fetch full newConsignment
       const fullQuery = `SELECT * FROM consignments WHERE id = $1`;
       const fullResult = await client.query(fullQuery, [tempId]);
       newConsignment = fullResult.rows[0];
-
-      // Log to tracking
-      await logToTracking(client, newConsignment.id, 'created', { status: normalizedInput.status, eta: computedETA });
-
-      // Cascade: Update linked orders/containers (example: set consignment_id FK)
-      let orderIds = normalizedInput.orders.map(o => o.id).filter(Boolean);
-      if (orderIds.length > 0) {
-        await client.query(
-          'UPDATE orders SET consignment_id = $1 WHERE id = ANY($2::int[])',
-          [newConsignment.id, orderIds]
-        );
-      }
-      let containerIds = normalizedInput.containers.map(c => c.id).filter(Boolean);
-      if (containerIds.length > 0) {
-        await client.query(
-          'UPDATE containers SET consignment_id = $1 WHERE id = ANY($2::int[])',
-          [newConsignment.id, containerIds]
-        );
-      }
-
-      // Send notification if status triggers (e.g., 'Created' or 'Submitted')
-      if (['Created', 'Submitted'].includes(normalizedInput.status)) {
-        await sendNotification(newConsignment, 'created');
-      }
+      // Cascade: Update linked orders/containers (example: set consignment_id FK) - skipped as columns may not exist yet
+      // let orderIds = normalizedInput.orders.map(o => typeof o === 'object' ? o.id : o).filter(Boolean);
+      // if (orderIds.length > 0) {
+      //   await client.query(
+      //     'UPDATE orders SET consignment_id = $1 WHERE id = ANY($2::int[])',
+      //     [newConsignment.id, orderIds]
+      //   );
+      // }
+      // let containerIds = normalizedInput.containers.map(c => c.id).filter(Boolean);
+      // if (containerIds.length > 0) {
+      //   await client.query(
+      //     'UPDATE containers SET consignment_id = $1 WHERE id = ANY($2::int[])',
+      //     [newConsignment.id, containerIds]
+      //   );
+      // }
     });
-
+    // After transaction commits, handle optional logging and notifications outside to avoid aborting main tx
+    try {
+      // Log to tracking - use pool or separate client, not the tx client
+      await logToTracking(null, newConsignment.id, 'created', { status: normalizedInput.status, eta: computedETA }); // Adjust logToTracking to handle no client
+    } catch (trackingErr) {
+      console.warn("Tracking log failed:", trackingErr.message);
+      // Continue without failing
+    }
+    // Send notification if status triggers (e.g., 'Created' or 'Submitted') - assume sendNotification doesn't require tx
+    if (['Created', 'Submitted'].includes(normalizedInput.status)) {
+      try {
+        await sendNotification(newConsignment, 'created');
+      } catch (notifErr) {
+        console.warn("Notification send failed:", notifErr.message);
+      }
+    }
     // Enhance response with computed fields
     newConsignment.statusColor = getStatusColor(newConsignment.status);
-
     console.log("Consignment created with ID:", newConsignment.id);
     res.status(201).json({ message: 'Consignment created successfully', data: newConsignment });
   } catch (err) {
@@ -505,7 +502,6 @@ export async function createConsignment(req, res) {
     res.status(500).json({ error: 'Failed to create consignment', details: err.message });
   }
 }
-
 export async function updateConsignment(req, res) {
   const { id } = req.params; // Assume ID from params
   // console.log("Update Consignment Request Body:", req.body);

@@ -9,7 +9,8 @@ import {
   assignContainersToOrders,
   // updateOrderStatus,
   updateReceiverStatus,  // New: Import for status update
-  assignContainersToOrdersAll
+  assignContainersToOrdersAll,
+  getOrdersConsignments
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -53,6 +54,8 @@ router.put('/:orderId/receivers/:id/status', updateReceiverStatus);
 router.get('/', getOrders);
 router.get('/track/:trackingId', getOrderByTrackingId);
 router.get('/track/item/:itemRef', getOrderByItemRef);
+router.get('/consignmentsOrders', getOrdersConsignments);
+
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
 router.post('/assign-container', assignContainersToOrders);
