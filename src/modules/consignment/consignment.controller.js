@@ -144,7 +144,7 @@ function getStatusColor(status) {
     'Cancelled': '#F44336'  // Red
   };
   return colors[status] || '#000000';  // Default black
-}
+} 
 // Aggregate status from linked data
 function aggregateConsignmentStatus(linkedOrders, containers, currentStatus) {
   if (['HOLD', 'Cancelled'].includes(currentStatus)) return currentStatus;  // No aggregation for held/cancelled
@@ -307,94 +307,91 @@ export async function calculateETA(pool, status) {
   }
 }
 // Assuming pg client/pool; call with client for tx safety
-async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
-  // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
-  const validEvents = ['status_advanced', 'status_updated', 'order_synced', 'status_auto_updated'];  // Sync with DB
-  if (!validEvents.includes(eventType)) {
-    console.warn(`Invalid event_type '${eventType}' – add to DB CHECK constraint`);
-    return { success: false, reason: 'Invalid event' };
-  }
+// async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
+//   // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
+//   const validEvents = ['status_advanced', 'status_updated', 'order_synced', 'status_auto_updated'];  // Sync with DB
+//   if (!validEvents.includes(eventType)) {
+//     console.warn(`Invalid event_type '${eventType}' – add to DB CHECK constraint`);
+//     return { success: false, reason: 'Invalid event' };
+//   }
 
-  try {
-    // Normalize logData to schema fields
-    const {
-      from: oldStatus = null,
-      to: newStatus = null,
-      offsetDays = 0,
-      reason = null,
-      ...extraDetails  // Catch-all for eta, etc.
-    } = logData;
+//   try {
+//     // Normalize logData to schema fields
+//     const {
+//       from: oldStatus = null,
+//       to: newStatus = null,
+//       offsetDays = 0,
+//       reason = null,
+//       ...extraDetails  // Catch-all for eta, etc.
+//     } = logData;
 
-    const details = {
-      ...extraDetails,
-      old_status: oldStatus,
-      new_status: newStatus,
-      reason,
-      // Legacy: If code expects 'data', mirror here (or drop)
-      data: logData  // Raw input as fallback
-    };
+//     const details = {
+//       ...extraDetails,
+//       old_status: oldStatus,
+//       new_status: newStatus,
+//       reason,
+//       // Legacy: If code expects 'data', mirror here (or drop)
+//       data: logData  // Raw input as fallback
+//     };
 
-    const query = `
-      INSERT INTO consignment_tracking (
-        consignment_id, event_type, old_status, new_status, offset_days, details
-      ) VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
-      RETURNING id
-    `;
-    const result = await client.query(query, [
-      consignmentId,
-      eventType,
-      oldStatus,
-      newStatus,
-      offsetDays,
-      details  // JSONB auto-handled by pg
-    ]);
+//     const query = `
+//       INSERT INTO consignment_tracking (
+//         consignment_id, event_type, old_status, new_status, offset_days, details
+//       ) VALUES ($1, $2, $3, $4, $5, $6)
+//       ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
+//       RETURNING id
+//     `;
+//     const result = await client.query(query, [
+//       consignmentId,
+//       eventType,
+//       oldStatus,
+//       newStatus,
+//       offsetDays,
+//       details  // JSONB auto-handled by pg
+//     ]);
 
-    if (result.rowCount > 0) {
-      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
-      return { success: true, id: result.rows[0].id };
-    } else {
-      console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
-      return { success: true, skipped: true };
-    }
-  } catch (error) {
-    console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
-    switch (error.code) {
-      case '42703':  // Column missing
-        console.error('Schema mismatch – verify columns: old_status, new_status, etc.');
-        break;
-      case '23505':  // Unique violation (beyond ON CONFLICT)
-        console.warn('Unexpected unique conflict');
-        break;
-      case '23514':  // CHECK violation
-        console.error(`Invalid event_type '${eventType}' – update DB constraint`);
-        break;
-      default:
-        console.error('Unexpected log error');
-    }
-    return { success: false, error: error.message };
-    // NO THROW – keep tx alive
-  }
-}
+//     if (result.rowCount > 0) {
+//       console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+//       return { success: true, id: result.rows[0].id };
+//     } else {
+//       console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
+//       return { success: true, skipped: true };
+//     }
+//   } catch (error) {
+//     console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
+//     switch (error.code) {
+//       case '42703':  // Column missing
+//         console.error('Schema mismatch – verify columns: old_status, new_status, etc.');
+//         break;
+//       case '23505':  // Unique violation (beyond ON CONFLICT)
+//         console.warn('Unexpected unique conflict');
+//         break;
+//       case '23514':  // CHECK violation
+//         console.error(`Invalid event_type '${eventType}' – update DB constraint`);
+//         break;
+//       default:
+//         console.error('Unexpected log error');
+//     }
+//     return { success: false, error: error.message };
+//     // NO THROW – keep tx alive
+//   }
+// }
 
 export async function getConsignmentById(req, res) {
   console.log('Fetching consignment:', req.params);
   try {
     const { id } = req.params;
-    const { autoUpdate = 'true' } = req.query;  // Opt-in via ?autoUpdate=true/false (default true)
-    const enableAutoUpdate = autoUpdate === 'true';  // Strict boolean check
-    
+    const { autoUpdate = 'true' } = req.query; // Opt-in via ?autoUpdate=true/false (default true)
+    const enableAutoUpdate = autoUpdate === 'true'; // Strict boolean check
+   
     // Validate id is a valid positive integer
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
       console.warn(`Invalid consignment ID provided: ${id}`);
       return res.status(400).json({ error: 'Invalid consignment ID. Must be a positive integer.' });
     }
-
-    console.log('numericidss', numericId);  // Debug: Remove in prod
-
+    console.log('numericidss', numericId); // Debug: Remove in prod
     let consignment = {}; // Will hold enhanced data
-
     // Fetch base data
     const query = `SELECT * FROM consignments WHERE id = $1`;
     const { rows } = await pool.query(query, [numericId]);
@@ -402,10 +399,8 @@ export async function getConsignmentById(req, res) {
       return res.status(404).json({ error: 'Consignment not found' });
     }
     consignment = rows[0];
-
     // Enhance with color
     consignment.statusColor = getStatusColor(consignment.status);
-
     // Handle orders: Parse if string, then extract IDs for querying
     let rawOrders = consignment.orders;
     if (typeof rawOrders === 'string') {
@@ -418,39 +413,33 @@ export async function getConsignmentById(req, res) {
     }
     let orderIds = extractOrderIds(rawOrders);
     let linkedOrders = [];
-
     // Additional safeguard: Re-filter and log
     orderIds = orderIds.map(oid => parseInt(oid, 10)).filter(oid => !isNaN(oid) && Number.isInteger(oid) && oid > 0);
-
     // Log extracted IDs for debugging (remove in production if needed)
     if (process.env.NODE_ENV === 'development') {
       console.log(`Extracted orderIds for consignment ${numericId}:`, orderIds);
     }
-
     // Fetch linked orders only if valid IDs present and all are valid integers
     if (orderIds.length > 0 && orderIds.every(oid => Number.isInteger(oid) && oid > 0)) {
       const orderQuery = `
-        SELECT id, sender_name AS shipper, receiver_name AS consignee, eta, etd, 
+        SELECT id, sender_name AS shipper, receiver_name AS consignee, eta, etd,
               qty_delivered AS delivered, total_assigned_qty, status AS order_status
-        FROM orders o 
+        FROM orders o
         WHERE o.id = ANY($1::int[])
       `;
       const { rows: orders } = await pool.query(orderQuery, [orderIds]);
       linkedOrders = orders;
-
       if (linkedOrders.length > 0) {
         // Sync from first order (or aggregate)
         const firstOrder = linkedOrders[0];
         consignment.shipper = firstOrder.shipper || consignment.shipper;
         consignment.consignee = firstOrder.consignee || consignment.consignee;
         consignment.etd = firstOrder.etd ? normalizeDate(firstOrder.etd) : null;
-
         // Compute delivered/pending from orders (initial)
         let totalDelivered = linkedOrders.reduce((sum, o) => sum + (o.delivered || 0), 0);
         let totalAssigned = linkedOrders.reduce((sum, o) => sum + (o.total_assigned_qty || 0), 0);
         consignment.delivered = totalDelivered;
         consignment.pending = Math.max(0, totalAssigned - totalDelivered);
-
         // Update orders array to full objects
         consignment.orders = linkedOrders.map(o => ({ id: o.id, ...o }));
       } else {
@@ -464,7 +453,6 @@ export async function getConsignmentById(req, res) {
       }
       consignment.orders = rawOrders;
     }
-
     // Enrich containers: Parse if string and add colors
     let parsedContainers = [];
     if (typeof consignment.containers === 'string') {
@@ -478,59 +466,51 @@ export async function getConsignmentById(req, res) {
       parsedContainers = consignment.containers || [];
     }
     consignment.containers = parsedContainers.map(c => ({ ...c, statusColor: getStatusColor(c.status || '') }));
-
     // Compute days_until_eta using current date
     const today = new Date();
-    today.setHours(0, 0, 0, 0);  // Normalize to midnight UTC
+    today.setHours(0, 0, 0, 0); // Normalize to midnight UTC
     if (consignment.eta) {
       // Improved parsing: Force date-only (midnight UTC for both)
       let etaStr = consignment.eta;
       if (etaStr instanceof Date) {
-        etaStr = etaStr.toISOString().split('T')[0] + 'T00:00:00.000Z';  // Midnight
+        etaStr = etaStr.toISOString().split('T')[0] + 'T00:00:00.000Z'; // Midnight
       } else if (typeof etaStr !== 'string') {
         console.warn(`Unexpected eta type for consignment ${numericId}:`, typeof etaStr, etaStr);
         etaStr = new Date(etaStr).toISOString().split('T')[0] + 'T00:00:00.000Z';
       }
       const etaDate = new Date(etaStr);
-      etaDate.setHours(0, 0, 0, 0);  // Normalize to midnight UTC
-      consignment.days_until_eta = Math.max(0, Math.ceil((etaDate - today) / (1000 * 60 * 60 * 24)));  // Ceil for full days ahead
-      console.log(`ETA calc for ${numericId}: etaDate=${etaDate.toISOString()}, today=${today.toISOString()}, days=${consignment.days_until_eta}`);  // Debug
+      etaDate.setHours(0, 0, 0, 0); // Normalize to midnight UTC
+      consignment.days_until_eta = Math.max(0, Math.ceil((etaDate - today) / (1000 * 60 * 60 * 24))); // Ceil for full days ahead
+      console.log(`ETA calc for ${numericId}: etaDate=${etaDate.toISOString()}, today=${today.toISOString()}, days=${consignment.days_until_eta}`); // Debug
     }
-
-    // Aggregate status from orders and containers first
+    // Aggregate status from orders and containers first (always compute, but don't apply yet)
     let aggregatedStatus = aggregateConsignmentStatus(linkedOrders, parsedContainers, consignment.status);
-
-    // Enhanced dynamic status update logic based on ETA (overrides aggregation if triggered)
-    let originalStatus = consignment.status;
+    // Compute potential ETA override (but gate everything by enableAutoUpdate)
+    let computedStatus = consignment.status;  // Default: raw DB status
     let shouldPersist = false;
-    let etaTriggeredStatus = aggregatedStatus;  // Start with aggregated
-    if (enableAutoUpdate && consignment.eta && consignment.days_until_eta !== undefined && !['HOLD', 'Cancelled', 'Delivered'].includes(aggregatedStatus)) {
-      if (consignment.days_until_eta <= 0) {
-        etaTriggeredStatus = 'Delivered';
-        shouldPersist = true;
-      } else if (consignment.days_until_eta <= 7) {
-        etaTriggeredStatus = 'In Transit';  // Valid enum status
-        shouldPersist = true;
-      } else if (consignment.days_until_eta <= 30) {
-        etaTriggeredStatus = 'Under Shipment Processing';  // Valid enum status
-        shouldPersist = true;
-      } else {
-        etaTriggeredStatus = 'Customs Cleared';  // Valid and earlier stage
-        shouldPersist = true;
-      }
-    } else {
-      // No ETA trigger: Use aggregation if it differs (but only persist if enabled)
-      if (aggregatedStatus !== originalStatus) {
-        etaTriggeredStatus = aggregatedStatus;
-        if (enableAutoUpdate) shouldPersist = true;
-      }
-    }
+    let originalStatus = consignment.status;
 
-    consignment.status = etaTriggeredStatus;  // Apply final status (always for response, but persist only if enabled)
+    if (enableAutoUpdate) {
+      computedStatus = aggregatedStatus;  // Start with aggregated
+      if (consignment.eta && consignment.days_until_eta !== undefined && !['HOLD', 'Cancelled', 'Delivered'].includes(aggregatedStatus)) {
+        if (consignment.days_until_eta <= 0) {
+          computedStatus = 'Delivered';
+        } else if (consignment.days_until_eta <= 7) {
+          computedStatus = 'In Transit'; // Valid enum status
+        } else if (consignment.days_until_eta <= 30) {
+          computedStatus = 'Under Shipment Processing'; // Valid enum status
+        } else {
+          computedStatus = 'Customs Cleared'; // Valid and earlier stage
+        }
+        shouldPersist = true;
+      } else if (aggregatedStatus !== originalStatus) {
+        shouldPersist = true;
+      }
+      consignment.status = computedStatus;  // Only apply if enabled
+    }  // Else: keep raw DB status
 
     // Re-apply color after potential update
     consignment.statusColor = getStatusColor(consignment.status);
-
     // Persist update to DB if status changed (using calculateETA for new ETA) - Gated by enableAutoUpdate
     if (enableAutoUpdate && shouldPersist && consignment.status !== originalStatus) {
       let newEta;
@@ -538,34 +518,31 @@ export async function getConsignmentById(req, res) {
         newEta = await calculateETA(pool, consignment.status);
       } catch (etaErr) {
         console.warn(`Failed to calculate new ETA for status ${consignment.status}:`, etaErr);
-        newEta = consignment.eta;  // Fallback to original
+        newEta = consignment.eta; // Fallback to original
       }
-
       await withTransaction(async (client) => {
         try {
-          await client.query('UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3', 
+          await client.query('UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
             [consignment.status, newEta, numericId]);
-
           // Safe log with table check
-          await safeLogToTracking(client, numericId, 'status_auto_updated', { 
-            newStatus: consignment.status, 
+          await safeLogToTracking(client, numericId, 'status_auto_updated', {
+            newStatus: consignment.status,
             newEta,
             days_until_eta: consignment.days_until_eta,
             originalStatus,
-            aggregatedFrom: 'orders_containers'  // New field for traceability
+            aggregatedFrom: 'orders_containers' // New field for traceability
           });
         } catch (updateErr) {
-          if (updateErr.code === '22P02') {  // Enum violation
+          if (updateErr.code === '22P02') { // Enum violation
             console.warn(`Enum constraint violation for status '${consignment.status}' on consignment ${numericId}; skipping update. Add to enum: ALTER TYPE consignment_status ADD VALUE '${consignment.status}';`);
             // Revert local status to original (don't persist invalid)
             consignment.status = originalStatus;
             consignment.statusColor = getStatusColor(originalStatus);
           } else {
-            throw updateErr;  // Re-throw other errors
+            throw updateErr; // Re-throw other errors
           }
         }
       });
-
       // Update local object with new values and recompute days_until_eta (outside transaction)
       consignment.eta = newEta;
       let updatedEtaStr = newEta;
@@ -573,37 +550,33 @@ export async function getConsignmentById(req, res) {
         updatedEtaStr = updatedEtaStr.toISOString();
       } else if (typeof updatedEtaStr !== 'string') {
         console.warn(`Unexpected newEta type for consignment ${numericId}:`, typeof updatedEtaStr, updatedEtaStr);
-        updatedEtaStr = new Date(updatedEtaStr).toISOString();  // Attempt conversion
+        updatedEtaStr = new Date(updatedEtaStr).toISOString(); // Attempt conversion
       }
       const etaDate = new Date(updatedEtaStr + (updatedEtaStr.includes('Z') ? '' : 'T00:00:00.000Z'));
       etaDate.setHours(0, 0, 0, 0);
       consignment.days_until_eta = Math.max(0, Math.ceil((etaDate - today) / (1000 * 60 * 60 * 24)));
-      consignment.updated_at = new Date().toISOString();  // Approx server time
+      consignment.updated_at = new Date().toISOString(); // Approx server time
     }
-
     // Auto-adjust delivered/pending if status is 'Delivered' or 'Partially Delivered' (assume full/partial)
     if (['Delivered', 'Partially Delivered'].includes(consignment.status) && linkedOrders.length > 0) {
       const totalQty = linkedOrders.reduce((sum, o) => sum + (o.total_assigned_qty || 0), 0);
       if (consignment.status === 'Delivered') {
         consignment.delivered = totalQty;
         consignment.pending = 0;
-      } else {  // Partially Delivered
-        consignment.pending = Math.max(0, totalQty - consignment.delivered);  // Keep existing delivered
+      } else { // Partially Delivered
+        consignment.pending = Math.max(0, totalQty - consignment.delivered); // Keep existing delivered
       }
     }
-
     // Resolve shipping_line if ID
     if (typeof consignment.shipping_line === 'number' && consignment.shipping_line > 0) {
       const lineQuery = 'SELECT name FROM shipping_lines WHERE id = $1';
       const { rows: lines } = await pool.query(lineQuery, [consignment.shipping_line]);
       consignment.shipping_line = lines[0]?.name || consignment.shipping_line;
     }
-
     // Clean up null/undefined statusColor
     if (!consignment.statusColor) {
       delete consignment.statusColor;
     }
-
     res.json({ data: consignment });
   } catch (err) {
     console.error("Error fetching consignment:", err);
@@ -890,14 +863,130 @@ async function sendNotification(consignmentData, event = 'created') {
   console.log(`Notification sent for consignment ${consignmentData.consignment_number}: ${event}`);
 }
 
-// Helper: Log to tracking table
-async function logToTracking(client, consignmentId, action, details) {
-  await client.query(
-    'INSERT INTO consignment_tracking (consignment_id, action, details, created_at) VALUES ($1, $2, $3, NOW())',
-    [consignmentId, action, JSON.stringify(details)]
-  );
-}
+// Unified logging function: Handles both 'logToTracking' and 'safeLogToTracking' calls
+async function logToTracking(client, consignmentId, eventType = 'unknown', logData = {}) {
+  // Validate eventType (required, non-null)
+  if (!eventType || typeof eventType !== 'string' || eventType.trim() === '') {
+    console.error(`Invalid eventType '${eventType}' for consignment ${consignmentId} – defaulting to 'unknown_event'`);
+    eventType = 'unknown_event';  // Fallback to avoid NULL violation
+  }
 
+  // Validate against schema CHECK (expand as needed)
+  const validEvents = ['status_advanced', 'status_updated', 'status_auto_updated', 'updated', 'order_synced'];
+  if (!validEvents.includes(eventType)) {
+    console.warn(`Event '${eventType}' not in DB CHECK – add to constraint or use valid one`);
+  }
+
+  try {
+    // Normalize logData
+    const {
+      from: oldStatus = null,
+      to: newStatus = null,
+      offsetDays = 0,
+      reason = null,
+      ...extraDetails
+    } = logData;
+
+    const details = {
+      ...extraDetails,
+      old_status: oldStatus,
+      new_status: newStatus,
+      reason,
+      action: logData.action || eventType  // Legacy: Store 'action' in details if passed
+    };
+
+    const query = `
+      INSERT INTO consignment_tracking (
+        consignment_id, event_type, old_status, new_status, offset_days, details
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
+      RETURNING id
+    `;
+    const result = await client.query(query, [
+      consignmentId,
+      eventType.trim(),  // Ensure non-null string
+      oldStatus,
+      newStatus,
+      offsetDays,
+      details
+    ]);
+
+    if (result.rowCount > 0) {
+      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      return { success: true, id: result.rows[0].id };
+    } else {
+      console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
+      return { success: true, skipped: true };
+    }
+  } catch (error) {
+    console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
+    if (error.code === '23502') {
+      console.error('NOT NULL violation on event_type – ensure non-null param');
+    } else if (error.code === '23514') {
+      console.error(`CHECK violation: '${eventType}' not allowed – update DB constraint`);
+    }
+    return { success: false, error: error.message };
+    // No throw – keep tx alive
+  }
+}
+async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
+  // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
+  const validEvents = ['status_advanced', 'status_updated', 'order_synced', 'status_auto_updated'];  // Sync with DB
+  if (!validEvents.includes(eventType)) {
+    console.warn(`Invalid event_type '${eventType}' – add to DB CHECK constraint`);
+    return { success: false, reason: 'Invalid event' };
+  }
+  try {
+    // Normalize: Use eventType as event_type; ignore/rename 'action' if present
+    const {
+      from: oldStatus = null,
+      to: newStatus = null,
+      offsetDays = 0,
+      reason = null,
+      action,  // Ignore if passed; use eventType
+      ...extraDetails
+    } = logData;
+
+    const details = {
+      ...extraDetails,
+      old_status: oldStatus,
+      new_status: newStatus,
+      reason,
+      action: action || eventType  // Legacy: Store in details if needed
+    };
+
+    const query = `
+      INSERT INTO consignment_tracking (
+        consignment_id, event_type, old_status, new_status, offset_days, details
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
+      RETURNING id
+    `;
+    const result = await client.query(query, [
+      consignmentId,
+      eventType,  // Use this for event_type (e.g., 'status_auto_updated')
+      oldStatus,
+      newStatus,
+      offsetDays,
+      details
+    ]);
+
+    if (result.rowCount > 0) {
+      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      return { success: true, id: result.rows[0].id };
+    } else {
+      console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
+      return { success: true, skipped: true };
+    }
+  } catch (error) {
+    console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
+    if (error.code === '42703') {
+      console.error('Schema mismatch – check INSERT columns vs. table (e.g., no "action" column)');
+    }
+    return { success: false, error: error.message };
+    // No throw – non-critical
+  }
+}
 // Helper: Wrap in transaction
 async function withTransaction(operation) {
   const client = await pool.connect();
@@ -1350,7 +1439,7 @@ export async function updateConsignment(req, res) {
       delivered: data.delivered || 0,
       pending: data.pending || 0,
       containers: data.containers || [],
-      orders: data.orders || []
+      orders: data.orders || []  // Keep as-is: array of IDs (numbers) or objects
       // Do NOT include status_color, created_at, or updated_at here
     };
 
@@ -1360,7 +1449,21 @@ export async function updateConsignment(req, res) {
     }
 
     const containerErrors = validateContainers(normalizedInput.containers);
-    const orderErrors = validateOrders(normalizedInput.orders);
+    // Handle orders validation: Accept array of numbers (IDs) or objects
+    let orderErrors = [];
+    if (Array.isArray(normalizedInput.orders)) {
+      if (normalizedInput.orders.every(o => typeof o === 'number' && o > 0)) {
+        // IDs only: Skip object validation, just check for valid positives
+        if (normalizedInput.orders.length > 0 && normalizedInput.orders.some(id => isNaN(id) || id <= 0)) {
+          orderErrors = [{ index: -1, errors: ['orders: All IDs must be positive integers'] }];
+        }
+      } else {
+        // Assume objects: Use existing validator
+        orderErrors = validateOrders(normalizedInput.orders);
+      }
+    } else {
+      orderErrors = [{ index: -1, errors: ['orders: Must be an array'] }];
+    }
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({ error: 'Array validation failed', details: [...containerErrors, ...orderErrors] });
     }
@@ -1399,7 +1502,7 @@ export async function updateConsignment(req, res) {
       delivered: normalizedInput.delivered,
       pending: normalizedInput.pending,
       containers: JSON.stringify(normalizedInput.containers),
-      orders: JSON.stringify(normalizedInput.orders)
+      orders: JSON.stringify(normalizedInput.orders)  // Stringify IDs or objects as-is
       // Explicitly NO status_color, created_at, or updated_at
     };
 
@@ -1435,25 +1538,18 @@ export async function updateConsignment(req, res) {
       updatedConsignment = updateResult.rows[0];
 
       // Log to tracking if status changed
-      if (data.status) {
-        await logToTracking(client, id, 'updated', { newStatus: normalizedInput.status, eta: computedETA });
+      if (data.status !== undefined) {  // Ensure status was provided
+        const logResult = await logToTracking(client, id, 'status_updated', { 
+          newStatus: normalizedInput.status, 
+          eta: computedETA 
+        });
+        if (!logResult.success) {
+          console.warn(`Logging failed for ${id}:`, logResult.error);
+        }
       }
 
-      // Cascade: Update linked orders/containers if arrays changed
-      let orderIds = normalizedInput.orders.map(o => o.id).filter(Boolean);
-      if (orderIds.length > 0) {
-        await client.query(
-          'UPDATE orders SET consignment_id = $1 WHERE id = ANY($2::int[])',
-          [id, orderIds]
-        );
-      }
-      let containerIds = normalizedInput.containers.map(c => c.id).filter(Boolean);
-      if (containerIds.length > 0) {
-        await client.query(
-          'UPDATE containers SET consignment_id = $1 WHERE id = ANY($2::int[])',
-          [id, containerIds]
-        );
-      }
+      // Cascade: Skip orders and containers UPDATEs (no consignment_id columns; JSON-driven relationships)
+      console.log(`Skipped orders/containers cascade for consignment ${id} (JSON-driven relationship)`);
 
       // Send notification if status updated to trigger (e.g., 'In Transit' or 'Delivered')
       if (['In Transit', 'Delivered'].includes(normalizedInput.status)) {

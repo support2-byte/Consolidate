@@ -86,15 +86,15 @@ export async function getStatuses(req, res) {
       WHERE derived_status IS NOT NULL
       ORDER BY value
     `;
-    
+
     const result = await pool.query(query);
     let statuses = result.rows.map(row => ({
       ...row,
       color: getStatusColor(row.value)
     }));
 
-//     // Hardcode full list if query returns < 5 (or always, for consistency)
-    if (statuses.length < 5 ) {
+    //     // Hardcode full list if query returns < 5 (or always, for consistency)
+    if (statuses.length < 5) {
       statuses = [
         { value: 'Available', label: 'Available', color: getStatusColor('Available') },
         { value: 'Hired', label: 'Hired', color: getStatusColor('Hired') },
@@ -113,7 +113,7 @@ export async function getStatuses(req, res) {
     }
 
     // Remove duplicates if mixing dynamic + hardcoded
-    statuses = statuses.filter((s, index, self) => 
+    statuses = statuses.filter((s, index, self) =>
       index === self.findIndex(t => t.value === s.value)
     );
 
@@ -158,7 +158,7 @@ export async function getStatuses(req, res) {
 //       WHERE derived_status IS NOT NULL
 //       ORDER BY value
 //     `;
-    
+
 //     const result = await pool.query(query);
 //     let statuses = result.rows.map(row => ({
 //       ...row,
@@ -205,7 +205,7 @@ export async function getStatuses(req, res) {
 //       WHERE derived_status IS NOT NULL
 //       ORDER BY value
 //     `;
-    
+
 //     const result = await pool.query(query);
 //     let statuses = result.rows.map(row => ({
 //       ...row,
@@ -338,7 +338,7 @@ export async function createContainer(req, res) {
 
     if (validationErrors.length > 0) {
       console.warn('Validation failed for fields:', validationErrors);
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: `${owner_type.toUpperCase()} fields missing or invalid`,
         details: validationErrors.join(', ')
       });
@@ -506,7 +506,7 @@ export async function updateContainer(req, res) {
     if (updateErrors.length > 0) {
       console.warn('Update validation failed for fields:', updateErrors);
       await client.query('ROLLBACK');
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Invalid update fields',
         details: updateErrors.join(', ')
       });
@@ -877,6 +877,137 @@ export async function getContainerById(req, res) {
   }
 }
 // Updated Usage History endpoint - Combines container_status and container_assignment_history for comprehensive usage
+// export async function getUsageHistory(req, res) {
+//   try {
+//     const { cid } = req.params;
+//     if (!cid || isNaN(parseInt(cid))) {
+//       return res.status(400).json({ error: 'Valid CID is required' });
+//     }
+//     const containerId = parseInt(cid);
+
+//     // Union query to combine status changes and assignment events
+//     const historyQuery = `
+//       -- Status changes from container_status
+//       SELECT 
+//         cs.created_time as event_time,
+//         'STATUS_CHANGE' as event_type,
+//         cs.availability as event_status,
+//         NULL as assigned_qty,
+//         NULL as action_type,
+//         cs.location as location,
+//         cs.status_notes as notes,
+//         cs.created_by as changed_by,
+//         NULL as previous_status,
+//         NULL as order_id,
+//         NULL as receiver_id,
+//         NULL as detail_id,
+//         cm.container_number,
+//         cm.owner_type,
+//         cpd.owned_by,
+//         chd.hired_by,
+//         o.id as job_id,
+//         o.booking_ref as job_no,
+//         o.place_of_loading as pol,
+//         o.final_destination as pod,
+//         o.created_at as start_date,
+//         o.updated_at as end_date,
+//         o.status as order_status
+//       FROM container_status cs
+//       JOIN container_master cm ON cs.cid = cm.cid
+//       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
+//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//       LEFT JOIN orders o ON o.associated_container = cm.container_number 
+//         AND o.status != 'Cancelled'
+//       WHERE cs.cid = $1
+
+//       UNION ALL
+
+//       -- Assignment events from container_assignment_history
+//       SELECT 
+//         cah.created_at as event_time,
+//         'ASSIGNMENT' as event_type,
+//         cah.status as event_status,
+//         cah.assigned_qty,
+//         cah.action_type,
+//         NULL as location,  -- Assignments may not have location; could enhance if needed
+//         cah.notes,
+//         cah.changed_by,
+//         cah.previous_status,
+//         cah.order_id,
+//         cah.receiver_id,
+//         cah.detail_id,
+//         cm.container_number,
+//         cm.owner_type,
+//         cpd.owned_by,
+//         chd.hired_by,
+//         cah.order_id as job_id,  -- Reuse order_id as job_id
+//         o.booking_ref as job_no,
+//         o.place_of_loading as pol,
+//         o.final_destination as pod,
+//         o.created_at as start_date,
+//         o.updated_at as end_date,
+//         o.status as order_status
+//       FROM container_assignment_history cah
+//       JOIN container_master cm ON cah.cid = cm.cid
+//       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
+//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+//       LEFT JOIN orders o ON cah.order_id = o.id 
+//         AND o.status != 'Cancelled'
+//       WHERE cah.cid = $1
+
+//       ORDER BY event_time DESC
+//     `;
+
+//     const result = await pool.query(historyQuery, [containerId]);
+//     const history = result.rows;
+
+//     // Format for frontend (group by job if possible; enhance with event details)
+//     const formattedHistory = history.map(row => {
+//       const eventSummary = row.event_type === 'ASSIGNMENT' 
+//         ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
+//         : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
+
+//       return {
+//         eventTime: row.event_time.toISOString().split('T')[0],  // YYYY-MM-DD
+//         eventType: row.event_type,
+//         eventSummary: eventSummary,
+//         jobNo: row.job_no || `JOB-${row.event_time.toISOString().split('T')[0].replace(/-/g, '')}`,
+//         pol: row.pol || (row.owner_type === 'soc' ? 'Self Depot' : 'Vendor Depot'),
+//         pod: row.pod || 'Destination Depot',
+//         startDate: row.start_date ? row.start_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
+//         endDate: row.end_date ? row.end_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
+//         statusProgression: [row.event_status],
+//         linkedOrders: row.job_no ? `ORD-${row.job_id}` : 'N/A',
+//         remarks: row.notes || eventSummary,
+//         changedBy: row.changed_by,
+//         orderId: row.order_id,
+//         receiverId: row.receiver_id,
+//         detailId: row.detail_id
+//       };
+//     });
+
+//     // Optional: Group by job/order for timeline view (if multiple events per job)
+//     const groupedHistory = {};
+//     formattedHistory.forEach(entry => {
+//       const key = entry.jobNo;
+//       if (!groupedHistory[key]) {
+//         groupedHistory[key] = [];
+//       }
+//       groupedHistory[key].push(entry);
+//     });
+
+//     console.log(`Fetched ${formattedHistory.length} combined history events for container ${containerId} (grouped into ${Object.keys(groupedHistory).length} jobs)`);
+//     res.json({
+//       rawEvents: formattedHistory,  // Detailed event list
+//       groupedByJob: groupedHistory  // Aggregated by job for easier UI rendering
+//     });
+//   } catch (err) {
+//     console.error("Error fetching usage history:", err);
+//     res.status(500).json({ error: 'Failed to fetch usage history', details: err.message });
+//   }
+// }
+
+
 export async function getUsageHistory(req, res) {
   try {
     const { cid } = req.params;
@@ -885,7 +1016,7 @@ export async function getUsageHistory(req, res) {
     }
     const containerId = parseInt(cid);
 
-    // Union query to combine status changes and assignment events
+    // Pehle wali UNION query bilkul unchanged rahegi
     const historyQuery = `
       -- Status changes from container_status
       SELECT 
@@ -958,17 +1089,38 @@ export async function getUsageHistory(req, res) {
       ORDER BY event_time DESC
     `;
 
-    const result = await pool.query(historyQuery, [containerId]);
-    const history = result.rows;
+    // Alag se sirf container status history ka query
+    const statusHistoryQuery = `
+      SELECT 
+        sid,
+        cid,
+        location,
+        availability,
+        created_by,
+        created_time,
+        status_notes
+      FROM container_status
+      WHERE cid = $1
+      ORDER BY created_time DESC, sid DESC
+    `;
 
-    // Format for frontend (group by job if possible; enhance with event details)
+    // Dono queries ek saath run karo
+    const [historyResult, statusHistoryResult] = await Promise.all([
+      pool.query(historyQuery, [containerId]),
+      pool.query(statusHistoryQuery, [containerId])
+    ]);
+
+    const history = historyResult.rows;
+    const statusHistory = statusHistoryResult.rows;
+
+    // Existing format bilkul unchanged rahega
     const formattedHistory = history.map(row => {
-      const eventSummary = row.event_type === 'ASSIGNMENT' 
+      const eventSummary = row.event_type === 'ASSIGNMENT'
         ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
         : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
-      
+
       return {
-        eventTime: row.event_time.toISOString().split('T')[0],  // YYYY-MM-DD
+        eventTime: row.event_time.toISOString().split('T')[0],
         eventType: row.event_type,
         eventSummary: eventSummary,
         jobNo: row.job_no || `JOB-${row.event_time.toISOString().split('T')[0].replace(/-/g, '')}`,
@@ -986,7 +1138,7 @@ export async function getUsageHistory(req, res) {
       };
     });
 
-    // Optional: Group by job/order for timeline view (if multiple events per job)
+    // Group by job (existing format)
     const groupedHistory = {};
     formattedHistory.forEach(entry => {
       const key = entry.jobNo;
@@ -996,11 +1148,35 @@ export async function getUsageHistory(req, res) {
       groupedHistory[key].push(entry);
     });
 
-    console.log(`Fetched ${formattedHistory.length} combined history events for container ${containerId} (grouped into ${Object.keys(groupedHistory).length} jobs)`);
+    // Status history ko format karo
+    const formattedStatusHistory = statusHistory.map(row => ({
+      sid: row.sid,
+      cid: row.cid,
+      location: row.location,
+      status: row.availability,
+      createdBy: row.created_by || 'System',
+      createdTime: row.created_time,
+      notes: row.status_notes
+    }));
+
+    console.log(`Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`);
+
+    // Response format mein sirf ek naya field add karo
     res.json({
-      rawEvents: formattedHistory,  // Detailed event list
-      groupedByJob: groupedHistory  // Aggregated by job for easier UI rendering
+      rawEvents: formattedHistory,
+      groupedByJob: groupedHistory,
+      containerStatusHistory: {
+        totalRecords: formattedStatusHistory.length,
+        events: formattedStatusHistory,
+        summary: {
+          uniqueStatuses: [...new Set(formattedStatusHistory.map(s => s.status))],
+          firstStatus: formattedStatusHistory[formattedStatusHistory.length - 1]?.status || 'N/A',
+          latestStatus: formattedStatusHistory[0]?.status || 'N/A',
+          totalLocations: [...new Set(formattedStatusHistory.map(s => s.location))].length
+        }
+      }
     });
+
   } catch (err) {
     console.error("Error fetching usage history:", err);
     res.status(500).json({ error: 'Failed to fetch usage history', details: err.message });
