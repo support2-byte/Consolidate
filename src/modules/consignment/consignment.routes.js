@@ -9,7 +9,8 @@ import {
   updateConsignment,
   advanceStatus,
   deleteConsignment,
-  getStatuses
+  getStatuses,
+  calculateETAEndpoint
 } from '../consignment/consignment.controller.js'; // Adjust path as needed
 
 const router = express.Router();
@@ -17,25 +18,26 @@ const router = express.Router();
 // GET /api/consignments - Fetch all consignments (with pagination and filters)
 router.get('/', getConsignments);
 
-// GET /api/consignments/:id - Fetch single consignment by ID
+// GET /api/consignments/statuses - Fetch available statuses (with colors) - SPECIFIC ROUTE FIRST
+router.get('/statuses', getStatuses);  // Moved UP: Before /:id to avoid interception
+
+// GET /api/consignments/:id - Fetch single consignment by ID - PARAMETRIC ROUTE LAST
 router.get('/:id', getConsignmentById);
-  
+router.get('/calculate-eta?status=', calculateETAEndpoint);
+
 // POST /api/consignments - Create new consignment
 router.post('/', createConsignment);
-
+calculateETAEndpoint
 // PUT /api/consignments/:id - Full update consignment
 router.put('/:id', updateConsignment);
 
 // PATCH /api/consignments/:id - Partial update (general)
 router.patch('/:id', updateConsignment); // Reuse update for partial; adjust if separate needed
 
-// PATCH /api/consignments/:id/next - Advance status (workflow)
+// PATCH /api/consignments/:id/next - Advance status (workflow) - Note: PUT used; consider PATCH for partial
 router.put('/:id/next', advanceStatus);
 
 // DELETE /api/consignments/:id - Delete consignment
 router.delete('/:id', deleteConsignment);
-
-// GET /api/consignments/statuses - Fetch available statuses (with colors)
-router.get('/statuses', getStatuses);
 
 export default router;

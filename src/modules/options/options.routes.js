@@ -56,7 +56,7 @@ router.get('/payment-types', getPaymentTypeOptions); // For dropdown options
 router.get('/vessels', getVessels); // Updated: Removed /crud for dropdown compatibility
 router.get('/shipping-lines', getShippingLines);
 router.get('/currencies', getCurrencies);
-router.get('/statuses', getStatuses);
+router.get('/statuses', getStatuses); 
 router.get('/container-statuses', getContainerStatuses);
 
 // CRUD routes (keep /crud where full list with actions is needed)
