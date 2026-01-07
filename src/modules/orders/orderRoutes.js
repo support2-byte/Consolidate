@@ -10,12 +10,13 @@ import {
   // updateOrderStatus,
   updateReceiverStatus,  // New: Import for status update
   assignContainersToOrdersAll,
-  getOrdersConsignments
+  getOrdersConsignments,
+  getMyOrdersByRef
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
 import path from "path"; // Add this import for path.extname
-
+import { authenticateToken } from "../../modules/auth/auth.middleware.js";
 const router = express.Router();
 
 // Configure multer for file uploads (stores in 'uploads/' directory)
@@ -49,7 +50,7 @@ router.put('/:id/shipping', upload.fields([
 
 // PUT /api/orders/:id/status - Update order status with notifications
 router.put('/:orderId/receivers/:id/status', updateReceiverStatus);
-
+router.get('/myOrderByRef', authenticateToken, getMyOrdersByRef);
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);
 router.get('/track/:trackingId', getOrderByTrackingId);

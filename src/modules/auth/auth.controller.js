@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import pool from "../../db/pool.js";
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const   JWT_SECRET = process.env.JWT_SECRET;
 
 export async function register(req, res) {
   const { email, password } = req.body ?? {};
