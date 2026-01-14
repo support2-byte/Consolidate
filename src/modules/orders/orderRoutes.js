@@ -11,12 +11,14 @@ import {
   updateReceiverStatus,  // New: Import for status update
   assignContainersToOrdersAll,
   getOrdersConsignments,
+  getOrderByOrderId,
   getMyOrdersByRef
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
 import path from "path"; // Add this import for path.extname
 import { authenticateToken } from "../../modules/auth/auth.middleware.js";
+import { get } from "http";
 const router = express.Router();
 
 // Configure multer for file uploads (stores in 'uploads/' directory)
@@ -53,10 +55,14 @@ router.put('/:orderId/receivers/:id/status', updateReceiverStatus);
 router.get('/myOrderByRef', authenticateToken, getMyOrdersByRef);
 // GET /api/orders - Fetch all orders
 router.get('/', getOrders);
-router.get('/track/:trackingId', getOrderByTrackingId);
-router.get('/track/item/:itemRef', getOrderByItemRef);
-router.get('/consignmentsOrders', getOrdersConsignments);
-
+// router.get('/track/:trackingId', getOrderByTrackingId);
+// router.get('/track/item/:itemRef', getOrderByItemRef);
+router.get('/consignmentsOrders', getOrdersConsignments); 
+// In your router file
+// Example correct routing (in your routes file)
+router.get('/track/item/:ref', getOrderByItemRef);
+router.get('/track/order/:ref', getOrderByOrderId);
+router.get('/track/consignment/:id', getOrderByTrackingId); // or whatever name
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
 router.post('/assign-container', assignContainersToOrders);

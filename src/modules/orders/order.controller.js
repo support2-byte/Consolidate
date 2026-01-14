@@ -56,19 +56,6 @@ export function getContainerAvailability(orderStatus) {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Helper function (assume defined elsewhere)
 function normalizeDate(dateStr) {
   console.log('Normalizing date:', dateStr);
@@ -1989,86 +1976,144 @@ export async function getOrders(req, res) {
 
 export async function getMyOrdersByRef(req, res) {
   try {
-    const userId = req.user.sub;  // From token, e.g., '1'
+    const userId = req.user.sub;
     if (!userId) {
       return res.status(401).json({ error: 'User ID not found in token' });
     }
 
-    // SELECT fields (similar to tracking, but for all orders linked to user)
-    let selectFields = [
-      'o.*',
-      's.sender_name, s.sender_contact, s.sender_email',
-      't.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date',
-      'ot.status AS latest_tracking_status, ot.created_time AS latest_tracking_time',
-      'ot.container_id',
-      'cm.container_number',
-      // Aggregate receivers summary for the order
-      'STRING_AGG(DISTINCT r.receiver_name, \', \' ORDER BY r.receiver_name) AS receivers_summary',
-      'STRING_AGG(DISTINCT r.consignment_number, \', \' ORDER BY r.consignment_number) AS consignment_numbers',
-      'STRING_AGG(DISTINCT r.item_ref, \', \' ORDER BY r.item_ref) AS item_refs'
-    ].join(', ');
+    const { limit = 20, offset = 0, status, search } = req.query;
+    const safeLimit = Math.min(50, Math.max(1, parseInt(limit) || 20));
+    const safeOffset = parseInt(offset) || 0;
 
-    // Joins for user's orders
-    let joins = `
-      LEFT JOIN senders s ON o.id = s.order_id
-      LEFT JOIN transport_details t ON o.id = t.order_id
-      LEFT JOIN LATERAL (
-        SELECT ot2.status, ot2.created_time, ot2.container_id
-        FROM order_tracking ot2 
-        WHERE ot2.order_id = o.id
-        ORDER BY ot2.created_time DESC LIMIT 1
-      ) ot ON true
-      LEFT JOIN container_master cm ON ot.container_id = cm.cid
-      LEFT JOIN receivers r ON o.id = r.order_id
-    `;
+    // ────────────────────────────────────────────────
+    // Base WHERE clause (user + optional filters)
+    // ────────────────────────────────────────────────
+    let whereClauses = ['o.user_id = $1'];
+    let params = [userId];
 
-    // WHERE: Filter by user (assume o.user_id = userId)
-    let whereClause = `WHERE o.user_id = $1`;  // Adjust column if needed (e.g., s.sender_id = $1)
+    if (status) {
+      whereClauses.push(`o.status = $${params.length + 1}`);
+      params.push(status);
+    }
 
-    // Main query with GROUP BY for aggregation
-    const mainQuery = `
-      SELECT ${selectFields}
+    if (search && search.trim()) {
+      const term = `%${search.trim()}%`;
+      whereClauses.push(`(
+        o.booking_ref ILIKE $${params.length + 1} OR
+        o.rgl_booking_number ILIKE $${params.length + 1} OR
+        EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id AND oi.item_ref ILIKE $${params.length + 1})
+      )`);
+      params.push(term);
+    }
+
+    const whereSql = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+
+    // ────────────────────────────────────────────────
+    // Main query – rich order data
+    // ────────────────────────────────────────────────
+    const ordersQuery = `
+      SELECT 
+        o.*,
+        s.sender_name, s.sender_contact, s.sender_email, s.sender_address,
+        t.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date,
+        ot.status AS latest_tracking_status,
+        ot.created_time AS latest_tracking_time,
+        -- Receiver summary
+        (SELECT json_agg(
+           json_build_object(
+             'id', r.id,
+             'receiver_name', r.receiver_name,
+             'receiver_contact', r.receiver_contact,
+             'receiver_email', r.receiver_email,
+             'receiver_address', r.receiver_address,
+             'status', r.status,
+             'eta', r.eta,
+             'containers', r.containers
+           )
+           ORDER BY r.id
+         ) FROM receivers r WHERE r.order_id = o.id) AS receivers_summary,
+        -- Item summary with container assignments
+        (SELECT json_agg(
+           json_build_object(
+             'item_id', oi.id,
+             'item_ref', oi.item_ref,
+             'category', oi.category,
+             'subcategory', oi.subcategory,
+             'type', oi.type,
+             'total_number', oi.total_number,
+             'weight', oi.weight,
+             'assigned_qty', COALESCE((
+               SELECT SUM(cah.assigned_qty)
+               FROM container_assignment_history cah
+               WHERE cah.detail_id = oi.id
+             ), 0),
+             'remaining', oi.total_number - COALESCE((
+               SELECT SUM(cah.assigned_qty)
+               FROM container_assignment_history cah
+               WHERE cah.detail_id = oi.id
+             ), 0)
+           )
+           ORDER BY oi.id
+         ) FROM order_items oi WHERE oi.order_id = o.id) AS items_summary
       FROM orders o
-      ${joins}
-      ${whereClause}
-      GROUP BY o.id, s.sender_name, s.sender_contact, s.sender_email,
-               t.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date,
-               ot.status, ot.created_time, ot.container_id, cm.container_number
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN LATERAL (
+        SELECT status, created_time
+        FROM order_tracking
+        WHERE order_id = o.id
+        ORDER BY created_time DESC LIMIT 1
+      ) ot ON true
+      ${whereSql}
       ORDER BY o.created_at DESC
-      LIMIT 50  // Add pagination if needed
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
-    const queryParams = [userId];
 
-    console.log('Generated my orders query:', mainQuery);
-    const ordersResult = await pool.query(mainQuery, queryParams);
+    params.push(safeLimit, safeOffset);
+
+    const ordersResult = await pool.query(ordersQuery, params);
 
     if (ordersResult.rowCount === 0) {
-      return res.status(404).json({ error: 'No orders found for this user' });
+      return res.json({
+        success: true,
+        data: [],
+        message: 'No orders found',
+        count: 0
+      });
     }
 
-    // Enrich each order
-    const enrichedOrders = ordersResult.rows.map(order => {
-      const derivedStatus = order.latest_tracking_status || order.status || 'Created';
-      return {
-        ...order,
-        overall_status: derivedStatus,
-        color: getOrderStatusColor ? getOrderStatusColor(derivedStatus) : '#default'
-      };
-    });
+    // Optional: enrich with full assignment history (only if needed – can be heavy)
+    // If you want full history per order, do a second query or lateral join
 
-    console.log(`Fetched ${enrichedOrders.length} orders for user ${userId} (${req.user.email})`);
+    const enriched = ordersResult.rows.map(row => ({
+      ...row,
+      overall_status: row.latest_tracking_status || row.status || 'Created',
+      // you can add computed fields here, e.g. progress = assigned / total
+    }));
+
+    // Optional: total count for pagination
+    const countQuery = `SELECT COUNT(*) FROM orders o ${whereSql}`;
+    const countRes = await pool.query(countQuery, params.slice(0, -2));
+    const total = parseInt(countRes.rows[0].count);
 
     res.json({
-      data: enrichedOrders,
-      message: 'Orders fetched successfully',
-      count: enrichedOrders.length
+      success: true,
+      data: enriched,
+      pagination: {
+        total,
+        limit: safeLimit,
+        offset: safeOffset,
+        pages: Math.ceil(total / safeLimit)
+      }
     });
+
   } catch (err) {
-    console.error('Error fetching my orders:', err);
-    if (err.code === '42P01' || err.code === '42703') {
-      return res.status(500).json({ error: 'Database schema mismatch. Check table/column names.' });
-    }
-    res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
+    console.error('getMyOrdersByRef error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch your orders',
+      error: err.message
+    });
   }
 }
 export async function getOrdersConsignments(req, res) {
@@ -2660,7 +2705,523 @@ function computeDaysUntilEta(etaDateStr, today = new Date()) {  // Dynamic: Defa
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   return diffDays;  // Allow negative for past ETAs
 }
+const CONSIGNMENT_TO_STATUS_MAP = {
+  // Consignment Status          → Container Status          → Shipment (Receiver) Status      → ETA from DB
+  'Customs Cleared':            { container: 'Shipment Processing',   shipment: 'Shipment Processing' },           // 7 days
+  'Submitted On Vessel':        { container: 'Shipment Processing',   shipment: 'Shipment Processing' },           // 7 days
+  'Submitted':                  { container: 'Shipment Processing',   shipment: 'Shipment Processing' },           // 7 days (if needed)
+  'In Transit':                 { container: 'In Transit',            shipment: 'Shipment In Transit' },           // 4 days
+  'Ready for Delivery':         { container: 'Ready for Delivery',    shipment: 'Ready for Delivery' },            // 0 days
+  'Arrived at Destination':     { container: 'Under Processing',     shipment: 'Under Processing' },              // 2 days
+  'Loaded':                     { container: 'Loaded',                shipment: 'Loaded Into Container' },         // 9 days
+  'Ready for loading':          { container: 'Ready for Loading',     shipment: 'Ready for Loading' },             // 12 days
+  'Created':                    { container: 'Created',               shipment: 'Order Created' },                 // 15 days (or 'Created' → 15)
+  'Arrived':                    { container: 'Arrived at Sort Facility', shipment: 'Arrived at Sort Facility' },   // 1 day
+  'De-Linked':                  { container: 'Arrived at Sort Facility', shipment: 'Arrived at Sort Facility' },   // 1 day
+  'Delivered':                  { container: 'Delivered',             shipment: 'Shipment Delivered' },            // 0 days
+};
+// Helper: Wrap in transaction
+async function withTransaction(operation) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await operation(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
+// Helper: Send notification (placeholder—integrate with your GAS/notifications module)
+async function sendNotification(consignmentData, event = 'created') {
+  // e.g., await emailService.send({ to: consignmentData.consignee.email, subject: `Consignment ${consignmentData.consignment_number} ${event}` });
+  console.log(`Notification sent for consignment ${consignmentData.consignment_number}: ${event}`);
+}
+
+// Unified logging function: Handles both 'logToTracking' and 'safeLogToTracking' calls
+async function logToTracking(client, consignmentId, eventType = 'unknown', logData = {}) {
+  // Validate eventType (required, non-null)
+  if (!eventType || typeof eventType !== 'string' || eventType.trim() === '') {
+    console.error(`Invalid eventType '${eventType}' for consignment ${consignmentId} – defaulting to 'unknown_event'`);
+    eventType = 'unknown_event';  // Fallback to avoid NULL violation
+  }
+
+  // Validate against schema CHECK (expand as needed)
+  const validEvents = ['status_advanced', 'status_updated', 'status_auto_updated', 'updated', 'order_synced'];
+  if (!validEvents.includes(eventType)) {
+    console.warn(`Event '${eventType}' not in DB CHECK – add to constraint or use valid one`);
+  }
+
+  try {
+    // Normalize logData
+    const {
+      from: oldStatus = null,
+      to: newStatus = null,
+      offsetDays = 0,
+      reason = null,
+      ...extraDetails
+    } = logData;
+
+    const details = {
+      ...extraDetails,
+      old_status: oldStatus,
+      new_status: newStatus,
+      reason,
+      action: logData.action || eventType  // Legacy: Store 'action' in details if passed
+    };
+
+    const query = `
+      INSERT INTO consignment_tracking (
+        consignment_id, event_type, old_status, new_status, offset_days, details
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
+      RETURNING id
+    `;
+    const result = await client.query(query, [
+      consignmentId,
+      eventType.trim(),  // Ensure non-null string
+      oldStatus,
+      newStatus,
+      offsetDays,
+      details
+    ]);
+
+    if (result.rowCount > 0) {
+      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      return { success: true, id: result.rows[0].id };
+    } else {
+      console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
+      return { success: true, skipped: true };
+    }
+  } catch (error) {
+    console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
+    if (error.code === '23502') {
+      console.error('NOT NULL violation on event_type – ensure non-null param');
+    } else if (error.code === '23514') {
+      console.error(`CHECK violation: '${eventType}' not allowed – update DB constraint`);
+    }
+    return { success: false, error: error.message };
+    // No throw – keep tx alive
+  }
+}
+async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
+  // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
+  const validEvents = ['status_advanced', 'status_updated', 'order_synced', 'status_auto_updated'];  // Sync with DB
+  if (!validEvents.includes(eventType)) {
+    console.warn(`Invalid event_type '${eventType}' – add to DB CHECK constraint`);
+    return { success: false, reason: 'Invalid event' };
+  }
+  try {
+    // Normalize: Use eventType as event_type; ignore/rename 'action' if present
+    const {
+      from: oldStatus = null,
+      to: newStatus = null,
+      offsetDays = 0,
+      reason = null,
+      action,  // Ignore if passed; use eventType
+      ...extraDetails
+    } = logData;
+
+    const details = {
+      ...extraDetails,
+      old_status: oldStatus,
+      new_status: newStatus,
+      reason,
+      action: action || eventType  // Legacy: Store in details if needed
+    };
+
+    const query = `
+      INSERT INTO consignment_tracking (
+        consignment_id, event_type, old_status, new_status, offset_days, details
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (consignment_id, event_type, timestamp) DO NOTHING
+      RETURNING id
+    `;
+    const result = await client.query(query, [
+      consignmentId,
+      eventType,  // Use this for event_type (e.g., 'status_auto_updated')
+      oldStatus,
+      newStatus,
+      offsetDays,
+      details
+    ]);
+
+    if (result.rowCount > 0) {
+      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      return { success: true, id: result.rows[0].id };
+    } else {
+      console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
+      return { success: true, skipped: true };
+    }
+  } catch (error) {
+    console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
+    if (error.code === '42703') {
+      console.error('Schema mismatch – check INSERT columns vs. table (e.g., no "action" column)');
+    }
+    return { success: false, error: error.message };
+    // No throw – non-critical
+  }
+}
+// Helper to extract valid integer IDs from orderIds (handles array of IDs or array of objects; robust parsing)
+function extractOrderIds(orderData) {
+  if (!orderData || !Array.isArray(orderData)) {
+    return [];
+  }
+
+  const ids = orderData
+    .map(item => {
+      let id = null;
+      if (typeof item === 'number') {
+        id = item;
+      } else if (typeof item === 'object' && item !== null) {
+        if ('id' in item && item.id !== null && item.id !== undefined) {
+          id = parseInt(item.id, 10);
+        } else if ('value' in item || 'key' in item) {
+          const val = item.value || item.key;
+          id = parseInt(val, 10);
+        }
+      } else if (typeof item === 'string') {
+        id = parseInt(item, 10);
+      }
+      return id;
+    })
+    .filter(id => Number.isInteger(id) && id > 0);  // Strict: integer and positive
+
+  return ids;
+}
+
+export async function advanceStatus(req, res) {
+  console.log("Advance Status Request Params:", req.params);    
+
+  let syncOrderIds = []; // Declare outside transaction
+
+  try {
+    const { id } = req.params;
+    const numericId = parseInt(id, 10);
+    if (isNaN(numericId) || numericId <= 0) {
+      return res.status(400).json({ error: 'Invalid consignment ID.' });
+    }
+
+    const { rows } = await pool.query('SELECT status FROM consignments WHERE id = $1', [numericId]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Consignment not found' });
+    }
+
+    const currentStatus = rows[0].status;
+
+    // Next status for consignment
+    const nextStatusMap = {
+      'Drafts Cleared': 'Submitted On Vessel',
+      'Submitted On Vessel': 'Customs Cleared',
+      'Customs Cleared': 'Submitted',
+      'Submitted': 'Under Shipment Processing',
+      'Under Shipment Processing': 'In Transit',
+      'In Transit': 'Arrived at Facility',
+      'Arrived at Facility': 'Ready for Delivery',
+      'Ready for Delivery': 'Arrived at Destination',
+      'Arrived at Destination': 'Delivered',
+    };
+
+    const nextStatus = nextStatusMap[currentStatus];
+    if (!nextStatus) {
+      return res.status(400).json({ error: `No next status defined from "${currentStatus}"` });
+    }
+
+    // Sync mapping (for orders/receivers/containers)
+    const statusSyncMap = {
+      'Drafts Cleared': 'Order Created',
+      'Submitted On Vessel': 'Ready for Loading',
+      'Customs Cleared': 'Loaded Into Container',
+      'Submitted': 'Shipment Processing',
+      'Under Shipment Processing': 'Shipment In Transit',
+      'In Transit': 'Under Processing',
+      'Arrived at Facility': 'Arrived at Sort Facility',
+      'Ready for Delivery': 'Ready for Delivery',
+      'Arrived at Destination': 'Ready for Delivery',
+      'Delivered': 'Shipment Delivered'
+    };
+
+    const syncedStatus = statusSyncMap[nextStatus] || nextStatus;
+
+    let consignmentEta = null;
+
+    await withTransaction(async (client) => {
+      try {
+        // 1. Calculate ETA
+        if (nextStatus !== 'Delivered') {
+          const etaResult = await calculateETA(client, syncedStatus);
+          consignmentEta = etaResult.eta;
+        } else {
+          consignmentEta = new Date().toISOString().split('T')[0];
+        }
+
+        // 2. Update consignment
+        await client.query(
+          'UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
+          [nextStatus, consignmentEta, numericId]
+        );
+
+        // 3. Log to consignment_tracking
+        await client.query(`
+          INSERT INTO consignment_tracking 
+            (consignment_id, event_type, old_status, new_status, timestamp, details, created_at, source, action)
+          VALUES 
+            ($1, $2, $3, $4, NOW(), $5, NOW(), 'api', 'status_advanced')
+        `, [
+          numericId,
+          'status_advanced',
+          currentStatus,
+          nextStatus,
+          JSON.stringify({
+            reason: 'Manual advance',
+            newEta: consignmentEta,
+            syncedTo: syncedStatus,
+            user: req.user?.id || 'system'
+          })
+        ]);
+
+        // 4. Get linked orders
+        const orderIdsRes = await client.query(
+          'SELECT orders FROM consignments WHERE id = $1',
+          [numericId]
+        );
+        let rawOrders = orderIdsRes.rows[0]?.orders || [];
+        if (typeof rawOrders === 'string') rawOrders = JSON.parse(rawOrders || '[]');
+
+        syncOrderIds = rawOrders
+          .map(oid => parseInt(oid, 10))
+          .filter(oid => !isNaN(oid) && oid > 0);
+
+        if (syncOrderIds.length > 0) {
+          // Update orders
+          await client.query(
+            'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])',
+            [syncedStatus, syncOrderIds]
+          );
+
+          // Update receivers
+          await client.query(
+            `UPDATE receivers 
+             SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP
+             WHERE order_id = ANY($3::int[])`,
+            [syncedStatus, consignmentEta, syncOrderIds]
+          );
+
+          // Sync containers (with safe parsing)
+          const receiversRes = await client.query(
+            'SELECT id, containers FROM receivers WHERE order_id = ANY($1::int[])',
+            [syncOrderIds]
+          );
+
+          for (const recvRow of receiversRes.rows) {
+            try {
+              let containers = recvRow.containers || [];
+              if (typeof containers === 'string') {
+                // Handle common bad formats
+                containers = containers
+                  .replace(/"/g, '')     // remove quotes
+                  .replace(/[\[\]]/g, '') // remove brackets
+                  .split(',')            // split by comma
+                  .map(c => c.trim())
+                  .filter(c => c.length > 0);
+              } else if (!Array.isArray(containers)) {
+                containers = [];
+              }
+
+              // Now call your function with cleaned array
+              await updateLinkedContainersStatus(client, recvRow.id, syncedStatus, 'system');
+            } catch (containerErr) {
+              console.warn(`Failed to sync containers for receiver ${recvRow.id}:`, containerErr.message);
+              // Continue — don't rollback whole transaction
+            }
+          }
+        }
+
+        // Notification
+        try {
+          const updated = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
+          await sendNotification(updated.rows[0], `status_advanced_to_${nextStatus}`, {
+            reason: 'Manual advance',
+            syncedOrders: syncOrderIds.length,
+            syncedStatus
+          });
+        } catch (notifErr) {
+          console.warn('Notification failed:', notifErr);
+        }
+
+      } catch (innerErr) {
+        throw innerErr;
+      }
+    });
+
+    res.json({
+      success: true,
+      message: `Status advanced to "${nextStatus}"`,
+      data: {
+        previousStatus: currentStatus,
+        newStatus: nextStatus,
+        syncedStatus: syncedStatus,
+        newEta: consignmentEta,
+        affectedOrders: syncOrderIds.length
+      }
+    });
+
+  } catch (err) {
+    console.error("Error advancing status:", err.stack || err);
+    res.status(500).json({ error: 'Failed to advance status' });
+  }
+}
+
+
+// export async function advanceStatus(req, res) {
+//   console.log("Advance Status Request Params:", req.params);    
+//   try {
+//     const { id } = req.params;
+//     const numericId = parseInt(id, 10);
+//     if (isNaN(numericId) || numericId <= 0) {
+//       return res.status(400).json({ error: 'Invalid consignment ID.' });
+//     }
+
+//     const { rows } = await pool.query('SELECT status FROM consignments WHERE id = $1', [numericId]);
+//     if (rows.length === 0) {
+//       return res.status(404).json({ error: 'Consignment not found' });
+//     }
+
+//     const currentStatus = rows[0].status;
+
+//     // Your existing nextStatusMap (keep unchanged)
+//     const nextStatusMap = {
+//       'Drafts Cleared': 'Submitted On Vessel',
+//       'Submitted On Vessel': 'Customs Cleared',
+//       'Customs Cleared': 'Submitted',
+//       'Submitted': 'Under Shipment Processing',
+//       'Under Shipment Processing': 'In Transit',
+//       'In Transit': 'Arrived at Facility',
+//       'Arrived at Facility': 'Ready for Delivery',
+//       'Ready for Delivery': 'Arrived at Destination',
+//       'Arrived at Destination': 'Delivered',
+//       // ... keep the rest
+//     };
+
+//     const nextStatus = nextStatusMap[currentStatus];
+//     if (!nextStatus) {
+//       return res.status(400).json({ error: `No next status from ${currentStatus}` });
+//     }
+
+//     const mapping = CONSIGNMENT_TO_STATUS_MAP[nextStatus];
+//     if (!mapping) {
+//       console.warn(`No mapping defined for consignment status: ${nextStatus}`);
+//     }
+
+//     let updateError = null;
+
+//     await withTransaction(async (client) => {
+//       try {
+//         // 1. Update consignment status
+//         let consignmentEta = null;
+//         if (mapping && nextStatus !== 'Delivered') {
+//           const etaResult = await calculateETA(client, mapping.shipment);
+//           consignmentEta = etaResult.eta;
+//         } else if (nextStatus === 'Delivered') {
+//           consignmentEta = new Date().toISOString().split('T')[0];
+//         }
+
+//         await client.query(
+//           'UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
+//           [nextStatus, consignmentEta, numericId]
+//         );
+
+//         // 2. Log tracking
+//         await safeLogToTracking(client, numericId, 'status_advanced', {
+//           from: currentStatus,
+//           to: nextStatus,
+//           newEta: consignmentEta,
+//           reason: 'Manual advance'
+//         });
+
+//         // 3. Sync linked orders → receivers → containers
+//         if (mapping) {
+//           const orderIdsQuery = await client.query('SELECT orders FROM consignments WHERE id = $1', [numericId]);
+//           let rawOrders = orderIdsQuery.rows[0]?.orders || [];
+//           if (typeof rawOrders === 'string') rawOrders = JSON.parse(rawOrders || '[]');
+
+//           const syncOrderIds = extractOrderIds(rawOrders)
+//             .map(oid => parseInt(oid, 10))
+//             .filter(oid => !isNaN(oid) && oid > 0);
+
+//           if (syncOrderIds.length > 0) {
+//             // Update orders (optional)
+//             await client.query(
+//               'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])',
+//               [nextStatus, syncOrderIds]
+//             );
+
+//             // Update ALL receivers: correct shipment status
+//             await client.query(
+//               `UPDATE receivers 
+//                SET status = $1, updated_at = CURRENT_TIMESTAMP
+//                WHERE order_id = ANY($2::int[])`,
+//               [mapping.shipment, syncOrderIds]
+//             );
+
+//             // Recalculate ETA for each receiver using eta_config table
+//             const etaResult = await calculateETA(client, mapping.shipment);
+
+//             await client.query(
+//               `UPDATE receivers 
+//                SET eta = $1, updated_at = CURRENT_TIMESTAMP
+//                WHERE order_id = ANY($2::int[])`,
+//               [etaResult.eta, syncOrderIds]
+//             );
+
+//             // Sync containers via existing function
+//             const receiversResult = await client.query(
+//               'SELECT id FROM receivers WHERE order_id = ANY($1::int[])',
+//               [syncOrderIds]
+//             );
+
+//             for (const row of receiversResult.rows) {
+//               await updateLinkedContainersStatus(client, row.id, mapping.shipment, 'system');
+//             }
+//           }
+//         }
+
+//         // Notification (non-critical)
+//         try {
+//           const updated = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
+//           await sendNotification(updated.rows[0], `status_advanced_to_${nextStatus}`, { reason: 'Manual advance' });
+//         } catch (notifErr) {
+//           console.warn(`Notification failed:`, notifErr);
+//         }
+
+//       } catch (updateErr) {
+//         updateError = updateErr;
+//         if (updateErr.code === '22P02') {
+//           console.warn(`Enum violation for '${nextStatus}'`);
+//         } else {
+//           throw updateErr;
+//         }
+//       }
+//     });
+
+//     if (updateError && updateError.code === '22P02') {
+//       return res.status(409).json({ error: `Status '${nextStatus}' not in DB enum.` });
+//     }
+
+//     res.json({ 
+//       message: `Status advanced to ${nextStatus}`,
+//       data: { newStatus: nextStatus, previousStatus: currentStatus }
+//     });
+
+//   } catch (err) {
+//     console.error("Error advancing status:", err);
+//     res.status(500).json({ error: 'Failed to advance status' });
+//   }
+// }
 // Enhanced calculateETA (returns { eta, daysUntil }; uses exact status match from eta_config table)
 async function calculateETA(client, status, baseDate = new Date()) {  // Dynamic: Use current date as base
   try {
@@ -3229,6 +3790,24 @@ export async function updateReceiverStatus(req, res) {
   } finally {
     if (client) client.release();
   }
+}
+
+
+
+function mapReceiverStatusToContainerStatus(receiverStatus) {
+  const map = {
+    'Shipment Processing': 'Shipment Processing',
+    'Shipment In Transit': 'In Transit',
+    'Ready for Delivery': 'Ready for Delivery',
+    'Under Processing': 'Under Processing',
+    'Loaded Into Container': 'Loaded',
+    'Ready for Loading': 'Ready for Loading',
+    'Order Created': 'Created',
+    'Created': 'Created',
+    'Arrived at Sort Facility': 'Arrived at Sort Facility',
+    'Shipment Delivered': 'Delivered',
+  };
+  return map[receiverStatus] || receiverStatus; // fallback
 }
 
 // NEW: Helper to update container status based on receiver status (insert new history entry)
@@ -5465,207 +6044,762 @@ async function handleAutoTransitions(client, orderId, newStatus) {
   // await client.query('UPDATE orders SET status = \'In Process\' WHERE id = $1', [orderId]);
   // Extend for other rules (e.g., cron for reminders)
 }
-
-export async function getOrderByTrackingId(req, res) {
-  try {
-    const { trackingId } = req.params; // e.g., consignment_number
-    if (!trackingId || !trackingId.trim()) {
-      return res.status(400).json({ error: 'Tracking ID is required' });
-    }
-
-    // Enhanced SELECT with receiver aggregations (similar to getOrders)
-    let selectFields = [
-      'o.*',
-      's.sender_name, s.sender_contact, s.sender_email', // Limited sender info for receiver view
-      't.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date',
-      'ot.status AS tracking_status, ot.created_time AS tracking_created_time',
-      'ot.container_id',
-      'cm.container_number',
-      // Receiver details (full for the matched receiver)
-      'r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, r.consignment_number, r.total_weight, r.status AS receiver_status',
-      'rs.other_receivers_summary', // Summary of other receivers if multiple
-      'rc.receiver_containers_json'
-    ].join(', ');
-
-    // Base joins + receivers and containers (filter by consignment_number)
-    let joins = `
-      LEFT JOIN senders s ON o.id = s.order_id
-      LEFT JOIN transport_details t ON o.id = t.order_id
-      LEFT JOIN receivers r ON o.id = r.order_id AND r.consignment_number ILIKE $2  -- Filter by trackingId
-      LEFT JOIN LATERAL (
-        SELECT ot2.status, ot2.created_time, ot2.container_id
-        FROM order_tracking ot2 
-        WHERE ot2.order_id = o.id AND ot2.consignment_number ILIKE $2  -- Also filter tracking
-        ORDER BY ot2.created_time DESC LIMIT 1
-      ) ot ON true
-      LEFT JOIN container_master cm ON ot.container_id = cm.cid
-      LEFT JOIN LATERAL (
-        SELECT STRING_AGG(DISTINCT r2.receiver_name, ', ' ORDER BY r2.receiver_name) AS other_receivers_summary
-        FROM receivers r2
-        WHERE r2.order_id = o.id AND r2.id != r.id  -- Exclude the matched receiver
-      ) rs ON true
-      LEFT JOIN LATERAL (
-        SELECT STRING_AGG(DISTINCT cont, ', ' ORDER BY cont) AS receiver_containers_json
-        FROM (
-          SELECT jsonb_array_elements_text(r.containers::jsonb) AS cont
-          WHERE r.order_id = o.id AND r.consignment_number ILIKE $2
-          AND r.containers IS NOT NULL AND r.containers != '[]' AND jsonb_array_length(r.containers::jsonb) > 0
-        ) sub
-      ) rc ON true
-    `;
-
-    // Build WHERE clause (base on receiver match)
-    let whereClause = 'WHERE r.id IS NOT NULL';  // Ensure a receiver matches the trackingId
-
-    // Main query (no pagination, single order)
-    const mainQuery = `
-      SELECT ${selectFields}
-      FROM orders o
-      ${joins}
-      ${whereClause}
-      GROUP BY o.id, s.sender_name, s.sender_contact, s.sender_email,
-               t.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date,
-               ot.status, ot.created_time, ot.container_id, cm.container_number,
-               r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, r.consignment_number, r.total_weight, r.status,
-               rs.other_receivers_summary, rc.receiver_containers_json
-      ORDER BY o.created_at DESC
-    `;
-    const queryParams = [trackingId];  // $1 for trackingId in ILIKE
-
-    console.log('Generated tracking query:', mainQuery);  // Debug
-    const orderResult = await pool.query(mainQuery, queryParams);
-
-    if (orderResult.rowCount === 0) {
-      return res.status(404).json({ error: 'Order not found for this tracking ID' });
-    }
-
-    const order = orderResult.rows[0];
-
-    // Derive overall_status (latest tracking or receiver status)
-    const derivedStatus = order.tracking_status || order.receiver_status || order.status || 'Created';
-
-    // Enrich with color (reuse getOrderStatusColor if defined elsewhere)
-    const enrichedOrder = {
-      ...order,
-      overall_status: derivedStatus,
-      color: getOrderStatusColor ? getOrderStatusColor(derivedStatus) : '#default'  // Assume function exists
-    };
-
-    console.log(`Tracked order by ID ${trackingId}:`, enrichedOrder.booking_ref);
-
-    res.json({
-      data: enrichedOrder,
-      message: 'Order tracked successfully'
-    });
-  } catch (err) {
-    console.error('Error tracking order:', err);
-    if (err.code === '42P01' || err.code === '42703') {
-      return res.status(500).json({ error: 'Database schema mismatch. Check table/column names.' });
-    }
-    res.status(500).json({ error: 'Failed to track order', details: err.message });
-  }
-}
-
 export async function getOrderByItemRef(req, res) {
-  try { 
-    const { itemRef } = req.params; // e.g., item_ref
-    if (!itemRef || !itemRef.trim()) {
-      return res.status(400).json({ error: 'Item Reference is required' });
-    }
+  const { ref } = req.params;
 
-    // Enhanced SELECT with receiver aggregations (similar to getOrders)
-    let selectFields = [
-      'o.*',
-      's.sender_name, s.sender_contact, s.sender_email', // Limited sender info for receiver view
-      't.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date',
-      'ot.status AS tracking_status, ot.created_time AS tracking_created_time',
-      'ot.container_id',
-      'cm.container_number',
-      // Receiver details (full for the matched receiver, item_ref from order_items)
-      'r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, oi.item_ref, oi.total_weight AS receiver_total_weight, r.status AS receiver_status',
-      // Additional order_items fields for all values
-      'oi.category, oi.subcategory, oi.type, oi.pickup_location, oi.delivery_address, oi.total_number, oi.weight, oi.consignment_status, oi.shipping_line',
-      'rs.other_receivers_summary', // Summary of other receivers if multiple
-      'rc.receiver_containers_json'
-    ].join(', ');
+  if (!ref || typeof ref !== 'string' || ref.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      message: 'Item reference is required'
+    });
+  }
 
-    // Base joins + receivers and containers (filter by item_ref in order_items)
-    let joins = `
-      LEFT JOIN senders s ON o.id = s.order_id
-      LEFT JOIN transport_details t ON o.id = t.order_id
-      LEFT JOIN order_items oi ON o.id = oi.order_id AND oi.item_ref ILIKE $1  -- Filter by itemRef in order_items
-      LEFT JOIN receivers r ON oi.receiver_id = r.id  -- Link to receiver via receiver_id FK
-      LEFT JOIN LATERAL (
-        SELECT ot2.status, ot2.created_time, ot2.container_id
-        FROM order_tracking ot2 
-        WHERE ot2.order_id = o.id AND ot2.receiver_id = r.id  -- Link via receiver_id
-        ORDER BY ot2.created_time DESC LIMIT 1
-      ) ot ON true
-      LEFT JOIN container_master cm ON ot.container_id = cm.cid
-      LEFT JOIN LATERAL (
-        SELECT STRING_AGG(DISTINCT r2.receiver_name, ', ' ORDER BY r2.receiver_name) AS other_receivers_summary
-        FROM receivers r2
-        WHERE r2.order_id = o.id AND r2.id != COALESCE(r.id, 0)  -- Exclude the matched receiver (handle null)
-      ) rs ON true
-      LEFT JOIN LATERAL (
-        SELECT STRING_AGG(DISTINCT (elem -> 'container' ->> 'container_number'), ', ' ORDER BY (elem -> 'container' ->> 'container_number')) AS receiver_containers_json
-        FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) AS elem
-        WHERE oi.container_details IS NOT NULL AND jsonb_array_length(oi.container_details) > 0
-      ) rc ON true
+  const pattern = `%${ref.trim().toUpperCase()}%`;
+
+  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern}"`);
+
+  try {
+    const query = `
+      SELECT 
+        o.id AS order_id,
+        o.booking_ref,
+        o.created_at,
+        o.status AS order_base_status,
+        o.eta,
+        o.etd,
+        o.place_of_loading,          -- added
+        o.place_of_delivery,         -- added
+        o.total_assigned_qty,
+        s.sender_name,
+        s.sender_contact,
+        s.sender_email,
+        t.transport_type,
+        t.drop_method,
+        t.delivery_date,
+        r.id AS receiver_id,
+        r.receiver_name,
+        r.receiver_contact,
+        r.receiver_email,
+        r.receiver_address,
+        r.status AS receiver_base_status,
+        r.eta AS receiver_eta,
+        r.containers AS receiver_containers,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object(
+              'drop_method', d.drop_method,
+              'dropoff_name', d.dropoff_name,
+              'drop_off_cnic', d.drop_off_cnic,
+              'drop_off_mobile', d.drop_off_mobile,
+              'plate_no', d.plate_no,
+              'drop_date', d.drop_date
+            ) ORDER BY d.id
+          )
+          FROM drop_off_details d
+          WHERE d.order_id = o.id 
+            AND (d.receiver_id = r.id OR d.receiver_id IS NULL)
+        ), '[]'::json) AS drop_off_details,
+        oi.id AS item_id,
+        oi.item_ref,
+        oi.category,
+        oi.subcategory,
+        oi.type,
+        oi.total_number,
+        oi.weight,
+        cah.id AS assignment_id,
+        cm.container_number,
+        cah.assigned_qty,
+        cah.status AS assign_status,
+        cah.created_at AS assign_created_at,
+        cah.notes AS assign_notes,
+        ct.id AS ct_tracking_id,
+        ct.new_status AS ct_new_status,
+        ct.timestamp AS ct_timestamp,
+        ct.details AS ct_details,
+        ct.event_type AS ct_event_type
+      FROM order_items oi
+      INNER JOIN orders o ON oi.order_id = o.id
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN receivers r ON oi.receiver_id = r.id
+      LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
+      LEFT JOIN container_master cm ON cm.cid = cah.cid
+      LEFT JOIN consignments c ON (
+        c.orders @> jsonb_build_array(o.id::text) OR
+        c.orders @> jsonb_build_array(o.id)
+      )
+      LEFT JOIN consignment_tracking ct ON ct.consignment_id = c.id
+        AND ct.event_type IN ('status_advanced', 'status_updated', 'status_auto_updated')
+      WHERE oi.item_ref ILIKE $1
+      ORDER BY o.created_at DESC, oi.id, cah.created_at, ct.timestamp DESC
     `;
 
-    // Build WHERE clause (base on order_items match)
-    let whereClause = 'WHERE oi.id IS NOT NULL';  // Ensure an order_item matches the itemRef
+    const { rows } = await pool.query(query, [pattern]);
 
-    // Main query (no pagination, single order; fetches all matching items' details)
-    const mainQuery = `
-      SELECT ${selectFields}
-      FROM orders o
-      ${joins}
-      ${whereClause}
-      GROUP BY o.id, s.sender_name, s.sender_contact, s.sender_email,
-               t.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date,
-               ot.status, ot.created_time, ot.container_id, cm.container_number,
-               r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, oi.item_ref, oi.total_weight, r.status,
-               oi.category, oi.subcategory, oi.type, oi.pickup_location, oi.delivery_address, oi.total_number, oi.weight, oi.consignment_status, oi.shipping_line,
-               rs.other_receivers_summary, rc.receiver_containers_json
-      ORDER BY o.created_at DESC
-    `;
-    const queryParams = [`%${itemRef}%`];  // For ILIKE partial matching (remove % for exact)
-
-    console.log('Generated item_ref query:', mainQuery, 'Params:', queryParams);  // Enhanced debug
-    const orderResult = await pool.query(mainQuery, queryParams);
-
-    if (orderResult.rowCount === 0) {
-      return res.status(404).json({ error: 'Order not found for this Item Reference' });
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No items found matching reference "${ref.trim()}"`
+      });
     }
 
-    // Since multiple items possible per order, return array of enriched items
-    const enrichedItems = orderResult.rows.map(row => {
-      const derivedStatus = row.tracking_status || row.receiver_status || row.status || 'Created';
+    // ────────────────────────────────────────────────
+    // Group into clean nested structure
+    // ────────────────────────────────────────────────
+    const orderMap = {};
+
+    rows.forEach(row => {
+      const orderId = row.order_id;
+
+      if (!orderMap[orderId]) {
+        orderMap[orderId] = {
+          order_id: orderId,
+          booking_ref: row.booking_ref,
+          created_at: row.created_at,
+          status: row.order_base_status,
+          eta: row.eta,
+          etd: row.etd,
+          place_of_loading: row.place_of_loading || null,     // added here
+          place_of_delivery: row.place_of_delivery || null,   // added here
+          total_assigned_qty: row.total_assigned_qty || 0,
+          sender: {
+            name: row.sender_name || '—',
+            contact: row.sender_contact || '—',
+            email: row.sender_email || '—'
+          },
+          transport: {
+            type: row.transport_type || '—',
+            drop_method: row.drop_method || '—',
+            delivery_date: row.delivery_date || '—'
+          },
+          receivers: {}
+        };
+      }
+
+      const ord = orderMap[orderId];
+
+      const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
+
+      if (!ord.receivers[recvKey]) {
+        const statusSequence = [
+          'Order Created',
+          'Ready for Loading',
+          'Loaded Into Container',
+          'Shipment Processing',
+          'Shipment In Transit',
+          'Under Processing',
+          'Arrived at Sort Facility',
+          'Ready for Delivery',
+          'Shipment Delivered'
+        ];
+
+        const receiverCurrent = row.receiver_base_status || 'Order Created';
+        const currentIdx = statusSequence.indexOf(receiverCurrent);
+        const remaining = currentIdx === -1 || currentIdx >= statusSequence.length - 1
+          ? []
+          : statusSequence.slice(currentIdx + 1);
+
+        ord.receivers[recvKey] = {
+          receiver_id: row.receiver_id || null,
+          name: row.receiver_name || 'Unassigned',
+          contact: row.receiver_contact || '—',
+          email: row.receiver_email || '—',
+          address: row.receiver_address || '—',
+          status: receiverCurrent,
+          eta: row.receiver_eta || null,
+          containers: row.receiver_containers || [],
+          drop_off_details: row.drop_off_details || [],
+          items: {},
+          current_status: receiverCurrent,
+          status_history: [],
+          remaining_status_steps: remaining
+        };
+      }
+
+      const recv = ord.receivers[recvKey];
+
+      // Add consignment tracking entries
+      if (row.ct_tracking_id && !recv.status_history.some(h => h.tracking_id === row.ct_tracking_id)) {
+        recv.status_history.push({
+          tracking_id: row.ct_tracking_id,
+          status: row.ct_new_status,
+          time: row.ct_timestamp,
+          event_type: row.ct_event_type,
+          details: row.ct_details || {},
+          notes: (row.ct_details?.notes || '') + 
+                (row.ct_details?.reason ? ` (${row.ct_details.reason})` : '') +
+                (row.ct_details?.location ? ` at ${row.ct_details.location}` : '')
+        });
+      }
+
+      if (row.item_id) {
+        if (!recv.items[row.item_id]) {
+          const total = Number(row.total_number) || 0;
+          const assigned = rows
+            .filter(r => r.item_id === row.item_id)
+            .reduce((sum, r) => sum + (Number(r.assigned_qty) || 0), 0);
+
+          recv.items[row.item_id] = {
+            item_id: row.item_id,
+            item_ref: row.item_ref || '—',
+            category: row.category || '—',
+            subcategory: row.subcategory || '—',
+            type: row.type || '—',
+            total_number: total,
+            weight: Number(row.weight) || 0,
+            assigned_qty: assigned,
+            remaining_items: total - assigned,
+            progress_percent: total > 0 ? Math.round((assigned / total) * 100) : 0,
+            assignments: []
+          };
+        }
+
+        if (row.assignment_id) {
+          recv.items[row.item_id].assignments.push({
+            assignment_id: row.assignment_id,
+            container_number: row.container_number || '—',
+            assigned_qty: Number(row.assigned_qty) || 0,
+            status: row.assign_status || '—',
+            created_at: row.assign_created_at,
+            notes: row.assign_notes || ''
+          });
+        }
+      }
+    });
+
+    // Finalize response
+    const result = Object.values(orderMap).map(order => {
+      Object.values(order.receivers).forEach(recv => {
+        recv.status_history.sort((a, b) => new Date(b.time) - new Date(a.time));
+
+        if (recv.status_history.length > 0) {
+          recv.current_status = recv.status_history[0].status;
+        }
+      });
+
       return {
-        ...row,
-        overall_status: derivedStatus,
-        color: getOrderStatusColor ? getOrderStatusColor(derivedStatus) : '#default'  // Assume function exists
+        ...order,
+        receivers: Object.values(order.receivers).map(r => ({
+          ...r,
+          items: Object.values(r.items)
+        }))
       };
     });
 
-    console.log(`Tracked ${enrichedItems.length} items by Ref ${itemRef}:`, enrichedItems[0]?.booking_ref);
+    res.json({
+      success: true,
+      data: result.length === 1 ? result[0] : result,
+      count: result.length,
+      message: `Found ${result.length} order(s) containing item reference matching "${ref.trim()}"`
+    });
+
+  } catch (err) {
+    console.error('getOrderByItemRef error:', err.stack || err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch item tracking details',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+}
+export async function getOrderByTrackingId(req, res) {
+ const { id } = req.params;  // ← change 'number' to the real name (e.g. 'id', 'consignment', etc.)
+
+  if (!id?.trim()) {
+    return res.status(400).json({ success: false, message: 'Consignment number required' });
+  }
+
+  const consNumber = id.trim().toUpperCase();
+  try {
+    // 1. Fetch consignment core data
+    const consRes = await pool.query(`
+      SELECT 
+        c.id AS consignment_id,
+        c.consignment_number,
+        c.status AS consignment_status,
+        c.eta AS consignment_eta,
+        c.origin,
+        c.destination,
+        c.shipping_line,
+        c.vessel,
+        c.voyage,
+        c.seal_no,
+        c.net_weight,
+        c.gross_weight,
+        c.consignment_value,
+        c.currency_code,
+        c.containers
+      FROM consignments c
+      WHERE c.consignment_number = $1
+    `, [consNumber]);
+
+    if (consRes.rowCount === 0) {
+      return res.status(404).json({ success: false, message: 'Consignment not found' });
+    }
+
+    const cons = consRes.rows[0];
+
+    // Parse containers safely
+    let containers = [];
+    try {
+      containers = typeof cons.containers === 'string' ? JSON.parse(cons.containers) : cons.containers || [];
+    } catch (e) {
+      console.warn('Invalid consignment containers JSON:', e);
+    }
+
+    // 2. Find linked order IDs
+    const orderIdsRes = await pool.query(`
+      SELECT jsonb_array_elements_text(c.orders)::int AS order_id
+      FROM consignments c
+      WHERE c.id = $1
+    `, [cons.consignment_id]);
+
+    const orderIds = orderIdsRes.rows.map(r => r.order_id).filter(id => id > 0);
+
+    let orders = [];
+
+    if (orderIds.length > 0) {
+      const ordersRes = await pool.query(`
+        SELECT 
+          o.id AS order_id,
+          o.booking_ref,
+          o.created_at,
+          o.status,
+          o.eta,
+          o.etd,
+          t.collection_scope,
+          o.total_assigned_qty,
+          s.sender_name,
+          s.sender_contact,
+          s.sender_email,
+          t.transport_type,
+          t.drop_method,
+          t.delivery_date,
+          r.id AS receiver_id,
+          r.receiver_name,
+          r.receiver_contact,
+          r.receiver_email,
+          r.receiver_address,
+          r.status AS receiver_status,
+          r.eta AS receiver_eta,
+          r.containers AS receiver_containers,
+          -- Aggregate drop_off_details per receiver
+          COALESCE((
+            SELECT json_agg(
+              json_build_object(
+                'drop_method', d.drop_method,
+                'dropoff_name', d.dropoff_name,
+                'drop_off_cnic', d.drop_off_cnic,
+                'drop_off_mobile', d.drop_off_mobile,
+                'plate_no', d.plate_no,
+                'drop_date', d.drop_date
+              ) ORDER BY d.id
+            )
+            FROM drop_off_details d
+            WHERE d.order_id = o.id 
+              AND (d.receiver_id = r.id OR d.receiver_id IS NULL)
+          ), '[]'::json) AS drop_off_details,
+          oi.id AS item_id,
+          oi.item_ref,
+          oi.category,
+          oi.subcategory,
+          oi.type,
+          oi.total_number,
+          oi.weight,
+          cah.id AS assignment_id,
+          cm.container_number,
+          cah.assigned_qty,
+          cah.status AS assign_status,
+          cah.created_at AS assign_created_at,
+          cah.notes AS assign_notes
+        FROM orders o
+        LEFT JOIN senders s ON s.order_id = o.id
+        LEFT JOIN transport_details t ON t.order_id = o.id
+        LEFT JOIN receivers r ON r.order_id = o.id
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.receiver_id = r.id
+        LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
+        LEFT JOIN container_master cm ON cm.cid = cah.cid
+        WHERE o.id = ANY($1)
+        ORDER BY o.id, r.id, oi.id, cah.created_at
+      `, [orderIds]);
+
+      // ────────────────────────────────────────────────
+      // Group into nested structure
+      // ────────────────────────────────────────────────
+      const orderMap = {};
+
+      ordersRes.rows.forEach(row => {
+        const orderId = row.order_id;
+
+        if (!orderMap[orderId]) {
+          orderMap[orderId] = {
+            order_id: orderId,
+            booking_ref: row.booking_ref,
+            created_at: row.created_at,
+            status: row.status,
+            overall_status: row.status || 'Created', // temporary fallback
+            eta: row.eta,
+            etd: row.etd,
+            collection_scope: row.collection_scope || '—',
+            total_assigned_qty: row.total_assigned_qty || 0,
+            sender: {
+              name: row.sender_name || '—',
+              contact: row.sender_contact || '—',
+              email: row.sender_email || '—'
+            },
+            transport: {
+              type: row.transport_type || '—',
+              drop_method: row.drop_method || '—',
+              delivery_date: row.delivery_date || '—'
+            },
+            receivers: {},
+            summary: {
+              total_items: 0,
+              total_weight: 0,
+              total_assigned: 0,
+              active_containers: new Set()
+            }
+          };
+        }
+
+        const ord = orderMap[orderId];
+
+        // Update summary
+        if (row.total_number) {
+          ord.summary.total_items += Number(row.total_number);
+          ord.summary.total_weight += Number(row.weight || 0);
+        }
+        if (row.container_number) {
+          ord.summary.active_containers.add(row.container_number);
+        }
+        ord.summary.total_assigned += Number(row.assigned_qty || 0);
+
+        // Receiver grouping
+        const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
+        if (!ord.receivers[recvKey]) {
+          ord.receivers[recvKey] = {
+            receiver_id: row.receiver_id || null,
+            name: row.receiver_name || 'Unassigned',
+            contact: row.receiver_contact || '—',
+            email: row.receiver_email || '—',
+            address: row.receiver_address || '—',
+            status: row.receiver_status || '—',
+            eta: row.receiver_eta || null,
+            containers: row.receiver_containers || [],
+            drop_off_details: row.drop_off_details || [],
+            items: {}
+          };
+        }
+
+        const recv = ord.receivers[recvKey];
+
+        if (row.item_id) {
+          if (!recv.items[row.item_id]) {
+            recv.items[row.item_id] = {
+              item_id: row.item_id,
+              item_ref: row.item_ref || '—',
+              category: row.category || '—',
+              subcategory: row.subcategory || '—',
+              type: row.type || '—',
+              total_number: Number(row.total_number) || 0,
+              weight: Number(row.weight) || 0,
+              assignments: []
+            };
+          }
+
+          if (row.assignment_id) {
+            recv.items[row.item_id].assignments.push({
+              assignment_id: row.assignment_id,
+              container_number: row.container_number || '—',
+              assigned_qty: Number(row.assigned_qty) || 0,
+              status: row.assign_status || '—',
+              created_at: row.assign_created_at,
+              notes: row.assign_notes || ''
+            });
+          }
+        }
+      });
+
+      // Finalize each order
+      const result = Object.values(orderMap).map(order => {
+        // Compute real progress
+        let totalItems = 0;
+        let totalAssigned = 0;
+        order.receivers = Object.values(order.receivers).map(r => {
+          Object.values(r.items).forEach(item => {
+            totalItems += item.total_number;
+            totalAssigned += item.assignments.reduce((s, a) => s + a.assigned_qty, 0);
+          });
+          return r;
+        });
+
+        order.summary = {
+          ...order.summary,
+          total_items: totalItems,
+          total_assigned: totalAssigned,
+          progress_percent: totalItems > 0 ? Math.round((totalAssigned / totalItems) * 100) : 0,
+          active_containers: Array.from(order.summary.active_containers)
+        };
+
+        // Smarter overall_status from receivers
+        const receiverStatuses = Object.values(order.receivers).map(r => r.status || '');
+        const statusOrder = ['Delivered', 'Shipment In Transit', 'In Transit', 'Under Shipment Processing', 'Loaded Into Container', 'Ready for Loading', 'In Process', 'Created'];
+        const highest = receiverStatuses.reduce((best, curr) => {
+          const pri = statusOrder.indexOf(curr);
+          const bestPri = statusOrder.indexOf(best);
+          return pri > bestPri ? curr : best;
+        }, order.status || 'Created');
+
+        order.overall_status = highest;
+
+        return {
+          ...order,
+          receivers: Object.values(order.receivers).map(r => ({
+            ...r,
+            items: Object.values(r.items)
+          }))
+        };
+      });
+
+      res.json({
+        success: true,
+        data: {
+          consignment: {
+            id: cons.consignment_id,
+            number: cons.consignment_number,
+            status: cons.consignment_status,
+            eta: cons.consignment_eta,
+            origin: cons.origin,
+            destination: cons.destination,
+            shipping_line: cons.shipping_line,
+            vessel: cons.vessel,
+            voyage: cons.voyage,
+            seal_no: cons.seal_no,
+            net_weight: cons.net_weight,
+            gross_weight: cons.gross_weight,
+            value: cons.consignment_value,
+            currency: cons.currency_code,
+            containers
+          },
+          orders: result,
+          summary: {
+            order_count: result.length,
+            total_assigned: result.reduce((s, o) => s + o.total_assigned_qty, 0),
+            total_items: result.reduce((s, o) => s + (o.summary?.total_items || 0), 0),
+            progress_percent: result.length > 0 
+              ? Math.round(result.reduce((s, o) => s + (o.summary?.progress_percent || 0), 0) / result.length)
+              : 0,
+            active_containers: [...new Set(result.flatMap(o => o.summary?.active_containers || []))],
+            latest_activity: result.reduce((m, o) => o.created_at > m ? o.created_at : m, '1970-01-01')
+          }
+        }
+      });
+
+  }
+ } catch (err) {
+    console.error('getOrderByTrackingId error:', err.stack || err);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while tracking consignment',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+}
+
+export async function getOrderByOrderId(req, res) {
+  const { ref } = req.params;
+
+  if (!ref || typeof ref !== 'string' || ref.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      message: 'Order reference (ID or booking ref) is required'
+    });
+  }
+
+  const search = ref.trim();
+  const isNumeric = !isNaN(Number(search)) && Number.isInteger(Number(search));
+
+  try {
+    const query = `
+      SELECT 
+        o.id AS order_id,
+        o.booking_ref,
+        o.created_at,
+        o.status,
+        o.eta,
+        o.etd,
+        t.collection_scope,
+        o.total_assigned_qty,
+        s.sender_name,
+        s.sender_contact,
+        s.sender_email,
+        t.transport_type,
+        t.drop_method,
+        t.delivery_date,
+        r.id AS receiver_id,
+        r.receiver_name,
+        r.receiver_contact,
+        r.receiver_email,
+        r.receiver_address,
+        r.status AS receiver_status,
+        r.eta AS receiver_eta,
+        r.containers AS receiver_containers,
+        -- Aggregate drop_off_details per receiver
+        COALESCE((
+          SELECT json_agg(
+            json_build_object(
+              'drop_method', d.drop_method,
+              'dropoff_name', d.dropoff_name,
+              'drop_off_cnic', d.drop_off_cnic,
+              'drop_off_mobile', d.drop_off_mobile,
+              'plate_no', d.plate_no,
+              'drop_date', d.drop_date
+            ) ORDER BY d.id
+          )
+          FROM drop_off_details d
+          WHERE d.order_id = o.id 
+            AND (d.receiver_id = r.id OR d.receiver_id IS NULL)
+        ), '[]'::json) AS drop_off_details,
+        oi.id AS item_id,
+        oi.item_ref,
+        oi.category,
+        oi.subcategory,
+        oi.type,
+        oi.total_number,
+        oi.weight,
+        cah.id AS assignment_id,
+        cm.container_number,
+        cah.assigned_qty,
+        cah.status AS assign_status,
+        cah.created_at AS assign_created_at,
+        cah.notes AS assign_notes
+      FROM orders o
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN receivers r ON r.order_id = o.id
+      LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.receiver_id = r.id
+      LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
+      LEFT JOIN container_master cm ON cm.cid = cah.cid
+      WHERE ${isNumeric ? 'o.id = $1' : 'o.booking_ref ILIKE $1'}
+         OR o.booking_ref ILIKE $2
+      ORDER BY o.id, r.id, oi.id, cah.created_at
+    `;
+
+    const params = isNumeric 
+      ? [Number(search), `%${search}%`] 
+      : [`%${search}%`, `%${search}%`];
+
+    const { rows } = await pool.query(query, params);
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No order found for reference "${search}"`
+      });
+    }
+
+    // ────────────────────────────────────────────────
+    // Group into nested structure
+    // ────────────────────────────────────────────────
+    const orderMap = {};
+
+    rows.forEach(row => {
+      const orderId = row.order_id;
+
+      if (!orderMap[orderId]) {
+        orderMap[orderId] = {
+          order_id: orderId,
+          booking_ref: row.booking_ref,
+          created_at: row.created_at,
+          status: row.status,
+          overall_status: row.status || 'Created',
+          eta: row.eta,
+          etd: row.etd,
+          collection_scope: row.collection_scope || '—',
+          total_assigned_qty: row.total_assigned_qty || 0,
+          sender: {
+            name: row.sender_name || '—',
+            contact: row.sender_contact || '—',
+            email: row.sender_email || '—'
+          },
+          transport: {
+            type: row.transport_type || '—',
+            drop_method: row.drop_method || '—',
+            delivery_date: row.delivery_date || '—'
+          },
+          receivers: {}
+        };
+      }
+
+      const ord = orderMap[orderId];
+
+      const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
+
+      if (!ord.receivers[recvKey]) {
+        ord.receivers[recvKey] = {
+          receiver_id: row.receiver_id || null,
+          name: row.receiver_name || 'Unassigned',
+          contact: row.receiver_contact || '—',
+          email: row.receiver_email || '—',
+          address: row.receiver_address || '—',
+          status: row.receiver_status || '—',
+          eta: row.receiver_eta || null,
+          containers: row.receiver_containers || [],
+          drop_off_details: row.drop_off_details || [],  // ← now aggregated JSON
+          items: {}
+        };
+      }
+
+      const recv = ord.receivers[recvKey];
+
+      if (row.item_id) {
+        if (!recv.items[row.item_id]) {
+          recv.items[row.item_id] = {
+            item_id: row.item_id,
+            item_ref: row.item_ref || '—',
+            category: row.category || '—',
+            subcategory: row.subcategory || '—',
+            type: row.type || '—',
+            total_number: Number(row.total_number) || 0,
+            weight: Number(row.weight) || 0,
+            assignments: []
+          };
+        }
+
+        if (row.assignment_id) {
+          recv.items[row.item_id].assignments.push({
+            assignment_id: row.assignment_id,
+            container_number: row.container_number || '—',
+            assigned_qty: Number(row.assigned_qty) || 0,
+            status: row.assign_status || '—',
+            created_at: row.assign_created_at,
+            notes: row.assign_notes || ''
+          });
+        }
+      }
+    });
+
+    const result = Object.values(orderMap).map(order => ({
+      ...order,
+      receivers: Object.values(order.receivers).map(receiver => ({
+        ...receiver,
+        items: Object.values(receiver.items)
+      }))
+    }));
 
     res.json({
-      data: enrichedItems,  // Array of all matching items
-      message: 'Items tracked successfully'
+      success: true,
+      data: result.length === 1 ? result[0] : result,
+      message: `Found ${result.length} matching order(s)`
     });
+
   } catch (err) {
-    console.error('Error tracking order by item_ref:', err);
-    if (err.code === '42P01') {
-      return res.status(500).json({ error: 'Undefined table. Verify "order_items" exists.' });
-    } else if (err.code === '42883') {
-      return res.status(500).json({ error: 'Function mismatch (e.g., JSON unnesting). Check container_details structure.' });
-    } else if (err.code === '42703') {
-      return res.status(500).json({ error: 'Undefined column. Check "item_ref" in "order_items" or "receiver_id" FK.' });
-    }
-    res.status(500).json({ error: 'Failed to track order', details: err.message });
+    console.error('trackByOrderRef error:', err.stack || err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order details',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 }
 // export async function getOrders(req, res) {
