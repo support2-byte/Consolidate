@@ -7,12 +7,11 @@ import {
   getConsignmentById,
   createConsignment,
   updateConsignment,
-  advanceStatus,
   deleteConsignment,
   getStatuses,
   calculateETAEndpoint
 } from '../consignment/consignment.controller.js'; // Adjust path as needed
-
+import { advanceStatus } from '../orders/order.controller.js'; // Import advanceStatus
 const router = express.Router();
 
 // GET /api/consignments - Fetch all consignments (with pagination and filters)
