@@ -19,7 +19,7 @@ function isValidDate(dateString) {
 function validateConsignmentFields({
   consignment_number, status, remarks, shipper, consignee, origin, destination,
   eform, eform_date, bank, consignment_value, paymentType, vessel, voyage,
-  eta, shippingLine, seal_no, netWeight, gross_weight, containers, orders
+  eta,  seal_no, netWeight, gross_weight, containers, orders
 }) {
   const errors = [];
   if (!consignment_number) errors.push('consignment_number');
@@ -38,7 +38,7 @@ function validateConsignmentFields({
   if (!voyage || voyage.length < 3) errors.push(`voyage (min 3 chars, got: "${voyage}")`);
   if (eta && !isValidDate(eta)) errors.push(`eta (got: "${eta}")`);
   // if (!shippingLine) errors.push('shippingLine');  // Optional? Adjust if needed
-  if (seal_no && seal_no.length < 3) errors.push(`seal_no (min 3 chars, got: "${seal_no}")`);  // Optional validation
+  // if (seal_no && seal_no.length < 3) errors.push(`seal_no (min 3 chars, got: "${seal_no}")`);  // Optional validation
   // if (netWeight === undefined || netWeight < 0 || isNaN(netWeight)) errors.push('netWeight (must be non-negative number)');
   // if (gross_weight === undefined || gross_weight < 0 || isNaN(gross_weight)) errors.push('gross_weight (must be non-negative number)');
   if (!Array.isArray(containers) || containers.length < 1) errors.push('containers (at least one required)');
@@ -1181,7 +1181,7 @@ export async function updateConsignment(req, res) {
       vessel: data.vessel,
       voyage: data.voyage,
       eta: data.eta,
-      shippingLine: data.shippingLine || data.shipping_line,
+      shipping_line_name: data.shippingLine || data.shipping_line,
       seal_no: data.seal_no || data.sealNo,
       netWeight: data.netWeight || data.net_weight,
       gross_weight: data.gross_weight || data.grossWeight,
@@ -1244,7 +1244,7 @@ export async function updateConsignment(req, res) {
       vessel: normalizedInput.vessel,
       voyage: normalizedInput.voyage,
       eta: normalizeDate(computedETA),
-      shipping_line: normalizedInput.shippingLine,
+      shipping_line_name: normalizedInput.shipping_line_name,
       seal_no: normalizedInput.seal_no,
       net_weight: normalizedInput.netWeight,
       gross_weight: normalizedInput.gross_weight,
