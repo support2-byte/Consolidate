@@ -23,11 +23,17 @@ const commonPorts = [
   'Port of Los Angeles'
 ];
 
-// GET Shippers
+// GET Shippers – now from third_parties
 export async function getShippers(req, res) {
   try {
-    const { rows } = await pool.query('SELECT id, name FROM shippers ORDER BY name ASC');
+    const { rows } = await pool.query(`
+      SELECT id, company_name AS name, address, contact_name, contact_email, contact_phone
+      FROM third_parties 
+    `);
+    console.log('shipeers rows',rows)
     const options = formatOptions(rows, 'id', 'name');
+    console.log('shipeers rows options',options)
+
     res.json({ shipperOptions: options });
   } catch (err) {
     console.error('Error fetching shippers:', err);
@@ -35,10 +41,16 @@ export async function getShippers(req, res) {
   }
 }
 
-// GET Consignees
+// GET Consignees – same pattern
 export async function getConsignees(req, res) {
   try {
-    const { rows } = await pool.query('SELECT id, name FROM consignees ORDER BY name ASC');
+    const { rows } = await pool.query(`
+      SELECT id, company_name AS name, address, contact_name, contact_email, contact_phone
+      FROM third_parties 
+      WHERE type = 'CONSIGNEE'
+      ORDER BY company_name ASC
+    `);
+    
     const options = formatOptions(rows, 'id', 'name');
     res.json({ consigneeOptions: options });
   } catch (err) {
@@ -46,18 +58,42 @@ export async function getConsignees(req, res) {
     res.status(500).json({ error: 'Failed to fetch consignees' });
   }
 }
-// GET Third Parties
-export async function getThirdParties(req, res) {
-  try {
-    const { rows } = await pool.query('SELECT * FROM third_parties ORDER BY company_name ASC');
-    res.json({ third_parties: rows });
-  } catch (err) {
-    console.error('Error fetching third parties:', err);
-    res.status(500).json({ error: 'Failed to fetch third parties' });
-  }
-}
 
-// POST Third Party
+// // GET Shippers
+// export async function getShippers(req, res) {
+//   try {
+//     const { rows } = await pool.query('SELECT id, name FROM shippers ORDER BY name ASC');
+//     const options = formatOptions(rows, 'id', 'name');
+//     res.json({ shipperOptions: options });
+//   } catch (err) {
+//     console.error('Error fetching shippers:', err);
+//     res.status(500).json({ error: 'Failed to fetch shippers' });
+//   }
+// }
+
+// // GET Consignees
+// export async function getConsignees(req, res) {
+//   try {
+//     const { rows } = await pool.query('SELECT id, name FROM consignees ORDER BY name ASC');
+//     const options = formatOptions(rows, 'id', 'name');
+//     res.json({ consigneeOptions: options });
+//   } catch (err) {
+//     console.error('Error fetching consignees:', err);
+//     res.status(500).json({ error: 'Failed to fetch consignees' });
+//   }
+// }
+// GET Third Parties
+  export async function getThirdParties(req, res) {
+    try {
+      const { rows } = await pool.query('SELECT * FROM third_parties ORDER BY company_name ASC');
+      res.json({ third_parties: rows });
+    } catch (err) {
+      console.error('Error fetching third parties:', err);
+      res.status(500).json({ error: 'Failed to fetch third parties' });
+    }
+  }
+
+// // POST Third Party
 export async function createThirdParty(req, res) {
   try {
     const { company_name, contact_name, contact_email, contact_phone, address, type } = req.body;
