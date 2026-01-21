@@ -51,10 +51,10 @@ function validateContainers(containers) {
   return containers.map((container, index) => {
     const errors = [];
     if (!container.containerNo) errors.push(`containers[${index}].containerNo`);
-    if (!container.size) errors.push(`containers[${index}].size`);
-    if (container.numberOfDays !== undefined && (isNaN(container.numberOfDays) || container.numberOfDays < 0)) {
-      errors.push(`containers[${index}].numberOfDays (must be non-negative number)`);
-    }
+    // if (!container.size) errors.push(`containers[${index}].size`);
+    // if (container.numberOfDays !== undefined && (isNaN(container.numberOfDays) || container.numberOfDays < 0)) {
+      // errors.push(`containers[${index}].numberOfDays (must be non-negative number)`);
+    // }
     return { index, errors };
   }).filter(item => item.errors.length > 0);
 }
@@ -406,99 +406,99 @@ export async function calculateETA(pool, status) {
 
 export async function getConsignmentById(req, res) {
   console.log('Fetching consignment:', req.params);
+
   try {
     const { id } = req.params;
-    const { autoSync = 'false' } = req.query; // Changed default to false for safety
+    const { autoSync = 'false' } = req.query;
     const enableAutoSync = autoSync === 'true';
-
+let orderIds = []
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
       return res.status(400).json({ error: 'Invalid consignment ID.' });
     }
 
-    let client = await pool.connect();
+    const client = await pool.connect();
+    let consignment = null;
+    let containers = []; // declared in outer scope — always available
+
     try {
       await client.query('BEGIN');
 
-      // Fetch consignment
-      const { rows } = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
-      if (rows.length === 0) {
+      // 1. Fetch main consignment
+      const consRes = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
+      if (consRes.rowCount === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Consignment not found' });
       }
-      let consignment = rows[0];
+      consignment = consRes.rows[0];
 
-      // Parse orders and containers
-      let orderIds = [];
+      // 2. Parse order IDs safely
+      // let orderIds = [];
       if (consignment.orders) {
-        let raw = typeof consignment.orders === 'string' ? JSON.parse(consignment.orders) : consignment.orders;
-        orderIds = extractOrderIds(raw).map(o => parseInt(o, 10)).filter(o => o > 0);
+        let rawOrders = typeof consignment.orders === 'string' ? JSON.parse(consignment.orders) : consignment.orders;
+        orderIds = Array.isArray(rawOrders) 
+          ? rawOrders.map(o => parseInt(o, 10)).filter(o => !isNaN(o) && o > 0)
+          : [];
       }
 
       let linkedOrders = [];
-      let receivers = [];
       let minReceiverEta = null;
       let mostAdvancedReceiverStatus = null;
 
       if (orderIds.length > 0) {
         // Fetch orders
-        const orderResult = await client.query(`
-          SELECT id, sender_name AS shipper, receiver_name AS consignee, eta AS order_eta, etd, 
-                 qty_delivered AS delivered, total_assigned_qty, status AS order_status
-          FROM orders WHERE id = ANY($1::int[])
+        const orderRes = await client.query(`
+          SELECT 
+            id, 
+            sender_name AS shipper, 
+            receiver_name AS consignee, 
+            eta AS order_eta, 
+            etd, 
+            qty_delivered AS delivered, 
+            total_assigned_qty, 
+            status AS order_status
+          FROM orders 
+          WHERE id = ANY($1::int[])
         `, [orderIds]);
-        linkedOrders = orderResult.rows;
+        linkedOrders = orderRes.rows;
 
-        // Fetch receivers to get accurate shipment status + ETA
-        const receiverResult = await client.query(`
-          SELECT status, eta FROM receivers WHERE order_id = ANY($1::int[])
+        // Fetch receivers
+        const receiverRes = await client.query(`
+          SELECT status, eta 
+          FROM receivers 
+          WHERE order_id = ANY($1::int[])
         `, [orderIds]);
-        receivers = receiverResult.rows;
 
-        if (receivers.length > 0) {
-          // Find earliest ETA and most advanced status
-          const validEtas = receivers
-            .filter(r => r.eta)
-            .map(r => new Date(r.eta));
+        const receivers = receiverRes.rows;
 
-          if (validEtas.length > 0) {
-            minReceiverEta = new Date(Math.min(...validEtas));
-          }
-
-          // Optional: determine "most advanced" receiver status for suggestion
-          const statusPriority = {
-            'Shipment Delivered': 9,
-            'Ready for Delivery': 8,
-            'Under Processing': 7,
-            'Shipment In Transit': 6,
-            'Shipment Processing': 5,
-            'Loaded Into Container': 4,
-            'Ready for Loading': 3,
-            'Order Created': 2,
-            'Created': 1
-          };
-          mostAdvancedReceiverStatus = receivers.reduce((best, curr) => {
-            const priority = statusPriority[curr.status] || 0;
-            const bestPriority = statusPriority[best?.status] || 0;
-            return priority > bestPriority ? curr : best;
-          }, null)?.status;
+        // Compute min ETA
+        const validEtas = receivers
+          .filter(r => r.eta)
+          .map(r => new Date(r.eta));
+        if (validEtas.length > 0) {
+          minReceiverEta = new Date(Math.min(...validEtas));
         }
+
+        // Most advanced receiver status
+        const statusPriority = {
+          'Shipment Delivered': 9,
+          'Ready for Delivery': 8,
+          'Under Processing': 7,
+          'Shipment In Transit': 6,
+          'Shipment Processing': 5,
+          'Loaded Into Container': 4,
+          'Ready for Loading': 3,
+          'Order Created': 2,
+          'Created': 1
+        };
+        mostAdvancedReceiverStatus = receivers.reduce((best, curr) => {
+          const p = statusPriority[curr.status] || 0;
+          const bp = statusPriority[best?.status] || 0;
+          return p > bp ? curr : best;
+        }, null)?.status;
       }
 
-      // Parse containers
-      let parsedContainers = [];
-      if (typeof consignment.containers === 'string') {
-        try { parsedContainers = JSON.parse(consignment.containers); }
-        catch (e) { parsedContainers = []; }
-      } else {
-        parsedContainers = consignment.containers || [];
-      }
-      consignment.containers = parsedContainers.map(c => ({
-        ...c,
-        statusColor: getStatusColor(c.status || '')
-      }));
-
-      // Enhance consignment
+      // Enhance consignment fields
       consignment.statusColor = getStatusColor(consignment.status);
 
       if (linkedOrders.length > 0) {
@@ -507,63 +507,134 @@ export async function getConsignmentById(req, res) {
         consignment.consignee = first.consignee || consignment.consignee;
         consignment.etd = first.etd ? normalizeDate(first.etd) : null;
 
-        const totalAssigned = linkedOrders.reduce((s, o) => s + (o.total_assigned_qty || 0), 0);
-        const totalDelivered = linkedOrders.reduce((s, o) => s + (o.delivered || 0), 0);
+        const totalAssigned = linkedOrders.reduce((sum, o) => sum + (o.total_assigned_qty || 0), 0);
+        const totalDelivered = linkedOrders.reduce((sum, o) => sum + (o.delivered || 0), 0);
         consignment.delivered = totalDelivered;
         consignment.pending = Math.max(0, totalAssigned - totalDelivered);
         consignment.orders = linkedOrders;
       }
 
-      // Use receiver ETA as source of truth
       if (minReceiverEta) {
         consignment.eta = minReceiverEta.toISOString().split('T')[0];
       }
 
-      // Compute days until ETA
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       if (consignment.eta) {
         const etaDate = new Date(consignment.eta);
         etaDate.setHours(0, 0, 0, 0);
-        consignment.days_until_eta = Math.max(0, Math.ceil((etaDate - today) / (86400000)));
+        consignment.days_until_eta = Math.max(0, Math.ceil((etaDate - today) / 86400000));
       }
 
-      // Resolve shipping line name
       if (typeof consignment.shipping_line === 'number' && consignment.shipping_line > 0) {
-        const { rows } = await client.query('SELECT name FROM shipping_lines WHERE id = $1', [consignment.shipping_line]);
-        consignment.shipping_line = rows[0]?.name || consignment.shipping_line;
+        const { rows: slRows } = await client.query(
+          'SELECT name FROM shipping_lines WHERE id = $1',
+          [consignment.shipping_line]
+        );
+        consignment.shipping_line = slRows[0]?.name || consignment.shipping_line;
       }
 
-      // Optional: Provide suggested status (for UI warning)
       if (mostAdvancedReceiverStatus && enableAutoSync) {
-        const suggestedFromMapping = Object.entries(CONSIGNMENT_TO_STATUS_MAP).find(
+        const suggested = Object.entries(CONSIGNMENT_TO_STATUS_MAP || {}).find(
           ([_, v]) => v.shipment === mostAdvancedReceiverStatus
         )?.[0];
 
-        if (suggestedFromMapping && suggestedFromMapping !== consignment.status) {
-          consignment.suggested_status = suggestedFromMapping;
+        if (suggested && suggested !== consignment.status) {
+          consignment.suggested_status = suggested;
           consignment.suggested_status_reason = `Based on receiver status: ${mostAdvancedReceiverStatus}`;
         }
       }
 
       await client.query('COMMIT');
 
-      res.json({ data: consignment });
-
-    } catch (err) {
+    } catch (innerErr) {
       await client.query('ROLLBACK');
-      throw err;
+      throw innerErr;
     } finally {
       client.release();
     }
+// ────────────────────────────────────────────────────────────────
+// Containers – separate non-transactional fetch
+// ────────────────────────────────────────────────────────────────
+// let containers = [];  // ← use let instead of const
+
+if (orderIds.length > 0) {
+  const containerClient = await pool.connect();
+  try {
+    console.log(`Fetching containers for consignment ${numericId} with order IDs:`, orderIds);
+
+    const containerRes = await containerClient.query(`
+      SELECT 
+        cm.cid AS id,
+        cm.container_size          AS size,
+        cm.container_number        AS "containerNo",
+        cm.container_type          AS "containerType",
+        cm.owner_type              AS ownership,
+        COALESCE(cm.location, 'N/A') AS location,
+        
+        COALESCE(
+          (SELECT cs.availability 
+           FROM container_status cs 
+           WHERE cs.cid = cm.cid 
+           ORDER BY cs.created_time DESC 
+           LIMIT 1),
+          cm.derived_status,
+          'Available'
+        ) AS derived_status
+      FROM container_master cm
+      WHERE cm.container_number IN (
+        SELECT DISTINCT TRIM(value::text)
+        FROM receivers r,
+             jsonb_array_elements_text(
+               CASE 
+                 WHEN jsonb_typeof(r.containers) = 'array' THEN r.containers
+                 WHEN r.containers IS NOT NULL THEN jsonb_build_array(r.containers)
+                 ELSE '[]'::jsonb
+               END
+             ) AS value
+        WHERE r.order_id = ANY($1::int[])
+          AND r.containers IS NOT NULL
+          AND TRIM(value::text) != ''
+      )
+    `, [orderIds]);
+
+    containers = containerRes.rows.map(row => {
+      const ds = row.derived_status || 'Available';
+      return {
+        id: row.id,
+        size: row.size,
+        containerNo: row.containerNo,
+        containerType: row.containerType,
+        ownership: row.ownership,
+        location: row.location,
+        derived_status: ds,
+        derived_status_color: getStatusColor(ds),
+        status: ds,
+        statusColor: getStatusColor(ds)
+      };
+    });
+
+    console.log(`Fetched ${containers.length} containers for consignment ${numericId}`);
+
+  } catch (containerErr) {
+    console.error(`Failed to fetch containers for consignment ${numericId}:`, containerErr.message, containerErr.stack);
+    containers = []; // safe fallback
+  } finally {
+    containerClient.release();
+  }
+} else {
+  console.log(`No order IDs → skipping containers for consignment ${numericId}`);
+}
+
+// Attach containers
+consignment.containers = containers;
+    res.json({ data: consignment });
+
   } catch (err) {
-    console.error("Error fetching consignment:", err);
+    console.error("Error fetching consignment:", err.stack || err);
     res.status(500).json({ error: 'Failed to fetch consignment' });
   }
 }
-
-
-
 export async function updateConsignmentStatus(req, res) {
   console.log("Update Status Request:", { params: req.params, body: req.body });
   try {
