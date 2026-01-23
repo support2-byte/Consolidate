@@ -22,8 +22,8 @@ const router = express.Router();
 
 router.post("/", createCustomer);
 router.get("/:id", getCustomerById);
-router.get("/", getCustomers);
-router.get("/panel", getCustomersPanel);
+router.get("/", getCustomersPanel);
+router.get("/panel", getCustomers);
 
 router.put("/:zoho_id", updateCustomer);
 router.delete("/:zoho_id", deleteCustomer);
