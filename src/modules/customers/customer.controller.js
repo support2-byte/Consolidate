@@ -46,42 +46,158 @@ export async function getZohoAccessToken() {
 // Global sync flag (module-level)
 let isSyncRunning = false;
 
-// Add at top of file (module level)
-let lastFullSyncTime = 0;
-const SYNC_INTERVAL_MS = 10 * 60 * 1000; // e.g. every 10 min
 
-// Background sync function (call once on server start or via cron)
-async function backgroundCustomerSync() {
-  if (Date.now() - lastFullSyncTime < SYNC_INTERVAL_MS) return;
-  console.log("Background full customer sync starting...");
-  // Put your current pagination + DB upsert logic here (without res)
-  // After successful sync:
-  lastFullSyncTime = Date.now();
-  console.log("Background sync completed");
-}
-
-// In your getCustomersPanel – only return DB data, trigger background if needed
 export async function getCustomersPanel(req, res) {
+  // console.log("Received request for customer panel sync");
+
   try {
     const { search = 'All', limit = 6000 } = req.query;
 
-    // Always return current DB data quickly
-    const { rows } = await pool.query(
-      "SELECT * FROM customers ORDER BY created_time DESC LIMIT $1",
-      [parseInt(limit)]
-    );
-
-    // Trigger background sync if outdated (non-blocking)
-    if (Date.now() - lastFullSyncTime > SYNC_INTERVAL_MS && !isSyncRunning) {
-      isSyncRunning = true;
-      backgroundCustomerSync().finally(() => { isSyncRunning = false; });
+    if (isSyncRunning) {
+      // console.log("Customer sync already running, returning cached data...");
+      const { rows } = await pool.query(
+        "SELECT * FROM customers ORDER BY created_time DESC LIMIT $1",
+        [parseInt(limit)]
+      );
+      return res.json(rows);
     }
+
+    isSyncRunning = true;
+    // console.log("🔄 Starting Zoho Books customer sync with pagination...");
+
+    const token = await getZohoAccessToken();
+    // console.log("Fetched Zoho access token successfully");
+
+    let page = 1;
+    const per_page = 200;
+    let allCustomers = [];
+
+    let pageContext;
+    do {
+      // console.log(`Fetching page ${page}...`);
+
+      try {
+        const zohoRes = await axios.get(
+          "https://www.zohoapis.com/books/v3/contacts",
+          {
+            headers: {
+              Authorization: `Zoho-oauthtoken ${token}`,
+              "Content-Type": "application/json",
+            },
+            params: {
+              organization_id: process.env.ZOHO_BOOKS_ORG_ID,
+              contact_type: 'customer',
+              page: page,
+              per_page: per_page,
+              sort_column: 'created_time',   // Newest first
+              sort_order: 'D'                // Descending
+            },
+          }
+        );
+
+        // Basic response validation
+        if (zohoRes.data.code !== 0) {
+          throw new Error(`Zoho API error: ${zohoRes.data.message || 'Unknown error'}`);
+        }
+
+        const contacts = zohoRes.data.contacts || [];
+        allCustomers.push(...contacts);
+
+        pageContext = zohoRes.data.page_context;
+        // console.log(
+        //   `Page ${page}: Fetched ${contacts.length} customers. ` +
+        //   `Total so far: ${allCustomers.length}. Has more: ${pageContext?.has_more_page}`
+        // );
+
+        page++;
+
+        // Rate limit safety: ~85 requests per minute (Zoho allows ~100/min)
+        await new Promise(resolve => setTimeout(resolve, 700));
+
+      } catch (pageErr) {
+        console.error(`Error fetching page ${page}:`, {
+          message: pageErr.message,
+          response: pageErr.response?.data,
+          status: pageErr.response?.status,
+        });
+        // You can decide: break early or continue with what we have
+        // For now: break to avoid endless loop on persistent error
+        break;
+      }
+    } while (pageContext?.has_more_page === true);
+
+    // console.log(`───────────────────────────────────────────────`);
+    // console.log(`Sync complete. Total pages processed: ${page - 1}`);
+    // console.log(`Total customers fetched from Zoho: ${allCustomers.length}`);
+    // console.log(`───────────────────────────────────────────────`);
+
+    // Sync to DB
+    for (const c of allCustomers) {
+      if (!c.contact_id) continue;
+
+      const addressStr = c.billing_address ? JSON.stringify(c.billing_address) : null;
+      const createdTime = c.created_time ? new Date(c.created_time).toISOString() : null;
+      const modifiedTime = c.last_modified_time ? new Date(c.last_modified_time).toISOString() : null;
+
+      await pool.query(
+        `INSERT INTO customers 
+          (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
+           system_notes, contact_type, status, created_by, modified_by, created_time, modified_time)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         ON CONFLICT (zoho_id) DO UPDATE SET
+           contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
+           email = COALESCE(EXCLUDED.email, customers.email),
+           address = COALESCE(EXCLUDED.address, customers.address),
+           zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
+           associated_by = COALESCE(EXCLUDED.associated_by, customers.associated_by),
+           system_notes = COALESCE(EXCLUDED.system_notes, customers.system_notes),
+           contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
+           status = COALESCE(EXCLUDED.status, customers.status),
+           created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
+           modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by),
+           created_time = COALESCE(EXCLUDED.created_time, customers.created_time),
+           modified_time = COALESCE(EXCLUDED.modified_time, customers.modified_time)`,
+        [
+          c.contact_id,
+          c.contact_name || null,
+          c.email || null,
+          addressStr,
+          c.notes || null,
+          null,  // associated_by
+          null,  // system_notes
+          c.contact_type || null,
+          c.status === "active",
+          c.created_by_name || null,
+          c.custom_fields?.find(cf => cf.label === "Updated By")?.value || null,
+          createdTime,
+          modifiedTime,
+        ]
+      );
+    }
+
+    // Return latest from DB
+    const limitQuery = parseInt(limit) > 0 ? `LIMIT $1` : '';
+    const { rows } = await pool.query(
+      `SELECT * FROM customers ORDER BY created_time DESC ${limitQuery}`,
+      limitQuery ? [parseInt(limit)] : []
+    );
 
     res.json(rows);
 
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ error: "Failed to load customers" });
+    console.error("Zoho Books sync error:", {
+      message: err.message,
+      response: err.response?.data,
+      status: err.response?.status,
+    });
+    const errorMessage = err.response?.data?.message || err.message;
+    const statusCode = err.response?.status || 500;
+    res.status(statusCode).json({
+      error: `Failed to sync customers: ${errorMessage}`,
+    });
+  } finally {
+    isSyncRunning = false;
+    console.log("✅ Customer sync finished");
   }
 }
 // getCustomers remains the same (DB query with search/limit for efficiency)
