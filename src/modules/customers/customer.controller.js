@@ -49,7 +49,7 @@ let isSyncRunning = false;
 export async function getCustomersPanel(req, res) {
   console.log("Received request for customer panel sync");
   try {
-    const { search = 'All', limit = 5000 } = req.query;
+    const { search = 'All', limit = 10000 } = req.query;
 
     if (isSyncRunning) {
       console.log("Customer sync already running, returning cached data...");
@@ -88,6 +88,7 @@ export async function getCustomersPanel(req, res) {
         }
       );
 
+      console.log('zoho response',zohoRes)
       // No need to filter—endpoint returns only customers
       const contacts = zohoRes.data.contacts || [];
       allCustomers.push(...contacts);
@@ -100,7 +101,7 @@ export async function getCustomersPanel(req, res) {
       // await new Promise(r => setTimeout(r, 600));
     } while (pageContext?.has_more_page === true);
 
-    console.log(`Total customers fetched from Zoho: ${allCustomers.length}`);
+    console.log(`Total customers fetched from Zoho: ${allCustomers}`);
 
     // Sync all to DB
     for (const c of allCustomers) {
@@ -188,8 +189,10 @@ export async function getCustomers(req, res) {
 
     query += ` ORDER BY created_time DESC LIMIT $${params.length + 1}`;
     params.push(parseInt(limit));
-
+console.log('query limits and search',query , params
+)
     const { rows } = await pool.query(query, params);
+    // console.log('row data',rows)
     res.json(rows);
   } catch (err) {
     console.error("Error fetching customers:", err);

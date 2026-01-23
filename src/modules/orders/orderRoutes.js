@@ -12,7 +12,8 @@ import {
   assignContainersToOrdersAll,
   getOrdersConsignments,
   getOrderByOrderId,
-  getMyOrdersByRef
+  getMyOrdersByRef,
+  removeContainerAssignments
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -66,7 +67,7 @@ router.get('/track/consignment/:id', getOrderByTrackingId); // or whatever name
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
 router.post('/assign-container', assignContainersToOrders);
-
+router.post('/remove-assign-container', removeContainerAssignments);
 // POST /api/orders/assign-container - Assign container to multiple orders
 // router.post('/:orderId/receivers/:id/assign-container', assignContainersToOrders);
 router.post('/assign-containers-to-orders', assignContainersToOrdersAll);
