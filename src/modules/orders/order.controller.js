@@ -6228,7 +6228,7 @@ export async function getOrderByItemRef(req, res) {
     `;
 
     const { rows } = await pool.query(query, [pattern]);
-
+console.log('rowsssss',rows)
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -6395,14 +6395,15 @@ export async function getOrderByItemRef(req, res) {
     });
   }
 }
-export async function getOrderByTrackingId(req, res) {
- const { id } = req.params;  // ← change 'number' to the real name (e.g. 'id', 'consignment', etc.)
+  export async function getOrderByTrackingId(req, res) {
+  const { id } = req.params;
 
   if (!id?.trim()) {
     return res.status(400).json({ success: false, message: 'Consignment number required' });
   }
 
   const consNumber = id.trim().toUpperCase();
+
   try {
     // 1. Fetch consignment core data
     const consRes = await pool.query(`
@@ -6421,7 +6422,8 @@ export async function getOrderByTrackingId(req, res) {
         c.gross_weight,
         c.consignment_value,
         c.currency_code,
-        c.containers
+        c.containers,
+        c.orders
       FROM consignments c
       WHERE c.consignment_number = $1
     `, [consNumber]);
@@ -6440,18 +6442,91 @@ export async function getOrderByTrackingId(req, res) {
       console.warn('Invalid consignment containers JSON:', e);
     }
 
-    // 2. Find linked order IDs
-    const orderIdsRes = await pool.query(`
-      SELECT jsonb_array_elements_text(c.orders)::int AS order_id
-      FROM consignments c
-      WHERE c.id = $1
-    `, [cons.consignment_id]);
-
-    const orderIds = orderIdsRes.rows.map(r => r.order_id).filter(id => id > 0);
+    // Parse order IDs safely
+    let orderIds = [];
+    try {
+      const rawOrders = typeof cons.orders === 'string' ? JSON.parse(cons.orders) : cons.orders || [];
+      orderIds = rawOrders.map(v => parseInt(v, 10)).filter(n => !isNaN(n) && n > 0);
+    } catch (e) {
+      console.warn('Invalid orders array in consignment:', e);
+    }
 
     let orders = [];
+    let summary = {
+      order_count: 0,
+      total_assigned: 0,
+      total_items: 0,
+      progress_percent: 0,
+      active_containers: [],
+      latest_activity: null
+    };
 
     if (orderIds.length > 0) {
+      // ────────────────────────────────────────────────
+      // Safe casting helpers
+      // ────────────────────────────────────────────────
+      const safeIntCast    = (val) => `COALESCE(${val}, 0)`;
+      const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+
+      // Container details subquery (latest status)
+      const containerDetailsSub = `
+        COALESCE((
+          SELECT jsonb_agg(
+            jsonb_build_object(
+              'status',      COALESCE(cs.availability, 'Created'),
+              'container', jsonb_build_object(
+                'cid',              (cd_obj->'container'->>'cid')::int,
+                'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
+              ),
+              'total_number',    ${safeIntCast("(cd_obj->>'total_number')::int")},
+              'assign_weight',   COALESCE(cd_obj->>'assign_weight', '0')::text,
+              'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
+              'assign_total_box',COALESCE(cd_obj->>'assign_total_box', '0')::text
+            ) ORDER BY (cd_obj->'container'->>'container_number')
+          )
+          FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+          LEFT JOIN LATERAL (
+            SELECT availability
+            FROM container_status
+            WHERE cid = (cd_obj->'container'->>'cid')::int
+            ORDER BY sid DESC LIMIT 1
+          ) cs ON true
+          WHERE (cd_obj->'container'->>'cid') ~ '^[0-9]+$'
+        ), '[]'::jsonb)
+      `;
+
+      // Shipping details per receiver
+      const shippingDetailsAgg = `
+        (SELECT COALESCE(jsonb_agg(
+          jsonb_build_object(
+            'id',              oi.id,
+            'orderId',         oi.order_id,
+            'senderId',        oi.sender_id,
+            'category',        COALESCE(oi.category, ''),
+            'subcategory',     COALESCE(oi.subcategory, ''),
+            'type',            COALESCE(oi.type, ''),
+            'pickupLocation',  COALESCE(oi.pickup_location, ''),
+            'deliveryAddress', COALESCE(oi.delivery_address, ''),
+            'totalNumber',     ${safeIntCast('oi.total_number')},
+            'weight',          ${safeNumericCast('oi.weight')},
+            'totalWeight',     0,
+            'itemRef',         COALESCE(oi.item_ref, ''),
+            'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
+            'shippingLine',    COALESCE(oi.shipping_line, ''),
+            'containerDetails', ${containerDetailsSub},
+            'remainingItems',  ${safeIntCast(`
+              oi.total_number - (
+                SELECT COALESCE(SUM((cd_obj->>'assign_total_box')::int), 0)
+                FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+              )
+            `)}
+          ) ORDER BY oi.id
+        ), '[]'::jsonb)
+        FROM order_items oi 
+        WHERE oi.receiver_id = r.id AND oi.order_id = o.id)
+      `;
+
+      // Fetch orders with rich receivers
       const ordersRes = await pool.query(`
         SELECT 
           o.id AS order_id,
@@ -6460,236 +6535,179 @@ export async function getOrderByTrackingId(req, res) {
           o.status,
           o.eta,
           o.etd,
-          t.collection_scope,
           o.total_assigned_qty,
           s.sender_name,
           s.sender_contact,
           s.sender_email,
           t.transport_type,
-          t.drop_method,
-          t.delivery_date,
-          r.id AS receiver_id,
-          r.receiver_name,
-          r.receiver_contact,
-          r.receiver_email,
-          r.receiver_address,
-          r.status AS receiver_status,
-          r.eta AS receiver_eta,
-          r.containers AS receiver_containers,
-          -- Aggregate drop_off_details per receiver
-          COALESCE((
-            SELECT json_agg(
-              json_build_object(
-                'drop_method', d.drop_method,
-                'dropoff_name', d.dropoff_name,
-                'drop_off_cnic', d.drop_off_cnic,
-                'drop_off_mobile', d.drop_off_mobile,
-                'plate_no', d.plate_no,
-                'drop_date', d.drop_date
-              ) ORDER BY d.id
-            )
-            FROM drop_off_details d
-            WHERE d.order_id = o.id 
-              AND (d.receiver_id = r.id OR d.receiver_id IS NULL)
-          ), '[]'::json) AS drop_off_details,
-          oi.id AS item_id,
-          oi.item_ref,
-          oi.category,
-          oi.subcategory,
-          oi.type,
-          oi.total_number,
-          oi.weight,
-          cah.id AS assignment_id,
-          cm.container_number,
-          cah.assigned_qty,
-          cah.status AS assign_status,
-          cah.created_at AS assign_created_at,
-          cah.notes AS assign_notes
+          t.collection_scope,
+
+          -- Rich receivers (matches getOrders structure)
+          (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb) 
+           FROM (
+             SELECT 
+               r.id,
+               r.order_id                    AS "orderId",
+               r.receiver_name               AS "receiverName",
+               r.receiver_contact            AS "receiverContact",
+               r.receiver_address            AS "receiverAddress",
+               r.receiver_email              AS "receiverEmail",
+               ${safeIntCast('r.total_number')}       AS "totalNumber",
+               ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+               r.receiver_ref                AS "receiverRef",
+               r.remarks,
+               r.containers,
+               r.status,
+               r.eta                         AS eta,
+               r.etd                         AS etd,
+               r.shipping_line               AS "shippingLine",
+               r.consignment_vessel          AS "consignmentVessel",
+               r.consignment_number          AS "consignmentNumber",
+               r.consignment_marks           AS "consignmentMarks",
+               r.consignment_voyage          AS "consignmentVoyage",
+               r.full_partial                AS "fullPartial",
+               ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+               ${shippingDetailsAgg}                  AS "shippingDetails",
+               ${shippingDetailsAgg.replace('"shippingDetails"', '"shippingdetails"')} AS "shippingdetails",
+               COALESCE((
+                 SELECT jsonb_agg(
+                   jsonb_build_object(
+                     'drop_method',    dod.drop_method,
+                     'dropoff_name',   dod.dropoff_name,
+                     'drop_off_cnic',  dod.drop_off_cnic,
+                     'drop_off_mobile',dod.drop_off_mobile,
+                     'plate_no',       dod.plate_no,
+                     'drop_date',      TO_CHAR(dod.drop_date, 'YYYY-MM-DD')
+                   ) ORDER BY dod.id
+                 ) FROM drop_off_details dod 
+                 WHERE dod.receiver_id = r.id
+               ), '[]'::jsonb) AS "dropOffDetails"
+             FROM receivers r
+             WHERE r.order_id = o.id
+           ) r_full) AS receivers
         FROM orders o
         LEFT JOIN senders s ON s.order_id = o.id
         LEFT JOIN transport_details t ON t.order_id = o.id
-        LEFT JOIN receivers r ON r.order_id = o.id
-        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.receiver_id = r.id
-        LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
-        LEFT JOIN container_master cm ON cm.cid = cah.cid
-        WHERE o.id = ANY($1)
-        ORDER BY o.id, r.id, oi.id, cah.created_at
+        WHERE o.id = ANY($1::int[])
+        ORDER BY o.created_at DESC
       `, [orderIds]);
 
       // ────────────────────────────────────────────────
-      // Group into nested structure
+      // Post-process to build summary (like old function)
       // ────────────────────────────────────────────────
       const orderMap = {};
+      const allContainers = new Set();
 
       ordersRes.rows.forEach(row => {
-        const orderId = row.order_id;
-
-        if (!orderMap[orderId]) {
-          orderMap[orderId] = {
-            order_id: orderId,
-            booking_ref: row.booking_ref,
-            created_at: row.created_at,
-            status: row.status,
-            overall_status: row.status || 'Created', // temporary fallback
-            eta: row.eta,
-            etd: row.etd,
-            collection_scope: row.collection_scope || '—',
-            total_assigned_qty: row.total_assigned_qty || 0,
-            sender: {
-              name: row.sender_name || '—',
-              contact: row.sender_contact || '—',
-              email: row.sender_email || '—'
-            },
-            transport: {
-              type: row.transport_type || '—',
-              drop_method: row.drop_method || '—',
-              delivery_date: row.delivery_date || '—'
-            },
-            receivers: {},
-            summary: {
-              total_items: 0,
-              total_weight: 0,
-              total_assigned: 0,
-              active_containers: new Set()
-            }
-          };
+        let receivers = row.receivers || '[]';
+        if (typeof receivers === 'string') {
+          try { receivers = JSON.parse(receivers); } catch { receivers = []; }
         }
 
-        const ord = orderMap[orderId];
-
-        // Update summary
-        if (row.total_number) {
-          ord.summary.total_items += Number(row.total_number);
-          ord.summary.total_weight += Number(row.weight || 0);
-        }
-        if (row.container_number) {
-          ord.summary.active_containers.add(row.container_number);
-        }
-        ord.summary.total_assigned += Number(row.assigned_qty || 0);
-
-        // Receiver grouping
-        const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
-        if (!ord.receivers[recvKey]) {
-          ord.receivers[recvKey] = {
-            receiver_id: row.receiver_id || null,
-            name: row.receiver_name || 'Unassigned',
-            contact: row.receiver_contact || '—',
-            email: row.receiver_email || '—',
-            address: row.receiver_address || '—',
-            status: row.receiver_status || '—',
-            eta: row.receiver_eta || null,
-            containers: row.receiver_containers || [],
-            drop_off_details: row.drop_off_details || [],
-            items: {}
-          };
-        }
-
-        const recv = ord.receivers[recvKey];
-
-        if (row.item_id) {
-          if (!recv.items[row.item_id]) {
-            recv.items[row.item_id] = {
-              item_id: row.item_id,
-              item_ref: row.item_ref || '—',
-              category: row.category || '—',
-              subcategory: row.subcategory || '—',
-              type: row.type || '—',
-              total_number: Number(row.total_number) || 0,
-              weight: Number(row.weight) || 0,
-              assignments: []
-            };
+        const order = {
+          order_id: row.order_id,
+          booking_ref: row.booking_ref,
+          created_at: row.created_at,
+          status: row.status,
+          eta: row.eta,
+          etd: row.etd,
+          collection_scope: row.collection_scope || '—',
+          total_assigned_qty: row.total_assigned_qty || 0,
+          sender: {
+            name: row.sender_name || '—',
+            contact: row.sender_contact || '—',
+            email: row.sender_email || '—'
+          },
+          transport: {
+            type: row.transport_type || '—',
+            collection_scope: row.collection_scope || 'Partial'
+          },
+          receivers,
+          summary: {
+            total_items: 0,
+            total_weight: 0,
+            total_assigned: 0,
+            active_containers: new Set()
           }
+        };
 
-          if (row.assignment_id) {
-            recv.items[row.item_id].assignments.push({
-              assignment_id: row.assignment_id,
-              container_number: row.container_number || '—',
-              assigned_qty: Number(row.assigned_qty) || 0,
-              status: row.assign_status || '—',
-              created_at: row.assign_created_at,
-              notes: row.assign_notes || ''
+        // Calculate per-order summary from shippingDetails
+        receivers.forEach(r => {
+          (r.shippingDetails || []).forEach(item => {
+            const qty = Number(item.totalNumber || 0);
+            const assigned = (item.containerDetails || []).reduce((sum, cd) => {
+              return sum + Number(cd.assign_total_box || 0);
+            }, 0);
+
+            order.summary.total_items += qty;
+            order.summary.total_weight += Number(item.weight || 0);
+            order.summary.total_assigned += assigned;
+
+            (item.containerDetails || []).forEach(cd => {
+              const cn = cd.container?.container_number;
+              if (cn && cn !== 'Unknown') {
+                order.summary.active_containers.add(cn);
+                allContainers.add(cn);
+              }
             });
-          }
-        }
-      });
-
-      // Finalize each order
-      const result = Object.values(orderMap).map(order => {
-        // Compute real progress
-        let totalItems = 0;
-        let totalAssigned = 0;
-        order.receivers = Object.values(order.receivers).map(r => {
-          Object.values(r.items).forEach(item => {
-            totalItems += item.total_number;
-            totalAssigned += item.assignments.reduce((s, a) => s + a.assigned_qty, 0);
           });
-          return r;
         });
 
-        order.summary = {
-          ...order.summary,
-          total_items: totalItems,
-          total_assigned: totalAssigned,
-          progress_percent: totalItems > 0 ? Math.round((totalAssigned / totalItems) * 100) : 0,
-          active_containers: Array.from(order.summary.active_containers)
-        };
-
-        // Smarter overall_status from receivers
-        const receiverStatuses = Object.values(order.receivers).map(r => r.status || '');
-        const statusOrder = ['Delivered', 'Shipment In Transit', 'In Transit', 'Under Shipment Processing', 'Loaded Into Container', 'Ready for Loading', 'In Process', 'Created'];
-        const highest = receiverStatuses.reduce((best, curr) => {
-          const pri = statusOrder.indexOf(curr);
-          const bestPri = statusOrder.indexOf(best);
-          return pri > bestPri ? curr : best;
-        }, order.status || 'Created');
-
-        order.overall_status = highest;
-
-        return {
-          ...order,
-          receivers: Object.values(order.receivers).map(r => ({
-            ...r,
-            items: Object.values(r.items)
-          }))
-        };
+        orderMap[row.order_id] = order;
       });
 
-      res.json({
-        success: true,
-        data: {
-          consignment: {
-            id: cons.consignment_id,
-            number: cons.consignment_number,
-            status: cons.consignment_status,
-            eta: cons.consignment_eta,
-            origin: cons.origin,
-            destination: cons.destination,
-            shipping_line: cons.shipping_line,
-            vessel: cons.vessel,
-            voyage: cons.voyage,
-            seal_no: cons.seal_no,
-            net_weight: cons.net_weight,
-            gross_weight: cons.gross_weight,
-            value: cons.consignment_value,
-            currency: cons.currency_code,
-            containers
-          },
-          orders: result,
-          summary: {
-            order_count: result.length,
-            total_assigned: result.reduce((s, o) => s + o.total_assigned_qty, 0),
-            total_items: result.reduce((s, o) => s + (o.summary?.total_items || 0), 0),
-            progress_percent: result.length > 0 
-              ? Math.round(result.reduce((s, o) => s + (o.summary?.progress_percent || 0), 0) / result.length)
-              : 0,
-            active_containers: [...new Set(result.flatMap(o => o.summary?.active_containers || []))],
-            latest_activity: result.reduce((m, o) => o.created_at > m ? o.created_at : m, '1970-01-01')
-          }
+      orders = Object.values(orderMap);
+
+      // Overall summary
+      let grandTotalItems = 0;
+      let grandTotalAssigned = 0;
+
+      orders.forEach(o => {
+        grandTotalItems += o.summary.total_items;
+        grandTotalAssigned += o.summary.total_assigned;
+        if (!summary.latest_activity || o.created_at > summary.latest_activity) {
+          summary.latest_activity = o.created_at;
         }
       });
 
-  }
- } catch (err) {
+      summary = {
+        order_count: orders.length,
+        total_assigned: grandTotalAssigned,
+        total_items: grandTotalItems,
+        progress_percent: grandTotalItems > 0 
+          ? Math.round((grandTotalAssigned / grandTotalItems) * 100) 
+          : 0,
+        active_containers: Array.from(allContainers),
+        latest_activity: summary.latest_activity ? summary.latest_activity.toISOString() : null
+      };
+    }
+
+    res.json({
+      success: true,
+      data: {
+        consignment: {
+          id: cons.consignment_id,
+          number: cons.consignment_number,
+          status: cons.consignment_status,
+          eta: cons.consignment_eta,
+          origin: cons.origin,
+          destination: cons.destination,
+          shipping_line: cons.shipping_line,
+          vessel: cons.vessel,
+          voyage: cons.voyage,
+          seal_no: cons.seal_no,
+          net_weight: cons.net_weight,
+          gross_weight: cons.gross_weight,
+          value: cons.consignment_value,
+          currency: cons.currency_code,
+          containers
+        },
+        orders,
+        summary
+      }
+    });
+
+  } catch (err) {
     console.error('getOrderByTrackingId error:', err.stack || err);
     res.status(500).json({
       success: false,
@@ -6703,16 +6721,85 @@ export async function getOrderByOrderId(req, res) {
   const { ref } = req.params;
 
   if (!ref || typeof ref !== 'string' || ref.trim() === '') {
-    return res.status(400).json({
-      success: false,
-      message: 'Order reference (ID or booking ref) is required'
-    });
+    return res.status(400).json({ success: false, message: 'Order reference (ID or booking ref) is required' });
   }
 
   const search = ref.trim();
   const isNumeric = !isNaN(Number(search)) && Number.isInteger(Number(search));
 
   try {
+    // ────────────────────────────────────────────────
+    // Safe casting helpers (same as getOrders)
+    // ────────────────────────────────────────────────
+    const safeIntCast    = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+
+    // ────────────────────────────────────────────────
+    // Same containerDetails subquery logic as getOrders
+    // ────────────────────────────────────────────────
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'status',      COALESCE(cs.availability, 'Created'),
+            'container', jsonb_build_object(
+              'cid',              (cd_obj->'container'->>'cid')::int,
+              'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
+            ),
+            'total_number',    ${safeIntCast("(cd_obj->>'total_number')::int")},
+            'assign_weight',   COALESCE(cd_obj->>'assign_weight', '0')::text,
+            'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
+            'assign_total_box',COALESCE(cd_obj->>'assign_total_box', '0')::text
+          ) ORDER BY (cd_obj->'container'->>'container_number')
+        )
+        FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+        LEFT JOIN LATERAL (
+          SELECT availability
+          FROM container_status
+          WHERE cid = (cd_obj->'container'->>'cid')::int
+          ORDER BY sid DESC LIMIT 1
+        ) cs ON true
+        WHERE (cd_obj->'container'->>'cid') ~ '^[0-9]+$'
+      ), '[]'::jsonb)
+    `;
+
+    // ────────────────────────────────────────────────
+    // Shipping details per receiver (matches getOrders)
+    // ────────────────────────────────────────────────
+    const shippingDetailsAgg = `
+      (SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+          'id',              oi.id,
+          'orderId',         oi.order_id,
+          'senderId',        oi.sender_id,
+          'category',        COALESCE(oi.category, ''),
+          'subcategory',     COALESCE(oi.subcategory, ''),
+          'type',            COALESCE(oi.type, ''),
+          'pickupLocation',  COALESCE(oi.pickup_location, ''),
+          'deliveryAddress', COALESCE(oi.delivery_address, ''),
+          'totalNumber',     ${safeIntCast('oi.total_number')},
+          'weight',          ${safeNumericCast('oi.weight')},
+          'totalWeight',     0,
+          'itemRef',         COALESCE(oi.item_ref, ''),
+          'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
+          'shippingLine',    COALESCE(oi.shipping_line, ''),
+          'containerDetails', ${containerDetailsSub},
+          'remainingItems',  ${safeIntCast(`
+            oi.total_number - (
+              SELECT COALESCE(SUM((cd_obj->>'assign_total_box')::int), 0)
+              FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+            )
+          `)}
+        ) ORDER BY oi.id
+      ), '[]'::jsonb)
+      FROM order_items oi 
+      WHERE oi.receiver_id = r.id
+      AND oi.order_id = o.id)
+    `;
+
+    // ────────────────────────────────────────────────
+    // Main query – single row expected (or few if duplicate refs)
+    // ────────────────────────────────────────────────
     const query = `
       SELECT 
         o.id AS order_id,
@@ -6721,61 +6808,73 @@ export async function getOrderByOrderId(req, res) {
         o.status,
         o.eta,
         o.etd,
-        t.collection_scope,
         o.total_assigned_qty,
+        o.place_of_loading,
+        o.final_destination,
+        o.place_of_delivery,
+        o.consignment_remarks,
+        o.order_remarks,
+        o.consignment_number,
+        o.consignment_vessel,
+        o.consignment_voyage,
+        o.associated_container,
         s.sender_name,
         s.sender_contact,
+        s.sender_address,
         s.sender_email,
         t.transport_type,
-        t.drop_method,
-        t.delivery_date,
-        r.id AS receiver_id,
-        r.receiver_name,
-        r.receiver_contact,
-        r.receiver_email,
-        r.receiver_address,
-        r.status AS receiver_status,
-        r.eta AS receiver_eta,
-        r.containers AS receiver_containers,
-        -- Aggregate drop_off_details per receiver
-        COALESCE((
-          SELECT json_agg(
-            json_build_object(
-              'drop_method', d.drop_method,
-              'dropoff_name', d.dropoff_name,
-              'drop_off_cnic', d.drop_off_cnic,
-              'drop_off_mobile', d.drop_off_mobile,
-              'plate_no', d.plate_no,
-              'drop_date', d.drop_date
-            ) ORDER BY d.id
-          )
-          FROM drop_off_details d
-          WHERE d.order_id = o.id 
-            AND (d.receiver_id = r.id OR d.receiver_id IS NULL)
-        ), '[]'::json) AS drop_off_details,
-        oi.id AS item_id,
-        oi.item_ref,
-        oi.category,
-        oi.subcategory,
-        oi.type,
-        oi.total_number,
-        oi.weight,
-        cah.id AS assignment_id,
-        cm.container_number,
-        cah.assigned_qty,
-        cah.status AS assign_status,
-        cah.created_at AS assign_created_at,
-        cah.notes AS assign_notes
+        t.third_party_transport,
+        t.collection_scope,
+
+        -- Receivers array – now deeply nested like getOrders
+        (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb) 
+         FROM (
+           SELECT 
+             r.id,
+             r.order_id                    AS "orderId",
+             r.receiver_name               AS "receiverName",
+             r.receiver_contact            AS "receiverContact",
+             r.receiver_address            AS "receiverAddress",
+             r.receiver_email              AS "receiverEmail",
+             ${safeIntCast('r.total_number')}       AS "totalNumber",
+             ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+             r.receiver_ref                AS "receiverRef",
+             r.remarks,
+             r.containers,
+             r.status,
+             r.eta                         AS eta,
+             r.etd                         AS etd,
+             r.shipping_line               AS "shippingLine",
+             r.consignment_vessel          AS "consignmentVessel",
+             r.consignment_number          AS "consignmentNumber",
+             r.consignment_marks           AS "consignmentMarks",
+             r.consignment_voyage          AS "consignmentVoyage",
+             r.full_partial                AS "fullPartial",
+             ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+             ${shippingDetailsAgg}                  AS "shippingDetails",
+             ${shippingDetailsAgg.replace('shippingDetails', 'shippingdetails')} AS "shippingdetails",
+             COALESCE((
+               SELECT jsonb_agg(
+                 jsonb_build_object(
+                   'drop_method',    dod.drop_method,
+                   'dropoff_name',   dod.dropoff_name,
+                   'drop_off_cnic',  dod.drop_off_cnic,
+                   'drop_off_mobile',dod.drop_off_mobile,
+                   'plate_no',       dod.plate_no,
+                   'drop_date',      TO_CHAR(dod.drop_date, 'YYYY-MM-DD')
+                 ) ORDER BY dod.id
+               ) FROM drop_off_details dod 
+               WHERE dod.receiver_id = r.id
+             ), '[]'::jsonb) AS "dropOffDetails"
+           FROM receivers r
+           WHERE r.order_id = o.id
+         ) r_full) AS receivers
       FROM orders o
       LEFT JOIN senders s ON s.order_id = o.id
       LEFT JOIN transport_details t ON t.order_id = o.id
-      LEFT JOIN receivers r ON r.order_id = o.id
-      LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.receiver_id = r.id
-      LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
-      LEFT JOIN container_master cm ON cm.cid = cah.cid
       WHERE ${isNumeric ? 'o.id = $1' : 'o.booking_ref ILIKE $1'}
          OR o.booking_ref ILIKE $2
-      ORDER BY o.id, r.id, oi.id, cah.created_at
+      LIMIT 5  -- safety if ref is not unique
     `;
 
     const params = isNumeric 
@@ -6791,110 +6890,313 @@ export async function getOrderByOrderId(req, res) {
       });
     }
 
-    // ────────────────────────────────────────────────
-    // Group into nested structure
-    // ────────────────────────────────────────────────
-    const orderMap = {};
-
-    rows.forEach(row => {
-      const orderId = row.order_id;
-
-      if (!orderMap[orderId]) {
-        orderMap[orderId] = {
-          order_id: orderId,
-          booking_ref: row.booking_ref,
-          created_at: row.created_at,
-          status: row.status,
-          overall_status: row.status || 'Created',
-          eta: row.eta,
-          etd: row.etd,
-          collection_scope: row.collection_scope || '—',
-          total_assigned_qty: row.total_assigned_qty || 0,
-          sender: {
-            name: row.sender_name || '—',
-            contact: row.sender_contact || '—',
-            email: row.sender_email || '—'
-          },
-          transport: {
-            type: row.transport_type || '—',
-            drop_method: row.drop_method || '—',
-            delivery_date: row.delivery_date || '—'
-          },
-          receivers: {}
-        };
+    // Format response – very similar to getOrders
+    const formatted = rows.map(row => {
+      let receivers = row.receivers || '[]';
+      if (typeof receivers === 'string') {
+        try { receivers = JSON.parse(receivers); } catch { receivers = []; }
       }
 
-      const ord = orderMap[orderId];
-
-      const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
-
-      if (!ord.receivers[recvKey]) {
-        ord.receivers[recvKey] = {
-          receiver_id: row.receiver_id || null,
-          name: row.receiver_name || 'Unassigned',
-          contact: row.receiver_contact || '—',
-          email: row.receiver_email || '—',
-          address: row.receiver_address || '—',
-          status: row.receiver_status || '—',
-          eta: row.receiver_eta || null,
-          containers: row.receiver_containers || [],
-          drop_off_details: row.drop_off_details || [],  // ← now aggregated JSON
-          items: {}
-        };
-      }
-
-      const recv = ord.receivers[recvKey];
-
-      if (row.item_id) {
-        if (!recv.items[row.item_id]) {
-          recv.items[row.item_id] = {
-            item_id: row.item_id,
-            item_ref: row.item_ref || '—',
-            category: row.category || '—',
-            subcategory: row.subcategory || '—',
-            type: row.type || '—',
-            total_number: Number(row.total_number) || 0,
-            weight: Number(row.weight) || 0,
-            assignments: []
-          };
-        }
-
-        if (row.assignment_id) {
-          recv.items[row.item_id].assignments.push({
-            assignment_id: row.assignment_id,
-            container_number: row.container_number || '—',
-            assigned_qty: Number(row.assigned_qty) || 0,
-            status: row.assign_status || '—',
-            created_at: row.assign_created_at,
-            notes: row.assign_notes || ''
-          });
-        }
-      }
+      return {
+        id: row.order_id,
+        booking_ref: row.booking_ref,
+        status: row.status,
+        rgl_booking_number: row.booking_ref, // assuming same
+        consignment_remarks: row.consignment_remarks || null,
+        place_of_loading: row.place_of_loading,
+        final_destination: row.final_destination,
+        place_of_delivery: row.place_of_delivery,
+        order_remarks: row.order_remarks,
+        associated_container: row.associated_container || null,
+        consignment_number: row.consignment_number || null,
+        consignment_vessel: row.consignment_vessel || null,
+        consignment_voyage: row.consignment_voyage || null,
+        sender_name: row.sender_name || null,
+        sender_contact: row.sender_contact || null,
+        sender_address: row.sender_address || null,
+        sender_email: row.sender_email || null,
+        eta: row.eta,
+        etd: row.etd || null,
+        shipping_line: null, // add if needed
+        transport_type: row.transport_type || null,
+        third_party_transport: row.third_party_transport || null,
+        collection_scope: row.collection_scope || "Partial",
+        total_assigned_qty: row.total_assigned_qty || 0,
+        created_at: row.created_at?.toISOString(),
+        updated_at: null, // add if you select it
+        created_by: null, // add if needed
+        receivers,        // ← now matches getOrders shape exactly
+        // defaults for frontend compatibility (same as getOrders)
+        receiver_name: null,
+        receiver_contact: null,
+        // ... all the other null defaults you have in getOrders
+        overall_status: row.status,
+        color: "#E0E0E0",
+        // etc.
+      };
     });
 
-    const result = Object.values(orderMap).map(order => ({
-      ...order,
-      receivers: Object.values(order.receivers).map(receiver => ({
-        ...receiver,
-        items: Object.values(receiver.items)
-      }))
-    }));
+    const data = formatted.length === 1 ? formatted[0] : formatted;
 
     res.json({
       success: true,
-      data: result.length === 1 ? result[0] : result,
-      message: `Found ${result.length} matching order(s)`
+      data,
+      message: `Found ${formatted.length} matching order(s)`
     });
 
   } catch (err) {
-    console.error('trackByOrderRef error:', err.stack || err);
+    console.error('getOrderByOrderId error:', err.stack || err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch order details',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      code: err.code,
+      position: err.position
     });
   }
 }
+
+/**
+ * Get order details by RGL Booking Number
+ * Example: GET /api/orders/rgl/RGSL-17695-064
+ */
+export async function getOrderByRglBookingNo(req, res) {
+  const { rglBookingNo } = req.params;
+
+  if (!rglBookingNo || typeof rglBookingNo !== 'string' || rglBookingNo.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      message: 'RGL Booking Number is required'
+    });
+  }
+
+  const search = rglBookingNo.trim();
+
+  try {
+    // ────────────────────────────────────────────────
+    // Safe casting helpers (same as before)
+    // ────────────────────────────────────────────────
+    const safeIntCast    = (val) => `COALESCE(${val}, 0)`;
+    const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
+
+    // ────────────────────────────────────────────────
+    // containerDetails subquery (same as getOrders)
+    // ────────────────────────────────────────────────
+    const containerDetailsSub = `
+      COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'status',      COALESCE(cs.availability, 'Created'),
+            'container', jsonb_build_object(
+              'cid',              (cd_obj->'container'->>'cid')::int,
+              'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
+            ),
+            'total_number',    ${safeIntCast("(cd_obj->>'total_number')::int")},
+            'assign_weight',   COALESCE(cd_obj->>'assign_weight', '0')::text,
+            'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
+            'assign_total_box',COALESCE(cd_obj->>'assign_total_box', '0')::text
+          ) ORDER BY (cd_obj->'container'->>'container_number')
+        )
+        FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+        LEFT JOIN LATERAL (
+          SELECT availability
+          FROM container_status
+          WHERE cid = (cd_obj->'container'->>'cid')::int
+          ORDER BY sid DESC LIMIT 1
+        ) cs ON true
+        WHERE (cd_obj->'container'->>'cid') ~ '^[0-9]+$'
+      ), '[]'::jsonb)
+    `;
+
+    // ────────────────────────────────────────────────
+    // shippingDetails aggregation per receiver
+    // ────────────────────────────────────────────────
+    const shippingDetailsAgg = `
+      (SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+          'id',              oi.id,
+          'orderId',         oi.order_id,
+          'senderId',        oi.sender_id,
+          'category',        COALESCE(oi.category, ''),
+          'subcategory',     COALESCE(oi.subcategory, ''),
+          'type',            COALESCE(oi.type, ''),
+          'pickupLocation',  COALESCE(oi.pickup_location, ''),
+          'deliveryAddress', COALESCE(oi.delivery_address, ''),
+          'totalNumber',     ${safeIntCast('oi.total_number')},
+          'weight',          ${safeNumericCast('oi.weight')},
+          'totalWeight',     0,
+          'itemRef',         COALESCE(oi.item_ref, ''),
+          'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
+          'shippingLine',    COALESCE(oi.shipping_line, ''),
+          'containerDetails', ${containerDetailsSub},
+          'remainingItems',  ${safeIntCast(`
+            oi.total_number - (
+              SELECT COALESCE(SUM((cd_obj->>'assign_total_box')::int), 0)
+              FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+            )
+          `)}
+        ) ORDER BY oi.id
+      ), '[]'::jsonb)
+      FROM order_items oi 
+      WHERE oi.receiver_id = r.id
+      AND oi.order_id = o.id)
+    `;
+
+    // ────────────────────────────────────────────────
+    // Main query – search by rgl_booking_number
+    // ────────────────────────────────────────────────
+    const query = `
+      SELECT 
+        o.id AS order_id,
+        o.booking_ref,
+        o.rgl_booking_number,
+        o.created_at,
+        o.status,
+        o.eta,
+        o.etd,
+        o.total_assigned_qty,
+        o.place_of_loading,
+        o.final_destination,
+        o.place_of_delivery,
+        o.consignment_remarks,
+        o.order_remarks,
+        o.consignment_number,
+        o.consignment_vessel,
+        o.consignment_voyage,
+        o.associated_container,
+        s.sender_name,
+        s.sender_contact,
+        s.sender_address,
+        s.sender_email,
+        t.transport_type,
+        t.third_party_transport,
+        t.collection_scope,
+
+        (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb) 
+         FROM (
+           SELECT 
+             r.id,
+             r.order_id                    AS "orderId",
+             r.receiver_name               AS "receiverName",
+             r.receiver_contact            AS "receiverContact",
+             r.receiver_address            AS "receiverAddress",
+             r.receiver_email              AS "receiverEmail",
+             ${safeIntCast('r.total_number')}       AS "totalNumber",
+             ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+             r.receiver_ref                AS "receiverRef",
+             r.remarks,
+             r.containers,
+             r.status,
+             r.eta                         AS eta,
+             r.etd                         AS etd,
+             r.shipping_line               AS "shippingLine",
+             r.consignment_vessel          AS "consignmentVessel",
+             r.consignment_number          AS "consignmentNumber",
+             r.consignment_marks           AS "consignmentMarks",
+             r.consignment_voyage          AS "consignmentVoyage",
+             r.full_partial                AS "fullPartial",
+             ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+             ${shippingDetailsAgg}                  AS "shippingDetails",
+             ${shippingDetailsAgg.replace('"shippingDetails"', '"shippingdetails"')} AS "shippingdetails",
+             COALESCE((
+               SELECT jsonb_agg(
+                 jsonb_build_object(
+                   'drop_method',    dod.drop_method,
+                   'dropoff_name',   dod.dropoff_name,
+                   'drop_off_cnic',  dod.drop_off_cnic,
+                   'drop_off_mobile',dod.drop_off_mobile,
+                   'plate_no',       dod.plate_no,
+                   'drop_date',      TO_CHAR(dod.drop_date, 'YYYY-MM-DD')
+                 ) ORDER BY dod.id
+               ) FROM drop_off_details dod 
+               WHERE dod.receiver_id = r.id
+             ), '[]'::jsonb) AS "dropOffDetails"
+           FROM receivers r
+           WHERE r.order_id = o.id
+         ) r_full) AS receivers
+      FROM orders o
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      WHERE o.rgl_booking_number ILIKE $1
+      LIMIT 5
+    `;
+
+    const { rows } = await pool.query(query, [`%${search}%`]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No order found for RGL Booking Number "${search}"`
+      });
+    }
+
+    // Format response (same shape as getOrders / getOrderByOrderId)
+    const formatted = rows.map(row => {
+      let receivers = row.receivers || '[]';
+      if (typeof receivers === 'string') {
+        try {
+          receivers = JSON.parse(receivers);
+        } catch (e) {
+          console.warn(`Failed to parse receivers for order ${row.order_id}`);
+          receivers = [];
+        }
+      }
+
+      return {
+        id: row.order_id,
+        booking_ref: row.booking_ref,
+        rgl_booking_number: row.rgl_booking_number,
+        status: row.status,
+        consignment_remarks: row.consignment_remarks || null,
+        place_of_loading: row.place_of_loading,
+        final_destination: row.final_destination,
+        place_of_delivery: row.place_of_delivery,
+        order_remarks: row.order_remarks,
+        associated_container: row.associated_container || null,
+        consignment_number: row.consignment_number || null,
+        consignment_vessel: row.consignment_vessel || null,
+        consignment_voyage: row.consignment_voyage || null,
+        sender_name: row.sender_name || null,
+        sender_contact: row.sender_contact || null,
+        sender_address: row.sender_address || null,
+        sender_email: row.sender_email || null,
+        eta: row.eta,
+        etd: row.etd || null,
+        shipping_line: null, // fill if needed
+        transport_type: row.transport_type || null,
+        third_party_transport: row.third_party_transport || null,
+        collection_scope: row.collection_scope || "Partial",
+        total_assigned_qty: row.total_assigned_qty || 0,
+        created_at: row.created_at?.toISOString(),
+        updated_at: null, // add if you select it
+        created_by: null, // add if needed
+        receivers,
+        overall_status: row.status,
+        color: "#E0E0E0",
+        // ... other defaults your frontend expects
+      };
+    });
+
+    const data = formatted.length === 1 ? formatted[0] : formatted;
+
+    res.json({
+      success: true,
+      data,
+      message: `Found ${formatted.length} matching order(s) for RGL Booking Number`
+    });
+
+  } catch (err) {
+    console.error('getOrderByRglBookingNo error:', err.stack || err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order details',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      code: err.code,
+      position: err.position
+    });
+  }
+}
+
 // export async function getOrders(req, res) {
 //   try {
 //     const { page = 1, limit = 10, status, booking_ref, container_id } = req.query;

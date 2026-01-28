@@ -13,7 +13,8 @@ import {
   getOrdersConsignments,
   getOrderByOrderId,
   getMyOrdersByRef,
-  removeContainerAssignments
+  removeContainerAssignments,
+  getOrderByRglBookingNo
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -63,7 +64,8 @@ router.get('/consignmentsOrders', getOrdersConsignments);
 // Example correct routing (in your routes file)
 router.get('/track/item/:ref', getOrderByItemRef);
 router.get('/track/order/:ref', getOrderByOrderId);
-router.get('/track/consignment/:id', getOrderByTrackingId); // or whatever name
+router.get('/track/rgl/:rglBookingNo',  getOrderByRglBookingNo);     // :rglBookingNo
+router.get('/track/consignment_no/:id', getOrderByTrackingId); // or whatever name
 // GET /api/orders/:id - Fetch a specific order
 router.get('/:id', getOrderById);
 router.post('/assign-container', assignContainersToOrders);
