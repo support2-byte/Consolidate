@@ -11,7 +11,8 @@ import orderRoutes from './modules/orders/orderRoutes.js'
 import consignmentRoutes from './modules/consignment/consignment.routes.js';
 import optionsRoutes from './modules/options/options.routes.js';
 import sendOrderEmail from "./middleware/nodeMailer.js";
-
+import { getCustomersPanel } from "./modules/customers/customer.controller.js";
+import webhook from "./modules/customers/webhook.js"
 // After other middleware
   dotenv.config();
 
@@ -42,6 +43,7 @@ app.use("/api/containers", containerRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/consignments", consignmentRoutes);
 app.use('/api/options', optionsRoutes);
+app.use('/api/zohoCustomer', webhook);
 
 // Serve uploads folder statically on /uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
