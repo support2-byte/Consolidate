@@ -44,6 +44,7 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/consignments", consignmentRoutes);
 app.use('/api/options', optionsRoutes);
 app.use('/api/zohoCustomer', webhook);
+app.use('/api/customerPanals', getCustomersPanel);
 
 // Serve uploads folder statically on /uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));

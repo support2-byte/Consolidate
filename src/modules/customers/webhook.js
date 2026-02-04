@@ -10,43 +10,43 @@ const router = express.Router();
 let zohoAccessToken = null;
 const ORG_ID = process.env.ZOHO_BOOKS_ORG_ID;  
 
-
+// ... imports unchanged
 router.post('/zoho-customer', async (req, res) => {
   console.log("Received Zoho webhook for customer sync");
 
-  // Optional: simple rate-limit / duplicate prevention (basic version)
-  // For production: use redis/mutex or check recent logs
-  // if (isWebhookProcessing) { return res.status(429).json({ error: "Processing in progress" }); }
-  // let isWebhookProcessing = true;
-
   try {
-    // Optional: secret validation (recommended)
     const secret = req.query.secret;
     if (secret !== process.env.ZOHO_WEBHOOK_SECRET) {
-      console.log("Invalid webhook secret received");
-      return res.status(403).json({ error: "Forbidden: Invalid secret" });
+      console.warn("Invalid webhook secret");
+      return res.status(200).json({ message: "Ignored" });
     }
 
-    const contact = req.body; // Zoho sends single contact object for create/update
+    let contact = req.body;
 
-    if (!contact || !contact.contact_id) {
-      console.log("Invalid webhook payload - missing contact_id");
-      return res.status(200).json({ message: "Ignored: invalid payload" });
+    // ─── THIS IS THE FIX ───
+    // Zoho wraps real events in { "contact": { ... } }
+    if (contact && contact.contact) {
+      contact = contact.contact;
+      console.log("Unwrapped nested 'contact' → ready to sync");
+    }
+
+    if (!contact?.contact_id) {
+      console.log("Ignored: missing contact_id after unwrap");
+      return res.status(200).json({ message: "Ignored: missing contact_id" });
     }
 
     if (contact.contact_type !== 'customer') {
-      console.log(`Ignored: contact_type is ${contact.contact_type}`);
+      console.log(`Ignored: not a customer (type: ${contact.contact_type})`);
       return res.status(200).json({ message: "Ignored: not a customer" });
     }
 
-    console.log(`Processing customer: ${contact.contact_id} - ${contact.contact_name || 'no name'}`);
+    console.log(`Syncing customer: ${contact.contact_id} - ${contact.contact_name || 'no name'}`);
 
-    // Same data preparation as in getCustomersPanel
+    // Your existing data preparation + upsert (unchanged)
     const addressStr = contact.billing_address ? JSON.stringify(contact.billing_address) : null;
     const createdTime = contact.created_time ? new Date(contact.created_time).toISOString() : null;
     const modifiedTime = contact.last_modified_time ? new Date(contact.last_modified_time).toISOString() : null;
 
-    // Exact same upsert query you use
     await pool.query(
       `INSERT INTO customers 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
@@ -71,8 +71,8 @@ router.post('/zoho-customer', async (req, res) => {
         contact.email || null,
         addressStr,
         contact.notes || null,
-        null,  // associated_by
-        null,  // system_notes
+        null,
+        null,
         contact.contact_type || null,
         contact.status === "active",
         contact.created_by_name || null,
@@ -82,35 +82,42 @@ router.post('/zoho-customer', async (req, res) => {
       ]
     );
 
-    console.log(`Successfully upserted customer ${contact.contact_id} from webhook`);
+    console.log(`Successfully auto-synced customer ${contact.contact_id}`);
 
-    // Optional: return some info (Zoho doesn't care about body, just 200)
-    res.status(200).json({ 
-      status: "success", 
-      contact_id: contact.contact_id 
-    });
+    res.status(200).json({ status: "success", contact_id: contact.contact_id });
 
   } catch (err) {
-    console.error("Webhook sync error:", {
-      message: err.message,
-      stack: err.stack,
-      payload: req.body ? JSON.stringify(req.body, null, 2) : "no body"
-    });
-
-    const status = err.response?.status || 500;
-    const msg = err.response?.data?.message || err.message;
-
-    if (status === 404) {
-      return res.status(400).json({
-        error: `Possible Zoho config issue - check organization_id or domain`
-      });
-    }
-
-    res.status(status).json({ error: `Failed to process webhook: ${msg}` });
+    console.error("Webhook error:", err.message, err.stack?.substring(0, 300));
+    // Still acknowledge to Zoho
+    res.status(200).json({ status: "error_logged" });
   } finally {
-    // isWebhookProcessing = false;
     console.log("Webhook processing finished");
   }
 });
+router.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
 
+    const uptime = process.uptime(); // seconds since server started
+    const memory = process.memoryUsage();
+
+    res.status(200).json({
+      status: 'ok',
+      time: new Date().toISOString(),
+      db: 'connected',
+      uptimeSeconds: Math.round(uptime),
+      memory: {
+        rss: Math.round(memory.rss / 1024 / 1024) + ' MB', // resident set size
+        heapUsed: Math.round(memory.heapUsed / 1024 / 1024) + ' MB'
+      }
+    });
+  } catch (err) {
+    console.error('Health check failed:', err.message);
+    res.status(503).json({
+      status: 'error',
+      message: 'DB unavailable',
+      error: err.message // optional – be careful in production
+    });
+  }
+});
 export default router;
