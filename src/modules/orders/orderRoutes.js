@@ -9,12 +9,14 @@ import {
   assignContainersToOrders,
   // updateOrderStatus,
   updateReceiverStatus,  // New: Import for status update
-  assignContainersToOrdersAll,
+  // assignContainersToOrdersAll,
   getOrdersConsignments,
   getOrderByOrderId,
   getMyOrdersByRef,
   removeContainerAssignments,
-  getOrderByRglBookingNo
+  getOrderByRglBookingNo,
+  assignOneContainerToMultipleReceivers,
+  assignContainersBatch
 } from './order.controller.js';
 import multer from "multer";
 import upload from "../../middleware/upload.js";
@@ -71,8 +73,8 @@ router.get('/:id', getOrderById);
 router.post('/assign-container', assignContainersToOrders);
 router.post('/remove-assign-container', removeContainerAssignments);
 // POST /api/orders/assign-container - Assign container to multiple orders
-// router.post('/:orderId/receivers/:id/assign-container', assignContainersToOrders);
-router.post('/assign-containers-to-orders', assignContainersToOrdersAll);
+router.post('/assign-containers-batch', assignContainersBatch);
+router.post('/assign-containers-to-orders', assignOneContainerToMultipleReceivers);
 
 
 export default router;      
