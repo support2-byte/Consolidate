@@ -1,80 +1,111 @@
 import express from "express";
-import { 
-  createOrder, 
-  updateOrder, 
-  getOrders, 
-  getOrderById, 
-  getOrderByTrackingId, 
-  getOrderByItemRef, 
+import multer from "multer";
+import path from "path";
+import upload from "../../middleware/upload.js"; // assuming this is your configured multer
+import { requireAuth } from "../../modules/auth/auth.middleware.js"; // ← use this one
+
+import {
+  createOrder,
+  updateOrder,
+  getOrders,
+  getOrderById,
+  getOrderByTrackingId,
+  getOrderByItemRef,
   assignContainersToOrders,
-  // updateOrderStatus,
-  updateReceiverStatus,  // New: Import for status update
-  // assignContainersToOrdersAll,
+  updateReceiverStatus,
   getOrdersConsignments,
   getOrderByOrderId,
   getMyOrdersByRef,
   removeContainerAssignments,
   getOrderByRglBookingNo,
   assignOneContainerToMultipleReceivers,
-  assignContainersBatch
-} from './order.controller.js';
-import multer from "multer";
-import upload from "../../middleware/upload.js";
-import path from "path"; // Add this import for path.extname
-import { authenticateToken } from "../../modules/auth/auth.middleware.js";
-import { get } from "http";
+  assignContainersBatch,
+} from "./order.controller.js";
+
 const router = express.Router();
 
-// Configure multer for file uploads (stores in 'uploads/' directory)
+// Multer configuration (moved here for clarity – you can keep it in middleware/upload.js too)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Ensure this directory exists
+    cb(null, "uploads/");
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
+    const ext = path.extname(file.originalname);
+    cb(null, `${Date.now()}${ext}`);
+  },
 });
-// const upload = multer({ storage });
 
-// POST /api/orders - Create a new order (expects multipart/form-data with 'attachments' field)
-router.post('/', upload.fields([
-  { name: 'attachments', maxCount: 10 },
-  { name: 'gatepass', maxCount: 10 }
-]), createOrder);
+// If you want custom multer per route, you can define it here
+// But assuming ../../middleware/upload.js already exports a configured multer instance
 
-// PUT /api/orders/:id - Update an existing order
-router.put('/:id', upload.fields([
-  { name: 'attachments', maxCount: 10 },
-  { name: 'gatepass', maxCount: 10 }
-]), updateOrder);
+// ────────────────────────────────────────────────
+// Protected routes – require authentication
+// ────────────────────────────────────────────────
 
-// PUT /api/orders/:id/shipping - Update shipping details for an existing order (receivers and order_items)
-router.put('/:id/shipping', upload.fields([
-  { name: 'attachments', maxCount: 10 },
-  { name: 'gatepass', maxCount: 10 }
-]), updateOrder);
+// POST /api/orders - Create new order (with file uploads)
+router.post(
+  "/",
+  requireAuth,
+  upload.fields([
+    { name: "attachments", maxCount: 10 },
+    { name: "gatepass", maxCount: 10 },
+  ]),
+  createOrder
+);
 
-// PUT /api/orders/:id/status - Update order status with notifications
-router.put('/:orderId/receivers/:id/status', updateReceiverStatus);
-router.get('/myOrderByRef', authenticateToken, getMyOrdersByRef);
-// GET /api/orders - Fetch all orders
-router.get('/', getOrders);
-// router.get('/track/:trackingId', getOrderByTrackingId);
-// router.get('/track/item/:itemRef', getOrderByItemRef);
-router.get('/consignmentsOrders', getOrdersConsignments); 
-// In your router file
-// Example correct routing (in your routes file)
-router.get('/track/item/:ref', getOrderByItemRef);
-router.get('/track/order/:ref', getOrderByOrderId);
-router.get('/track/rgl/:rglBookingNo',  getOrderByRglBookingNo);     // :rglBookingNo
-router.get('/track/consignment_no/:id', getOrderByTrackingId); // or whatever name
-// GET /api/orders/:id - Fetch a specific order
-router.get('/:id', getOrderById);
-router.post('/assign-container', assignContainersToOrders);
-router.post('/remove-assign-container', removeContainerAssignments);
-// POST /api/orders/assign-container - Assign container to multiple orders
-router.post('/assign-containers-batch', assignContainersBatch);
-router.post('/assign-containers-to-orders', assignOneContainerToMultipleReceivers);
+// PUT /api/orders/:id - Update order (with files)
+router.put(
+  "/:id",
+  requireAuth,
+  upload.fields([
+    { name: "attachments", maxCount: 10 },
+    { name: "gatepass", maxCount: 10 },
+  ]),
+  updateOrder
+);
 
+// PUT /api/orders/:id/shipping - Update shipping details
+router.put(
+  "/:id/shipping",
+  requireAuth,
+  upload.fields([
+    { name: "attachments", maxCount: 10 },
+    { name: "gatepass", maxCount: 10 },
+  ]),
+  updateOrder // ← assuming same handler, or create dedicated if needed
+);
 
-export default router;      
+// PUT /api/orders/:orderId/receivers/:id/status - Update receiver status
+router.put("/:orderId/receivers/:id/status", requireAuth, updateReceiverStatus);
+
+// ────────────────────────────────────────────────
+// Container assignment routes (protected)
+// ────────────────────────────────────────────────
+
+router.post("/assign-container", requireAuth, assignContainersToOrders);
+router.post("/assign-containers-batch", requireAuth, assignContainersBatch);
+router.post(
+  "/assign-containers-to-orders",
+  requireAuth,
+  assignOneContainerToMultipleReceivers
+);
+router.post("/remove-assign-container", requireAuth, removeContainerAssignments);
+
+// ────────────────────────────────────────────────
+// Read routes – some public, some protected
+// ────────────────────────────────────────────────
+
+// Public or semi-public tracking routes (no auth required?)
+router.get("/track/item/:ref", getOrderByItemRef);
+router.get("/track/order/:ref", getOrderByOrderId);
+router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
+router.get("/track/consignment_no/:id", getOrderByTrackingId);
+router.get('/consignmentsOrders', requireAuth, getOrdersConsignments);
+
+// Protected reads
+router.get("/", requireAuth, getOrders);                    // all orders – probably admin only
+router.get("/:id", requireAuth, getOrderById);  
+// User-specific orders (protected)
+router.get("/myOrderByRef", requireAuth, getMyOrdersByRef);
+
+export default router;

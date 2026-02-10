@@ -1,6 +1,6 @@
 import pool from "../../db/pool.js";
 import sendOrderEmail from "../../middleware/nodeMailer.js";
-
+import { withUserAudit } from "../../middleware/dbAudit.js";
 
 // Updated validation: Distinguish missing vs. invalid; cleaner messages
 function validateOrderFields({
@@ -74,14 +74,18 @@ async function uploadFiles(files, type) {
   return files.map(f => `/uploads/${type}/${Date.now()}-${f.originalname}`);
 }
 
+// =============================================
+// createOrder - FULL UPDATED VERSION
+// =============================================
+
 export async function createOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
+
     const updates = req.body || {};
-    const files = req.files || {}; // Assuming multer .fields() or .any()
-    const created_by = 'system';
+    const files = req.files || {};
 
     // Map incoming snake_case to camelCase for consistency
     const camelUpdates = {
@@ -95,14 +99,12 @@ export async function createOrder(req, res) {
       orderRemarks: updates.order_remarks,
       eta: updates.eta,
       etd: updates.etd,
-      // Sender fields
       senderName: updates.sender_name,
       senderContact: updates.sender_contact,
       senderAddress: updates.sender_address,
       senderEmail: updates.sender_email,
       senderRef: updates.sender_ref,
       senderRemarks: updates.sender_remarks,
-      // Receiver fields (for when sender_type='receiver')
       receiverName: updates.receiver_name,
       receiverContact: updates.receiver_contact,
       receiverAddress: updates.receiver_address,
@@ -131,7 +133,6 @@ export async function createOrder(req, res) {
       clientReceiverId: updates.client_receiver_id,
       clientReceiverMobile: updates.client_receiver_mobile,
       deliveryDate: updates.delivery_date,
-      // JSON fields remain as-is
       receivers: updates.receivers,
       senders: updates.senders,
       order_items: updates.order_items,
@@ -210,7 +211,7 @@ export async function createOrder(req, res) {
         receiver_contact: party.sender_contact || party.senderContact || '',
         receiver_address: party.sender_address || party.senderAddress || '',
         receiver_email: party.sender_email || party.senderEmail || '',
-        receiver_marks_and_number: party.sender_marks_and_number || '',  // if needed for senders
+        receiver_marks_and_number: party.sender_marks_and_number || '',
         containers: party.containers || party.containerDetails || [],
         status: party.status || 'Created',
         eta: party.eta,
@@ -225,7 +226,7 @@ export async function createOrder(req, res) {
         receiver_contact: party.receiver_contact || party.receiverContact || '',
         receiver_address: party.receiver_address || party.receiverAddress || '',
         receiver_email: party.receiver_email || party.receiverEmail || '',
-        receiver_marks_and_number: party.receiver_marks_and_number || '',   // ← NEW FIELD
+        receiver_marks_and_number: party.receiver_marks_and_number || '',
         containers: party.containers || party.containerDetails || [],
         status: party.status || 'Created',
         eta: party.eta,
@@ -379,7 +380,7 @@ export async function createOrder(req, res) {
     const normDropDate = updatedFields.dropDate ? normalizeDate(updatedFields.dropDate) : null;
     const normDeliveryDate = updatedFields.deliveryDate ? normalizeDate(updatedFields.deliveryDate) : null;
 
-    // Insert into orders
+    // Insert into orders – audited
     const ordersValues = [
       updatedFields.bookingRef,
       updatedFields.status,
@@ -389,23 +390,22 @@ export async function createOrder(req, res) {
       updatedFields.finalDestination,
       updatedFields.placeOfDelivery,
       updatedFields.orderRemarks || '',
-      attachmentsJson,
-      created_by
+      attachmentsJson
     ];
 
     const ordersQuery = `
       INSERT INTO orders (
         booking_ref, status, rgl_booking_number, place_of_loading, point_of_origin,
-        final_destination, place_of_delivery, order_remarks, attachments, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      RETURNING id, booking_ref, status, created_at
+        final_destination, place_of_delivery, order_remarks, attachments
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id, booking_ref, status, created_at, created_by, updated_by
     `;
 
-    const ordersResult = await client.query(ordersQuery, ordersValues);
+    const ordersResult = await withUserAudit(req, ordersQuery, ordersValues);
     const orderId = ordersResult.rows[0].id;
     const newOrder = ordersResult.rows[0];
 
-    // Insert sender
+    // Insert sender (no audit needed)
     const sendersValues = [
       orderId,
       updatedFields.senderName,
@@ -434,11 +434,32 @@ export async function createOrder(req, res) {
 
     for (let i = 0; i < parsedReceivers.length; i++) {
       const rec = parsedReceivers[i];
-      console.log(`[Receiver ${i+1}] marks_and_number:`, rec.receiver_marks_and_number); // Debug
+      console.log(`[Receiver ${i+1}] marks_and_number:`, rec.receiver_marks_and_number);
 
       const etaCalc = rec.eta ? normalizeDate(rec.eta) : await calculateETA(client, rec.status || 'Created');
       const recNormEta = typeof etaCalc === 'string' ? etaCalc : (etaCalc?.eta || null);
       const recNormEtd = rec.etd ? normalizeDate(rec.etd) : null;
+
+      const recContainersJson = JSON.stringify(rec.containers || []);
+
+      const receiversValues = [
+        orderId,
+        rec.receiver_name || '',
+        rec.receiver_contact || '',
+        rec.receiver_address || '',
+        rec.receiver_email || '',
+        rec.receiver_marks_and_number || '',
+        recNormEta,
+        recNormEtd,
+        '', '', '', '', '',
+        rec.total_number,
+        rec.total_weight,
+        rec.remarks || '',
+        recContainersJson,
+        rec.status || 'Created',
+        rec.full_partial || 'Full',
+        rec.qty_delivered ? parseInt(rec.qty_delivered) : null
+      ];
 
       const receiversQuery = `
         INSERT INTO receivers (
@@ -450,36 +471,11 @@ export async function createOrder(req, res) {
         RETURNING id, receiver_name
       `;
 
-      const recContainersJson = JSON.stringify(rec.containers || []);
-
-      const receiversValues = [
-        orderId,
-        rec.receiver_name || '',
-        rec.receiver_contact || '',
-        rec.receiver_address || '',
-        rec.receiver_email || '',
-        rec.receiver_marks_and_number || '',   // ← NEW FIELD HERE
-        recNormEta,
-        recNormEtd,
-        '', // shipping_line
-        '', // consignment_vessel
-        '', // consignment_number
-        '', // consignment_marks
-        '', // consignment_voyage
-        rec.total_number,
-        rec.total_weight,
-        rec.remarks || '',
-        recContainersJson,
-        rec.status || 'Created',
-        rec.full_partial || 'Full',
-        rec.qty_delivered ? parseInt(rec.qty_delivered) : null
-      ];
-
-      const recResult = await client.query(receiversQuery, receiversValues);
+      const recResult = await withUserAudit(req, receiversQuery, receiversValues);
       const receiverId = recResult.rows[0].id;
       receiverIds.push(receiverId);
 
-      // Insert order_items
+      // order_items – audited
       const shippingDetails = parsedShippingItems[i] || [];
       for (let j = 0; j < shippingDetails.length; j++) {
         const item = shippingDetails[j];
@@ -514,10 +510,10 @@ export async function createOrder(req, res) {
           JSON.stringify(containerDetails)
         ];
 
-        await client.query(orderItemsQuery, orderItemsValues);
+        await withUserAudit(req, orderItemsQuery, orderItemsValues);
       }
 
-      // Insert drop-off details
+      // drop_off_details – audited
       const receiverDropOffs = parsedDropOffDetails[i] || [];
       for (let d = 0; d < receiverDropOffs.length; d++) {
         const dropOff = receiverDropOffs[d];
@@ -540,7 +536,7 @@ export async function createOrder(req, res) {
           normDropDate
         ];
 
-        await client.query(dropOffQuery, dropOffValues);
+        await withUserAudit(req, dropOffQuery, dropOffValues);
       }
 
       trackingData.push({
@@ -551,16 +547,7 @@ export async function createOrder(req, res) {
       });
     }
 
-    // Insert transport details
-    const transportQuery = `
-      INSERT INTO transport_details (
-        order_id, transport_type, drop_method, dropoff_name, drop_off_cnic, drop_off_mobile, plate_no, drop_date,
-        collection_method, collection_scope, qty_delivered, client_receiver_name, client_receiver_id, client_receiver_mobile, delivery_date, gatepass,
-        third_party_transport, driver_name, driver_contact, driver_nic, driver_pickup_location, truck_number
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-      RETURNING id
-    `;
-
+    // Transport details – audited
     const transportValues = [
       orderId,
       updatedFields.transportType,
@@ -586,7 +573,16 @@ export async function createOrder(req, res) {
       updatedFields.truckNumber || null
     ];
 
-    await client.query(transportQuery, transportValues);
+    const transportQuery = `
+      INSERT INTO transport_details (
+        order_id, transport_type, drop_method, dropoff_name, drop_off_cnic, drop_off_mobile, plate_no, drop_date,
+        collection_method, collection_scope, qty_delivered, client_receiver_name, client_receiver_id, client_receiver_mobile, delivery_date, gatepass,
+        third_party_transport, driver_name, driver_contact, driver_nic, driver_pickup_location, truck_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+      RETURNING id
+    `;
+
+    await withUserAudit(req, transportQuery, transportValues);
 
     await client.query('COMMIT');
     res.status(201).json({ success: true, order: newOrder, tracking: trackingData });
@@ -599,15 +595,20 @@ export async function createOrder(req, res) {
     if (client) client.release();
   }
 }
+
+
+// =============================================
+// updateOrder - FULL UPDATED VERSION
+// =============================================
 export async function updateOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
+
     const { id } = req.params;
     const updates = req.body || {};
     const files = req.files || {};
-    const updated_by = updates.updated_by || 'system';
 
     // Fetch current order and related records for fallback
     const currentOrderResult = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
@@ -746,7 +747,7 @@ export async function updateOrder(req, res) {
         receiver_contact: party.sender_contact || party.senderContact || '',
         receiver_address: party.sender_address || party.senderAddress || '',
         receiver_email: party.sender_email || party.senderEmail || '',
-        receiver_marks_and_number: party.sender_marks_and_number || '',  // if needed
+        receiver_marks_and_number: party.sender_marks_and_number || '',
         containers: party.containers || party.containerDetails || [],
         status: party.status || currentOrder.status || 'Created',
         eta: party.eta || currentOrder.eta,
@@ -761,7 +762,7 @@ export async function updateOrder(req, res) {
         receiver_contact: party.receiver_contact || party.receiverContact || '',
         receiver_address: party.receiver_address || party.receiverAddress || '',
         receiver_email: party.receiver_email || party.receiverEmail || '',
-        receiver_marks_and_number: party.receiver_marks_and_number || '',   // ← NEW FIELD
+        receiver_marks_and_number: party.receiver_marks_and_number || '',
         containers: party.containers || party.containerDetails || [],
         status: party.status || currentOrder.status || 'Created',
         eta: party.eta || currentOrder.eta,
@@ -873,7 +874,7 @@ export async function updateOrder(req, res) {
       deliveryDate: camelUpdates.deliveryDate !== undefined ? camelUpdates.deliveryDate : currentTransport.delivery_date,
     };
 
-    // Validation (unchanged, but you can add marks_and_number if needed later)
+    // Validation (unchanged)
     const updateErrors = [];
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const requiredFields = ['rglBookingNumber', 'senderType'];
@@ -899,10 +900,11 @@ export async function updateOrder(req, res) {
     const statusChanged = camelUpdates.status && camelUpdates.status !== currentOrder.status;
     const finalStatus = camelUpdates.status || currentOrder.status;
 
-    // Update orders table
-    const ordersSet = [];
-    const ordersValues = [];
+    // Update orders table – using withUserAudit
+    let ordersSet = [];
+    let ordersValues = [];
     let ordersParamIndex = 1;
+
     const ordersFields = [
       { key: 'booking_ref', val: updatedFields.bookingRef },
       { key: 'status', val: finalStatus },
@@ -925,12 +927,16 @@ export async function updateOrder(req, res) {
       }
     });
 
-    if (ordersSet.length > 0) {
-      ordersSet.push('updated_at = CURRENT_TIMESTAMP');
-      ordersValues.push(id);
-      const ordersQuery = `UPDATE orders SET ${ordersSet.join(', ')} WHERE id = $${ordersParamIndex} RETURNING *`;
-      await client.query(ordersQuery, ordersValues);
-    }
+    const ordersQuery = `
+      UPDATE orders
+      SET ${ordersSet.join(', ')}
+      WHERE id = $${ordersParamIndex}
+      RETURNING *
+    `;
+
+    ordersValues.push(id);
+
+    await withUserAudit(req, ordersQuery, ordersValues);
 
     // Update senders
     const sendersSet = [];
@@ -973,7 +979,7 @@ export async function updateOrder(req, res) {
 
     for (let i = 0; i < parsedReceivers.length; i++) {
       const rec = parsedReceivers[i];
-      console.log(`[Receiver ${i+1}] marks_and_number (update):`, rec.receiver_marks_and_number); // Debug
+      console.log(`[Receiver ${i+1}] marks_and_number (update):`, rec.receiver_marks_and_number);
 
       const recNormEta = rec.eta ? normalizeDate(rec.eta) : currentOrder.eta;
       const recNormEtd = rec.etd ? normalizeDate(rec.etd) : currentOrder.etd;
@@ -981,7 +987,6 @@ export async function updateOrder(req, res) {
       let receiverId;
 
       if (isReplacingShippingParties) {
-        // Insert new receiver
         const insertReceiversQuery = `
           INSERT INTO receivers (
             order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
@@ -1000,7 +1005,7 @@ export async function updateOrder(req, res) {
           rec.receiver_contact || '',
           rec.receiver_address || '',
           rec.receiver_email || '',
-          rec.receiver_marks_and_number || '',   // ← NEW FIELD
+          rec.receiver_marks_and_number || '',
           recNormEta,
           recNormEtd,
           '',
@@ -1017,11 +1022,10 @@ export async function updateOrder(req, res) {
           rec.qty_delivered ? parseInt(rec.qty_delivered) : null
         ];
 
-        const recResult = await client.query(insertReceiversQuery, receiversValues);
+        const recResult = await withUserAudit(req, insertReceiversQuery, receiversValues);
         receiverId = recResult.rows[0].id;
         receiverIds.push(receiverId);
       } else {
-        // Update existing receiver (find by index or first match)
         const existingRecResult = await client.query(
           'SELECT id FROM receivers WHERE order_id = $1 ORDER BY id OFFSET $2 LIMIT 1',
           [id, i]
@@ -1038,7 +1042,7 @@ export async function updateOrder(req, res) {
             { key: 'receiver_contact', val: rec.receiver_contact || '' },
             { key: 'receiver_address', val: rec.receiver_address || '' },
             { key: 'receiver_email', val: rec.receiver_email || '' },
-            { key: 'receiver_marks_and_number', val: rec.receiver_marks_and_number || '' }, // ← NEW
+            { key: 'receiver_marks_and_number', val: rec.receiver_marks_and_number || '' },
             { key: 'eta', val: recNormEta },
             { key: 'etd', val: recNormEtd },
             { key: 'total_number', val: rec.total_number },
@@ -1059,12 +1063,12 @@ export async function updateOrder(req, res) {
           if (recSet.length > 0) {
             recValues.push(receiverId);
             const recQuery = `UPDATE receivers SET ${recSet.join(', ')} WHERE id = $${recParamIndex}`;
-            await client.query(recQuery, recValues);
+            await withUserAudit(req, recQuery, recValues);
           }
         }
       }
 
-      // Insert/Update order_items
+      // Insert/Update order_items – audited
       if (isReplacingShippingParties || camelUpdates.order_items) {
         if (!isReplacingShippingParties) {
           await client.query('DELETE FROM order_items WHERE order_id = $1 AND receiver_id = $2', [id, receiverId]);
@@ -1102,7 +1106,7 @@ export async function updateOrder(req, res) {
             JSON.stringify(containerDetails)
           ];
 
-          await client.query(orderItemsQuery, orderItemsValues);
+          await withUserAudit(req, orderItemsQuery, orderItemsValues);
         }
       }
 
@@ -1113,7 +1117,7 @@ export async function updateOrder(req, res) {
       });
     }
 
-    // Update transport details (unchanged)
+    // Update transport details – use withUserAudit
     const transportSet = [];
     const transportValues = [];
     let transportParamIndex = 1;
@@ -1152,7 +1156,7 @@ export async function updateOrder(req, res) {
     if (transportSet.length > 0 && currentTransport.id) {
       transportValues.push(currentTransport.id);
       const transportQuery = `UPDATE transport_details SET ${transportSet.join(', ')} WHERE id = $${transportParamIndex}`;
-      await client.query(transportQuery, transportValues);
+      await withUserAudit(req, transportQuery, transportValues);
     }
 
     await client.query('COMMIT');
@@ -1165,7 +1169,7 @@ export async function updateOrder(req, res) {
     const fetchReceiversQuery = `
       SELECT 
         r.*,
-        r.marks_and_number AS "marksAndNumber",  -- ← NEW
+        r.marks_and_number AS "marksAndNumber",
         COALESCE(
           (
             SELECT json_agg(
@@ -1194,7 +1198,7 @@ export async function updateOrder(req, res) {
     const enhancedReceiversResult = await client.query(fetchReceiversQuery, [id]);
     const enhancedReceivers = enhancedReceiversResult.rows.map(row => ({
       ...row,
-      receiverMarksNumber: row.marksAndNumber || null,  // ← Map to UI-expected key
+      receiverMarksNumber: row.marksAndNumber || null,
       shippingDetails: row.shippingDetails || [],
       containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || [])
     }));
@@ -1224,200 +1228,7 @@ export async function updateOrder(req, res) {
     if (client) client.release();
   }
 }
-// export async function getOrders(req, res) {
-//   try {
-//     // FIXED: Sanitize page and limit early to avoid NaN in offset calc
-//     const rawPage = req.query.page || '1';
-//     const rawLimit = req.query.limit || '10';
-//     const safePage = Math.max(1, parseInt(rawPage) || 1);
-//     const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit) || 10)); // Clamp 1-100
-//     const safeOffset = (parseInt(safePage) - 1) * safeLimit;
-//     const { status, booking_ref, container_id } = req.query;
-//     let whereClause = 'WHERE 1=1';
-//     let params = [];
-//     if (status) {
-//       whereClause += ' AND o.status = $' + (params.length + 1);
-//       params.push(status);
-//     }
-//     if (booking_ref) {
-//       whereClause += ' AND o.booking_ref ILIKE $' + (params.length + 1);
-//       params.push(`%${booking_ref}%`);
-//     }
-//     let containerNumbers = []; // To store looked-up container numbers
-//     if (container_id) {
-//       const containerIds = container_id.split(',').map(id => id.trim()).filter(Boolean);
-//       if (containerIds.length > 0) {
-//         // FIXED: Filter valid numeric IDs to avoid NaN/empty in array
-//         const validIds = containerIds.filter(id => !isNaN(parseInt(id)));
-//         if (validIds.length === 0) {
-//           // No valid containers, early return empty
-//           return res.json({
-//             data: [],
-//             pagination: {
-//               page: safePage,
-//               limit: safeLimit,
-//               total: 0,
-//               totalPages: 0
-//             }
-//           });
-//         }
-//         const idArray = validIds.map(id => parseInt(id)); // Now safe: all ints
-//         const containerQuery = {
-//           text: 'SELECT container_number FROM container_master WHERE cid = ANY($1::int[])',
-//           values: [idArray]
-//         };
-//         const containerResult = await pool.query(containerQuery);
-//         containerNumbers = containerResult.rows.map(row => row.container_number).filter(Boolean);
-//         if (containerNumbers.length === 0) {
-//           // No containers found, early return empty
-//           return res.json({
-//             data: [],
-//             pagination: {
-//               page: safePage,
-//               limit: safeLimit,
-//               total: 0,
-//               totalPages: 0
-//             }
-//           });
-//         }
-//         // Conditions for ot.container_id (exact numeric match on CIDs)
-//         const otConditions = validIds.map((idStr) => {
-//           const paramIdx = params.length + 1;
-//           params.push(parseInt(idStr));
-//           return `ot.container_id = $${paramIdx}`;
-//         }).join(' OR ');
-//         // Conditions for cm.container_number (partial ILIKE on looked-up numbers)
-//         const cmConditions = containerNumbers.map((num) => {
-//           const paramIdx = params.length + 1;
-//           params.push(`%${num}%`);
-//           return `cm.container_number ILIKE $${paramIdx}`;
-//         }).join(' OR ');
-//         // FIXED: Conditions for receivers JSONB (add jsonb_typeof check for safety)
-//         const receiverExists = containerNumbers.map((num) => {
-//           const paramIdx = params.length + 1;
-//           params.push(`%${num}%`);
-//           return `EXISTS (
-//             SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
-//             WHERE cont ILIKE $${paramIdx}
-//           )`;
-//         }).join(' OR ');
-//         whereClause += ` AND (
-//           (${otConditions}) OR
-//           (${cmConditions}) OR
-//           EXISTS (
-//             SELECT 1 FROM receivers r
-//             WHERE r.order_id = o.id
-//             AND r.containers IS NOT NULL
-//             AND jsonb_typeof(r.containers) = 'array'
-//             AND (${receiverExists})
-//           )
-//         )`;
-//       }
-//     }
-// let selectFields = [
-//   'o.*', // Core orders
-//   's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner', // From senders
-//   't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic', // From transport_details
-//   't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
-//   't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered', // From transport_details
-//   't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
-//   't.gatepass', // From transport_details
-//   'ot.status AS tracking_status, ot.created_time AS tracking_created_time', // Latest tracking
-//   'ot.container_id', // Explicit for join
-//   'cm.container_number', // From container_master
-//   // FIXED: Subquery for aggregated containers from all receivers (add jsonb_typeof for safety)
-//   'COALESCE((SELECT string_agg(DISTINCT elem, \', \') FROM (SELECT jsonb_array_elements_text(r3.containers) AS elem FROM receivers r3 WHERE r3.order_id = o.id AND r3.containers IS NOT NULL AND jsonb_typeof(r3.containers) = \'array\' AND jsonb_array_length(r3.containers) > 0) AS unnested), \'\') AS receiver_containers_json',
-//   // Updated subquery for full receivers as JSON array per order, using LATERAL with fixed ORDER BY position
-//   `(SELECT COALESCE(json_agg(r2_full ORDER BY r2_full.id), '[]') FROM (
-//     SELECT 
-//       r2.id, r2.order_id, r2.receiver_name, r2.receiver_contact, r2.receiver_address, r2.receiver_email,
-//       r2.total_number, r2.total_weight, r2.receiver_ref, r2.remarks, r2.containers,
-//       r2.status, r2.eta, r2.etd, r2.shipping_line, r2.consignment_vessel, r2.consignment_number,
-//       r2.consignment_marks, r2.consignment_voyage, r2.full_partial, r2.qty_delivered,
-//       sd_full.shippingDetails
-//     FROM receivers r2
-//     LEFT JOIN LATERAL (
-//       SELECT json_agg(
-//         json_build_object(
-//           'id', oi.id,
-//           'order_id', oi.order_id,
-//           'sender_id', oi.sender_id,
-//           'category', COALESCE(oi.category, ''),
-//           'subcategory', COALESCE(oi.subcategory, ''),
-//           'type', COALESCE(oi.type, ''),
-//           'pickupLocation', COALESCE(oi.pickup_location, ''),
-//           'deliveryAddress', COALESCE(oi.delivery_address, ''),
-//           'totalNumber', COALESCE(oi.total_number, 0),
-//           'weight', COALESCE(oi.weight, 0),
-//           'totalWeight', COALESCE(oi.total_weight, 0),
-//           'itemRef', COALESCE(oi.item_ref, ''),
-//           'consignmentStatus', COALESCE(oi.consignment_status, ''),
-//           'shippingLine', COALESCE(oi.shipping_line, ''),
-//           'containerDetails', COALESCE(oi.container_details, '[]'::jsonb),
-//           'remainingItems', (COALESCE(oi.total_number, 0) - COALESCE((SELECT SUM(
-//             CASE 
-//               WHEN (elem->>\'assign_total_box\') ~ \'^[0-9]+\$' 
-//               THEN (elem->>\'assign_total_box\')::int 
-//               ELSE 0 
-//             END
-//           ) FROM jsonb_array_elements(COALESCE(oi.container_details, \'[]\'::jsonb)) AS elem), 0))
-//         ) ORDER BY oi.id
-//       ) AS shippingDetails
-//       FROM order_items oi
-//       WHERE oi.receiver_id = r2.id
-//     ) sd_full ON true
-//     WHERE r2.order_id = o.id
-//   ) r2_full) AS receivers`
-// ].join(', ');
-//     // Build joins as array for easier extension (removed receivers join, now in subquery)
-//     let joinsArray = [
-//       'LEFT JOIN senders s ON o.id = s.order_id',
-//       'LEFT JOIN transport_details t ON o.id = t.order_id',
-//       'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true', // Latest tracking
-//       'LEFT JOIN container_master cm ON ot.container_id = cm.cid' // Join to container_master on cid
-//     ];
-//     const joins = joinsArray.join('\n ');
-//     // For count, no need for subqueries or receivers join, but conditions on ot/cm/r are handled via the whereClause (which includes subqueries for r)
-//     const countQuery = `
-//       SELECT COUNT(DISTINCT o.id) as total_count
-//       FROM orders o
-//       ${joins}
-//       ${whereClause}
-//     `;
-//     // Main query (no GROUP BY needed now with subqueries)
-//     const query = `
-//       SELECT ${selectFields}
-//       FROM orders o
-//       ${joins}
-//       ${whereClause}
-//       ORDER BY o.created_at DESC
-//       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-//     `;
-//     // const safeOffset = (parseInt(safePage) - 1) * safeLimit;
-//     // FIXED: Ensure limit/offset are always valid ints (fallback if NaN)
-//     params.push(safeLimit, safeOffset);
-//     const [result, countResult] = await Promise.all([
-//       pool.query(query, params),
-//       pool.query(countQuery, params.slice(0, -2)) // without limit offset
-//     ]);
-//     const total = parseInt(countResult.rows[0].total_count || 0);
-//     res.json({
-//       data: result.rows,
-//       pagination: {
-//         page: safePage,
-//         limit: safeLimit,
-//         total,
-//         totalPages: total === 0 ? 0 : Math.ceil(total / safeLimit)
-//       }
-//     });
-//   } catch (err) {
-//     console.error("Error fetching orders:", err);
-//     if (err.code === '42703') {
-//       return res.status(500).json({ error: 'Database schema mismatch. Check table/column names in query.' });
-//     }
-//     res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
-//   }
-// }
+
 export async function getOrders(req, res) {
   const client = await pool.connect();
 
@@ -1900,14 +1711,30 @@ export async function getMyOrdersByRef(req, res) {
 }
  
 export async function getOrdersConsignments(req, res) {
-  const client = await pool.connect();
+  console.log('[getOrdersConsignments] Request query:', req,res);
+  console.log('[getOrdersConsignments] Auth user:', req.user ? req.user.email : 'unauthenticated');
+  //   const { id } = req.params;
+  //   const { includeContainer = 'true' } = req.query;
+  // // Early auth check (optional – remove if endpoint should be public)
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      error: 'Authentication required',
+      details: 'Please log in to view orders'
+    });
+  }
 
+  let client;
   try {
-    // Pagination (already safe)
+    client = await pool.connect();
+
+    // ────────────────────────────────────────────────
+    // Pagination – safe + early validation
+    // ────────────────────────────────────────────────
     const rawPage = req.query.page || '1';
     const rawLimit = req.query.limit || '10';
-    const safePage = Math.max(1, parseInt(rawPage) || 1);
-    const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit) || 10));
+    const safePage = Math.max(1, parseInt(rawPage, 10));
+    const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit, 10)));
     const safeOffset = (safePage - 1) * safeLimit;
 
     // Filters
@@ -1925,8 +1752,7 @@ export async function getOrdersConsignments(req, res) {
       params.push(`%${booking_ref}%`);
     }
 
-    // Container filter (kept your safe logic)
-    let containerFilter = '';
+    // Container filter (kept your safe logic – no change)
     if (container_id) {
       const containerIds = container_id
         .split(',')
@@ -1935,6 +1761,7 @@ export async function getOrdersConsignments(req, res) {
 
       if (containerIds.length === 0) {
         return res.json({
+          success: true,
           data: [],
           pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
         });
@@ -1943,6 +1770,7 @@ export async function getOrdersConsignments(req, res) {
       const validIds = containerIds.filter(id => !isNaN(parseInt(id)));
       if (validIds.length === 0) {
         return res.json({
+          success: true,
           data: [],
           pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
         });
@@ -1958,6 +1786,7 @@ export async function getOrdersConsignments(req, res) {
 
       if (containerNumbers.length === 0) {
         return res.json({
+          success: true,
           data: [],
           pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
         });
@@ -1997,11 +1826,11 @@ export async function getOrdersConsignments(req, res) {
       )`;
     }
 
-    // Safe casting helpers
+    // Safe casting helpers (same as getOrderById)
     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
     const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
 
-    // FIXED: containerDetailsSub — read current values from oi.container_details (no history recalc)
+    // containerDetailsSub – same as getOrderById
     const containerDetailsSub = `
       COALESCE((
         SELECT json_agg(
@@ -2029,7 +1858,7 @@ export async function getOrdersConsignments(req, res) {
       ), '[]'::json)
     `;
 
-    // FIXED: shipping details aggregation — properly correlated, reads current state
+    // shippingDetailsAgg – same structure as getOrderById
     const shippingDetailsAgg = `
       (SELECT COALESCE(json_agg(
         json_build_object(
@@ -2049,7 +1878,7 @@ export async function getOrdersConsignments(req, res) {
           'shippingLine', COALESCE(oi.shipping_line, ''),
           'containerDetails', ${containerDetailsSub},
           'remainingItems', ${safeIntCast('oi.total_number')} - COALESCE((
-            SELECT SUM((cd_obj->>'assign_total_box')::int)
+            SELECT SUM((cd_obj->>\'assign_total_box\')::int)
             FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
           ), 0)
         ) ORDER BY oi.id
@@ -2058,7 +1887,7 @@ export async function getOrdersConsignments(req, res) {
       WHERE oi.receiver_id = r.id)
     `;
 
-    // Receivers subquery (fixed alias scope + structure)
+    // receiversSub – same structure as getOrderById
     const receiversSub = `
       (SELECT COALESCE(json_agg(r_full ORDER BY r_full.id), '[]'::json) FROM (
         SELECT 
@@ -2068,6 +1897,7 @@ export async function getOrdersConsignments(req, res) {
           r.receiver_contact            AS receiverContact,
           r.receiver_address            AS receiverAddress,
           r.receiver_email              AS receiverEmail,
+          r.receiver_marks_and_number   AS "marksAndNumber",
           ${safeIntCast('r.total_number')}       AS totalNumber,
           ${safeNumericCast('r.total_weight')}   AS totalWeight,
           r.receiver_ref                AS receiverRef,
@@ -2104,7 +1934,7 @@ export async function getOrdersConsignments(req, res) {
       ) r_full) AS receivers
     `;
 
-    // Main select fields (your structure preserved)
+    // Main select fields (your original structure)
     let selectFields = [
       'o.*',
       's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner',
@@ -2154,7 +1984,7 @@ export async function getOrdersConsignments(req, res) {
 
     const total = parseInt(countResult.rows[0]?.total_count || 0);
 
-    // Format response (matches your single-order structure)
+    // Format response – same style as getOrderById
     const formattedData = result.rows.map(row => {
       let receivers = row.receivers || [];
       if (typeof receivers === 'string') {
@@ -2244,6 +2074,7 @@ export async function getOrdersConsignments(req, res) {
     });
 
     res.json({
+      success: true,
       data: formattedData,
       pagination: {
         page: safePage,
@@ -2256,13 +2087,14 @@ export async function getOrdersConsignments(req, res) {
   } catch (err) {
     console.error("Error fetching orders:", err);
     res.status(500).json({
+      success: false,
       error: 'Failed to fetch orders',
       message: err.message,
       code: err.code,
       position: err.position
     });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 export async function getOrderById(req, res) {
@@ -2271,9 +2103,25 @@ export async function getOrderById(req, res) {
     const { id } = req.params;
     const { includeContainer = 'true' } = req.query;
 
+    // ────────────────────────────────────────────────
+    // EARLY PROTECTION – prevent non-numeric IDs from reaching DB
+    // This stops the "consignmentsOrders" crash
+    // ────────────────────────────────────────────────
+    console.log('[getOrderById] Raw ID received:', id); // ← debug: shows what Express passed
+
+    const numericId = parseInt(id, 10);
+    if (isNaN(numericId) || numericId <= 0) {
+      console.warn(`[getOrderById] Invalid ID format: "${id}" – expected positive integer`);
+      return res.status(400).json({
+        error: 'Invalid order ID',
+        details: 'Order ID must be a positive integer (e.g. /orders/123)',
+        received: id
+      });
+    }
+
     client = await pool.connect();
 
-    // Main order query (unchanged)
+    // Main order query (unchanged – now uses numericId)
     let selectFields = [
       'o.*',
       's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',
@@ -2292,7 +2140,7 @@ export async function getOrderById(req, res) {
       WHERE o.id = $1
     `;
 
-    const orderResult = await client.query(query, [id]);
+    const orderResult = await client.query(query, [numericId]);
     if (orderResult.rowCount === 0) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -2333,7 +2181,7 @@ export async function getOrderById(req, res) {
     const receiversQuery = `
       SELECT 
         r.id, r.order_id, r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
-        r.receiver_marks_and_number AS "marksAndNumber",  -- ← NEW: Fetch the saved column
+        r.receiver_marks_and_number AS "marksAndNumber",
         ${safeIntCast('r.total_number')} AS total_number,
         ${safeNumericCast('r.total_weight')} AS total_weight,
         r.receiver_ref, r.remarks, r.containers,
@@ -2370,17 +2218,16 @@ export async function getOrderById(req, res) {
       ORDER BY r.id
     `;
 
-    const receiversResult = await client.query(receiversQuery, [id]);
+    const receiversResult = await client.query(receiversQuery, [numericId]);
 
     let receivers = receiversResult.rows.map(row => {
-      // Debug log to confirm value is coming from DB
       console.log(`[getOrderById] Receiver ${row.id} - marksAndNumber from DB:`, row.marksAndNumber);
 
       return {
         ...row,
         shippingDetails: row.shippingdetails || [],
         containers: typeof row.containers === 'string' ? JSON.parse(row.containers) : (row.containers || []),
-        receiverMarksNumber: row.marksAndNumber || null,  // ← Maps to your UI field
+        receiverMarksNumber: row.marksAndNumber || null,
       };
     });
 
@@ -2427,7 +2274,7 @@ export async function getOrderById(req, res) {
       WHERE order_id = $1
       GROUP BY receiver_id
     `;
-    const dropOffResult = await client.query(dropOffQuery, [id]);
+    const dropOffResult = await client.query(dropOffQuery, [numericId]);
     const dropOffMap = new Map(dropOffResult.rows.map(r => [r.receiver_id, r.drop_off_details || []]));
 
     receivers = receivers.map(r => ({
@@ -2445,7 +2292,7 @@ export async function getOrderById(req, res) {
       WHERE h.order_id = $1
       ORDER BY h.id DESC
     `;
-    const historyResult = await client.query(historyQuery, [id]);
+    const historyResult = await client.query(historyQuery, [numericId]);
 
     // Parse attachments & gatepass (unchanged)
     let parsedAttachments = orderRow.attachments || [];
@@ -3894,11 +3741,13 @@ export async function assignContainersBatch(req, res) {
       });
     }
 
-    const created_by = req.user?.id || 'system';
     const results = [];
     const skipped = [];
     const updatedReceivers = new Set();
     const updatedOrders = new Set();
+
+    // Get current user email for auditing (only used in history insert)
+    const currentUserEmail = req.user?.email || 'unknown-user';
 
     for (const ass of assignments) {
       const orderIdNum     = Number(ass.orderId);
@@ -4121,13 +3970,13 @@ export async function assignContainersBatch(req, res) {
         }
       }
 
-      // 6. History log (target item only)
+      // 6. History log (target item only) – now uses current user email
       await client.query(`
         INSERT INTO container_assignment_history (
           cid, container_number, order_id, receiver_id, detail_id,
           assigned_qty, assigned_weight_kg, status, previous_status,
-          action_type, changed_by, notes, created_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+          action_type, created_by, updated_by, changed_by, notes, created_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
       `, [
         cid,
         contNumber,
@@ -4139,7 +3988,9 @@ export async function assignContainersBatch(req, res) {
         'Ready for Loading',
         'Available',
         'ASSIGN',
-        created_by,
+        currentUserEmail,   // created_by = current user email
+        currentUserEmail,   // updated_by = current user email
+        currentUserEmail,   // changed_by = current user email
         `Assigned ${assignBoxes} boxes (${assignWeight} kg) via batch`
       ]);
 
@@ -4494,6 +4345,7 @@ function safeParseJsonArray(val) {
       });
     }
 
+
 export async function assignContainersToOrders(req, res) {
   let client;
   try {
@@ -4501,8 +4353,9 @@ export async function assignContainersToOrders(req, res) {
     await client.query('BEGIN');
 
     const { assignments } = req.body;
-    const created_by = req.user?.id || 'system';
 
+    // Get real user email for auditing
+const changedBy = req.user?.id || req.user?.email || 'system-fallback';
     if (!assignments || typeof assignments !== 'object' || !Object.keys(assignments).length) {
       return res.status(400).json({ error: 'Valid non-empty assignments object required' });
     }
@@ -4604,7 +4457,7 @@ export async function assignContainersToOrders(req, res) {
             }
 
             entry.assign_total_box = String(Number(entry.assign_total_box || 0) + thisQty);
-            entry.assign_weight = (Number(entry.assign_weight || 0) + thisWeight).toFixed(2);
+            entry.assign_weight    = (Number(entry.assign_weight || 0) + thisWeight).toFixed(2);
 
             const newTotalAssigned = currentBoxes + assignedThisItemQty + thisQty;
             entry.remaining_items = String(item.total_number - newTotalAssigned);
@@ -4612,26 +4465,35 @@ export async function assignContainersToOrders(req, res) {
             assignedThisItemQty += thisQty;
             assignedThisItemKg += thisWeight;
 
-            await client.query(`
-              INSERT INTO container_assignment_history (
-                cid, container_number, order_id, receiver_id, detail_id,
-                assigned_qty, assigned_weight_kg, status, previous_status,
-                action_type, changed_by, notes, created_at
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
-            `, [
-              cid,
-              entry.container.container_number,
-              orderId,
-              recId,
-              item.id,
-              thisQty,
-              thisWeight,
-              entry.status,
-              'Created',
-              'ASSIGN',
-              created_by,
-              `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`
-            ]);
+            // ────────────────────────────────────────────────
+            // History insert – now uses real user email in created_by & updated_by
+            // ────────────────────────────────────────────────
+           // At the top of your function (after client connect)
+const currentUserEmail = req.user?.email || 'system-fallback';
+
+// Then inside the loop:
+await client.query(`
+  INSERT INTO container_assignment_history (
+    cid, container_number, order_id, receiver_id, detail_id,
+    assigned_qty, assigned_weight_kg, status, previous_status,
+    action_type, created_by, updated_by, changed_by, notes, created_at
+  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+`, [
+  cid,
+  entry.container.container_number,
+  orderId,
+  recId,
+  item.id,
+  thisQty,
+  thisWeight,
+  entry.status,
+  'Created',
+  'ASSIGN',
+  currentUserEmail,   // created_by
+  currentUserEmail,   // updated_by
+  currentUserEmail,   // changed_by → now shows email!
+  `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`
+]);
 
             newContainers.add(entry.container.container_number);
           }
