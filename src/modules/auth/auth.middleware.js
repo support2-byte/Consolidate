@@ -1,30 +1,41 @@
+// middleware/auth.js
 import jwt from "jsonwebtoken";
-const JWT_SECRET = process.env.JWT_SECRET;
 
-export function auth(req, res, next) {
-  const token = req.cookies.token;
-  if (!token) return res.status(401).json({ error: "Unauthenticated" });
+const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev-only-change-me";
 
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
-  }
-}
-export function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+export function requireAuth(req, res, next) {
+  const token = req.cookies?.token;
 
   if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+    return res.status(401).json({
+      error: "Unauthenticated",
+      message: "No authentication token provided",
+    });
   }
 
-  jwt.verify(token, 'your-secret-key', (err, user) => {  // Replace with your secret
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    // Optional: you can add extra checks
+    if (!decoded.email && !decoded.sub) {
+      return res.status(401).json({ error: "Token missing user identifier" });
     }
-    req.user = user;  // { sub: '1', email: 'support2@royalgulfshipping.com', ... }
+
+    req.user = decoded; // { id, email, sub?, role?, ... }
     next();
-  });
-};
+  } catch (err) {
+    console.error("[Auth] Token verification failed:", {
+      error: err.message,
+      token: token.substring(0, 20) + "...", // partial for security
+    });
+
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Token expired" });
+    }
+    if (err.name === "JsonWebTokenError") {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
+    return res.status(401).json({ error: "Authentication failed" });
+  }
+}

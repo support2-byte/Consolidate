@@ -1,5 +1,5 @@
 import pool from "../../db/pool.js";
-
+import { withUserAudit } from "../../middleware/dbAudit.js";
 
 // Helper: Normalize date to ISO string or null
 // function normalizeDate(dateString) {
@@ -1190,7 +1190,7 @@ export async function createConsignment(req, res) {
       orders: JSON.stringify(input.orders)
     };
 
-    // Dynamic INSERT
+    // Dynamic INSERT – use withUserAudit for auto created_by / updated_by
     const keys = Object.keys(dbData);
     const values = Object.values(dbData);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
@@ -1200,8 +1200,9 @@ export async function createConsignment(req, res) {
     let newConsignment = null;
 
     await withTransaction(async (client) => {
-      const { rows } = await client.query(insertQuery, values);
-      newConsignment = rows[0];
+      // Use withUserAudit – it will automatically add created_by, updated_by, created_at, updated_at
+      const result = await withUserAudit(req, insertQuery, values);
+      newConsignment = result.rows[0];
     });
 
     // Optional: Add status color if needed in response
@@ -1225,15 +1226,12 @@ export async function createConsignment(req, res) {
     });
   }
 }
-
 export async function updateConsignment(req, res) {
   const { id } = req.params; // Assume ID from params
-  // console.log("Update Consignment Request Body:", req.body);
   try {
     const data = req.body;
     
     // Map mixed-case input to consistent snake_case for validation and DB
-    // Exclude non-DB/computed fields like status_color, created_at, updated_at
     const normalizedInput = {
       consignment_number: data.consignment_number || data.consignmentNumber,
       status: data.status,
@@ -1261,7 +1259,6 @@ export async function updateConsignment(req, res) {
       pending: data.pending || 0,
       containers: data.containers || [],
       orders: data.orders || []  // Keep as-is: array of IDs (numbers) or objects
-      // Do NOT include status_color, created_at, or updated_at here
     };
 
     const validationErrors = validateConsignmentFields(normalizedInput);
@@ -1270,16 +1267,13 @@ export async function updateConsignment(req, res) {
     }
 
     const containerErrors = validateContainers(normalizedInput.containers);
-    // Handle orders validation: Accept array of numbers (IDs) or objects
     let orderErrors = [];
     if (Array.isArray(normalizedInput.orders)) {
       if (normalizedInput.orders.every(o => typeof o === 'number' && o > 0)) {
-        // IDs only: Skip object validation, just check for valid positives
         if (normalizedInput.orders.length > 0 && normalizedInput.orders.some(id => isNaN(id) || id <= 0)) {
           orderErrors = [{ index: -1, errors: ['orders: All IDs must be positive integers'] }];
         }
       } else {
-        // Assume objects: Use existing validator
         orderErrors = validateOrders(normalizedInput.orders);
       }
     } else {
@@ -1289,14 +1283,13 @@ export async function updateConsignment(req, res) {
       return res.status(400).json({ error: 'Array validation failed', details: [...containerErrors, ...orderErrors] });
     }
 
-    // Auto-calculate ETA if missing or if status changed (recompute)
+    // Auto-calculate ETA if missing or if status changed
     let computedETA = normalizedInput.eta;
-    if (!computedETA || data.status !== undefined) { // Recompute if status provided
+    if (!computedETA || data.status !== undefined) {
       // Will be computed inside transaction
     }
 
-    // Normalize dates and stringify JSON fields - use snake_case keys only
-    // Explicitly define to avoid any inheritance or duplicates
+    // Normalize dates and stringify JSON fields
     const normalizedData = {
       consignment_number: normalizedInput.consignment_number,
       status: normalizedInput.status,
@@ -1323,17 +1316,15 @@ export async function updateConsignment(req, res) {
       delivered: normalizedInput.delivered,
       pending: normalizedInput.pending,
       containers: JSON.stringify(normalizedInput.containers),
-      orders: JSON.stringify(normalizedInput.orders)  // Stringify IDs or objects as-is
-      // Explicitly NO status_color, created_at, or updated_at
+      orders: JSON.stringify(normalizedInput.orders)
     };
 
-    // Build SET clause carefully: use only keys from normalizedData, skip timestamps and non-DB fields
+    // Build SET clause carefully: use only keys from normalizedData
     const updateFields = Object.keys(normalizedData)
-      .filter(key => !['id', 'created_at', 'updated_at', 'status_color'].includes(key)); // Explicit exclude
+      .filter(key => !['id', 'created_at', 'updated_at'].includes(key));
     const setClauseParts = updateFields.map((key, index) => {
-      // Since keys are already snake_case, no need for replace, but keep for safety
       const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-      return `${dbKey} = $${index + 2}`; // $1 is ID
+      return `${dbKey} = $${index + 2}`;
     });
     const setClause = setClauseParts.join(', ');
     const values = [id, ...updateFields.map(key => normalizedData[key])];
@@ -1344,21 +1335,21 @@ export async function updateConsignment(req, res) {
       // Auto-calculate ETA inside transaction if needed
       if (!computedETA || data.status !== undefined) {
         computedETA = await calculateETA(client, normalizedInput.status || data.status);
-        // Update eta in values (find index and replace)
         const etaIndex = updateFields.findIndex(f => f === 'eta');
         if (etaIndex !== -1) {
-          values[etaIndex + 1] = normalizeDate(computedETA);  // +1 for id
+          values[etaIndex + 1] = normalizeDate(computedETA);
         }
       }
-      // Update consignment
-      const updateResult = await client.query(query, values);
+
+      // Use withUserAudit → automatically adds updated_by = req.user.email (and updated_at if missing)
+      const updateResult = await withUserAudit(req, query, values);
       if (updateResult.rowCount === 0) {
         throw new Error('Consignment not found');
       }
       updatedConsignment = updateResult.rows[0];
 
       // Log to tracking if status changed
-      if (data.status !== undefined) {  // Ensure status was provided
+      if (data.status !== undefined) {
         const logResult = await logToTracking(client, id, 'status_updated', { 
           newStatus: normalizedInput.status, 
           eta: computedETA 
@@ -1368,25 +1359,22 @@ export async function updateConsignment(req, res) {
         }
       }
 
-      // Cascade: Skip orders and containers UPDATEs (no consignment_id columns; JSON-driven relationships)
       console.log(`Skipped orders/containers cascade for consignment ${id} (JSON-driven relationship)`);
 
-      // Send notification if status updated to trigger (e.g., 'In Transit' or 'Delivered')
       if (['In Transit', 'Delivered'].includes(normalizedInput.status)) {
         await sendNotification(updatedConsignment, 'updated');
       }
     });
 
-    // Compute and add client-side fields to response (e.g., statusColor based on status)
+    // Compute and add client-side fields to response
     const responseData = {
       ...updatedConsignment,
-      statusColor: getStatusColor(updatedConsignment.status), // Assume you have a function getStatusColor
+      statusColor: getStatusColor(updatedConsignment.status),
       shipperAddress: updatedConsignment.shipper_address || '',
       consigneeAddress: updatedConsignment.consignee_address || '',
       paymentType: updatedConsignment.payment_type || '',
-      shippingLine: updatedConsignment.shipping_line || null, // Fixed: Treat as string, not int
+      shippingLine: updatedConsignment.shipping_line || null,
       netWeight: updatedConsignment.net_weight || '0.00'
-      // Add other computed fields as needed
     };
 
     console.log("Consignment updated with ID:", updatedConsignment.id);
@@ -1396,12 +1384,14 @@ export async function updateConsignment(req, res) {
     if (err.message === 'Consignment not found') {
       return res.status(404).json({ error: 'Consignment not found' });
     }
-    if (err.code === '23505') { // Unique violation
+    if (err.code === '23505') {
       return res.status(409).json({ error: 'Consignment number already exists' });
     }
     res.status(500).json({ error: 'Failed to update consignment', details: err.message });
   }
 }
+
+
 export async function deleteConsignment(req, res) {
   try {
     const { id } = req.params;
