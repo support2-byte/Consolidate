@@ -104,6 +104,14 @@ export async function login(req, res) {
   }
 }
 
+// middleware/requireAdmin.js
+export function requireAdminRole(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {   // assuming role in JWT payload
+    return res.status(403).json({ error: "Admin access required" });
+  }
+  next();
+}
+
 export function me(req, res) {
   const token = req.cookies.token;
 
@@ -134,6 +142,92 @@ export function me(req, res) {
   }
 }
 
+// POST  /api/admin/reset-user-password
+// Body: { email: "user@example.com", newPassword: "NewPass123!" }
+// Requires admin authentication
+
+
+export async function adminForceResetPassword(req, res) {
+  // IMPORTANT: This should be protected by admin-only middleware!
+  // Example:
+  // if (!req.user || req.user.role !== 'admin') {
+  //   return res.status(403).json({ error: "Admin access required" });
+  // }
+
+  const { email, newPassword, confirmPassword } = req.body ?? {};
+
+  // ── Input validation ───────────────────────────────────────────────
+  if (!email || !newPassword || !confirmPassword) {
+    return res.status(400).json({
+      error: "Email, new password, and password confirmation are required"
+    });
+  }
+
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({
+      error: "New password must be at least 8 characters long"
+    });
+  }
+
+  if (newPassword !== confirmPassword) {
+    return res.status(400).json({
+      error: "New password and confirmation do not match"
+    });
+  }
+
+  try {
+    // ── Find target user ──────────────────────────────────────────────
+    const { rows } = await pool.query(
+      "SELECT id, email FROM users WHERE email = $1",
+      [email.trim().toLowerCase()]
+    );
+
+    const targetUser = rows[0];
+console.log("Target user for password reset:", targetUser);
+    // ── Hash the new password ─────────────────────────────────────────
+    const saltRounds = 12;
+    const passwordHash = await bcrypt.hash(newPassword, saltRounds);
+
+    // ── Perform update ────────────────────────────────────────────────
+    await pool.query(
+      `
+      UPDATE users
+      SET 
+        password_hash = $1,
+        updated_at = NOW()
+        -- reset_password_token   = NULL,   -- uncomment if you use reset tokens
+        -- reset_password_expires = NULL
+      WHERE id = $2
+      `,
+      [passwordHash, targetUser.id]
+    );
+
+    // Optional: Audit log (very recommended for this kind of powerful action)
+    // if (req.user?.id) {
+    //   await pool.query(
+    //     `INSERT INTO admin_actions (admin_id, action, target_user_id, details, created_at)
+    //      VALUES ($1, $2, $3, $4, NOW())`,
+    //     [req.user.id, 'FORCE_PASSWORD_RESET', targetUser.id, `via admin panel`,]
+    //   );
+    // }
+
+    // ── Success response ──────────────────────────────────────────────
+    res.status(200).json({
+      success: true,
+      message: `Password successfully updated for ${targetUser.email}`,
+      user: {
+        id: targetUser.id,
+        email: targetUser.email
+      }
+    });
+
+  } catch (err) {
+    console.error("[ADMIN FORCE RESET PASSWORD] Error:", err.message);
+    res.status(500).json({
+      error: "Server error – password update failed. Please try again later."
+    });
+  }
+}
 export function logout(req, res) {
   res.clearCookie("token", COOKIE_OPTIONS);
   res.json({ success: true, message: "Logged out successfully" });

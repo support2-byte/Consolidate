@@ -3,6 +3,8 @@ import jwt from "jsonwebtoken";
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev-only-change-me";
 
+
+
 export function requireAuth(req, res, next) {
   const token = req.cookies?.token;
 

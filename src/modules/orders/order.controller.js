@@ -1710,6 +1710,143 @@ export async function getMyOrdersByRef(req, res) {
   }
 }
  
+export async function getOrderByReference(req, res) {
+  try {
+    const { ref, limit = 10, offset = 0, status, search } = req.query;
+
+    if (!ref || typeof ref !== 'string' || ref.trim().length < 3) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid booking reference (ref) is required in query parameters'
+      });
+    }
+
+    const safeLimit   = Math.min(20, Math.max(1, parseInt(limit) || 10));   // smaller default for public endpoint
+    const safeOffset  = parseInt(offset) || 0;
+    const refClean    = ref.trim();
+
+    // ────────────────────────────────────────────────
+    // Base WHERE clause – reference-based + optional filters
+    // ────────────────────────────────────────────────
+    let whereClauses = [
+      `(o.booking_ref = $1 OR o.rgl_booking_number = $1)`
+    ];
+    let params = [refClean];
+
+    if (status) {
+      whereClauses.push(`o.status = $${params.length + 1}`);
+      params.push(status);
+    }
+
+    // Optional extra search (on top of ref) – e.g. item refs
+    if (search && search.trim()) {
+      const term = `%${search.trim()}%`;
+      whereClauses.push(`(
+        EXISTS (SELECT 1 FROM order_items oi 
+                WHERE oi.order_id = o.id AND oi.item_ref ILIKE $${params.length + 1})
+      )`);
+      params.push(term);
+    }
+
+    const whereSql = 'WHERE ' + whereClauses.join(' AND ');
+
+    // ────────────────────────────────────────────────
+    // Main query – same rich structure as before
+    // ────────────────────────────────────────────────
+    const ordersQuery = `
+      SELECT 
+        o.*,
+        s.sender_name, s.sender_contact, s.sender_email, s.sender_address,
+        t.transport_type, t.driver_name, t.driver_contact, t.truck_number, t.drop_method, t.delivery_date,
+        ot.status AS latest_tracking_status,
+        ot.created_time AS latest_tracking_time,
+        -- Receiver summary
+        (SELECT json_agg(
+           json_build_object(
+             'id', r.id,
+             'receiver_name', r.receiver_name,
+             'receiver_contact', r.receiver_contact,
+             'receiver_email', r.receiver_email,
+             'receiver_address', r.receiver_address,
+             'status', r.status,
+             'eta', r.eta,
+             'containers', r.containers
+           )
+           ORDER BY r.id
+         ) FROM receivers r WHERE r.order_id = o.id) AS receivers_summary,
+        -- Item summary with container assignments
+        (SELECT json_agg(
+           json_build_object(
+             'item_id', oi.id,
+             'item_ref', oi.item_ref,
+             'category', oi.category,
+             'subcategory', oi.subcategory,
+             'type', oi.type,
+             'total_number', oi.total_number,
+             'weight', oi.weight,
+             'assigned_qty', COALESCE((
+               SELECT SUM(cah.assigned_qty)
+               FROM container_assignment_history cah
+               WHERE cah.detail_id = oi.id
+             ), 0),
+             'remaining', oi.total_number - COALESCE((
+               SELECT SUM(cah.assigned_qty)
+               FROM container_assignment_history cah
+               WHERE cah.detail_id = oi.id
+             ), 0)
+           )
+           ORDER BY oi.id
+         ) FROM order_items oi WHERE oi.order_id = o.id) AS items_summary
+      FROM orders o
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN LATERAL (
+        SELECT status, created_time
+        FROM order_tracking
+        WHERE order_id = o.id
+        ORDER BY created_time DESC LIMIT 1
+      ) ot ON true
+      ${whereSql}
+      ORDER BY o.created_at DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+
+    params.push(safeLimit, safeOffset);
+
+    const ordersResult = await pool.query(ordersQuery, params);
+
+    // For public endpoint, usually expect 0 or 1 result
+    const data = ordersResult.rows.map(row => ({
+      ...row,
+      overall_status: row.latest_tracking_status || row.status || 'Created',
+    }));
+
+    // Total count (useful if allowing multiple matches)
+    const countQuery = `SELECT COUNT(*) FROM orders o ${whereSql}`;
+    const countRes   = await pool.query(countQuery, params.slice(0, -2));
+    const total      = parseInt(countRes.rows[0].count);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        limit: safeLimit,
+        offset: safeOffset,
+        pages: Math.ceil(total / safeLimit)
+      },
+      message: data.length === 0 ? 'No order found for this reference' : undefined
+    });
+
+  } catch (err) {
+    console.error('getOrderByReference error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order details',
+      error: err.message   // ← remove in production if you don't want to leak details
+    });
+  }
+}
 export async function getOrdersConsignments(req, res) {
   console.log('[getOrdersConsignments] Request query:', req,res);
   console.log('[getOrdersConsignments] Auth user:', req.user ? req.user.email : 'unauthenticated');
@@ -4714,7 +4851,7 @@ export async function removeContainerAssignments(req, res) {
             SET
               qty_delivered = 0,
               containers    = '[]'::jsonb,
-              status        = 'Pending',
+              status        = 'Created',
               updated_at    = NOW()
             WHERE id = $1
           `, [recId]);
@@ -4862,7 +4999,7 @@ export async function removeContainerAssignments(req, res) {
               qty_delivered = $1,
               containers    = $2::jsonb,
               status        = CASE 
-                WHEN $1 <= 0 THEN 'Pending'
+                WHEN $1 <= 0 THEN 'Created'
                 WHEN $1 < total_number THEN 'Partially Assigned'
                 ELSE status 
               END,
@@ -5146,7 +5283,9 @@ async function handleAutoTransitions(client, orderId, newStatus) {
   // await client.query('UPDATE orders SET status = \'In Process\' WHERE id = $1', [orderId]);
   // Extend for other rules (e.g., cron for reminders)
 }
+
 export async function getOrderByItemRef(req, res) {
+  console.log('Received request for item ref:', req.params);
   const { ref } = req.params;
 
   if (!ref || typeof ref !== 'string' || ref.trim() === '') {
@@ -5156,9 +5295,11 @@ export async function getOrderByItemRef(req, res) {
     });
   }
 
+  console.log('rewaarddd',ref)
+
   const pattern = `%${ref.trim().toUpperCase()}%`;
 
-  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern}"`);
+  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern,ref}"`);
 
   try {
     const query = `
@@ -5237,13 +5378,13 @@ export async function getOrderByItemRef(req, res) {
     `;
 
     const { rows } = await pool.query(query, [pattern]);
-console.log('rowsssss',rows)
-    if (rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: `No items found matching reference "${ref.trim()}"`
-      });
-    }
+console.log('rowsssss',rows[0])
+    // if (rows.length === 0) {
+    //   return res.status(404).json({
+    //     success: false,
+    //     message: `No items found matching reference "${ref.trim()}"`
+    //   });
+    // }
 
     // ────────────────────────────────────────────────
     // Group into clean nested structure
@@ -5252,7 +5393,7 @@ console.log('rowsssss',rows)
 
     rows.forEach(row => {
       const orderId = row.order_id;
-
+console.log('rewaard',row)
       if (!orderMap[orderId]) {
         orderMap[orderId] = {
           order_id: orderId,
@@ -5970,6 +6111,8 @@ export async function getOrderByOrderId(req, res) {
  * Example: GET /api/orders/rgl/RGSL-17695-064
  */
 export async function getOrderByRglBookingNo(req, res) {
+
+  console.log('getOrderByRglBookingNo called with params:', req.params);
   const { rglBookingNo } = req.params;
 
   if (!rglBookingNo || typeof rglBookingNo !== 'string' || rglBookingNo.trim() === '') {
