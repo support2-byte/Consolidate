@@ -5097,7 +5097,7 @@ console.log(`Found ${orderId} subscribers for order ${orderId}:`, order);
        const email='support2@royalgulfshipping.com'; // For testing, send to fixed email
     // Send to each subscriber (uses updated sendShipmentEmail)
     // for (const email of subscribers) {
-      await sendShipmentEmail(email, shipmentData);
+      await sendShipmentEmail(email, shipmentData); 
       console.log(`Update email sent to ${email} for order ${orderId}: ${newStatus}`);
     // }
   } catch (err) {
@@ -5187,30 +5187,34 @@ async function cascadeToContainers(client, orderId, status, receiverId) {
     throw err;  // Isolate in main tx
   }
 }
-async function sendShipmentEmail(email='support2@royalgulfshipping.com', shipmentData) {
-  // Prepare data for the shipment update template
+export async function sendShipmentEmail(email, shipmentData) {
+  console.log('Sending shipment email to:', email);
+
   const templateData = {
-    statusLabel: shipmentData.statusLabel,
-    statusMsg: shipmentData.statusMsg,
-    refId: shipmentData.refId,
-    orderId: shipmentData.orderId,
-    route: shipmentData.route,
-    etaFormatted: shipmentData.etaFormatted,
-    lastUpdated: shipmentData.lastUpdated,
-    trackLink: shipmentData.trackLink
+    type: 'shipment',
+    statusLabel: shipmentData.statusLabel   || 'In Transit',
+    statusMsg:   shipmentData.statusMsg     || 'Your shipment is on its way.',
+    refId:       shipmentData.refId         || '—',
+    orderId:     shipmentData.orderId       || '—',
+    route:       shipmentData.route         || '—',
+    etaFormatted:shipmentData.etaFormatted  || '—',
+    lastUpdated: shipmentData.lastUpdated   || new Date().toLocaleString(),
+    trackLink:   shipmentData.trackLink     || 'https://royalgulfshipping.com/track-your-shipment/'
   };
 
-  const subject = `Royal Gulf Shipping – ${shipmentData.statusLabel} (Ref: ${shipmentData.refId})`;
+  const subject = `Royal Gulf Shipping – ${templateData.statusLabel} (Ref: ${templateData.refId})`;
 
   try {
-    const result = await sendOrderEmail([email], subject, templateData);  // Single recipient array
+    const result = await sendOrderEmail(email, subject, templateData);
     if (result.success) {
-      console.log(`Shipment email sent to ${email} (Message ID: ${result.messageId})`);
+      console.log(`Shipment email sent to ${email} → Msg ID: ${result.messageId}`);
     } else {
-      console.error(`Failed to send to ${email}: ${result.error}`);
+      console.error(`Failed sending to ${email}: ${result.error}`);
     }
+    return result;
   } catch (err) {
-    console.error(`Shipment email error for ${email}:`, err.message);
+    console.error(`Shipment email error for ${email}:`, err);
+    return { success: false, error: err.message };
   }
 }
 async function triggerNotifications(order, status, notifyClient, notifyParties) {

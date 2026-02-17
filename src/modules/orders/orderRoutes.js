@@ -20,6 +20,7 @@ import {
   getOrderByRglBookingNo,
   assignOneContainerToMultipleReceivers,
   assignContainersBatch,
+  sendShipmentEmail,
 } from "./order.controller.js";
 
 const router = express.Router();
@@ -101,7 +102,17 @@ router.get("/track/order/:ref", getOrderByOrderId);
 router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
 router.get("/track/consignment_no/:id", getOrderByTrackingId);
 router.get('/consignmentsOrders', requireAuth, getOrdersConsignments);
+// Probably in your Express route handler
+router.post('/notify/me', async (req, res) => {
+  const { email } = req.query;
 
+  // You probably also expect body with shipment data
+  const shipmentData = req.body; // ← most likely
+  console.log('hit',email,shipmentData)
+
+  await sendShipmentEmail(email, shipmentData);
+  res.json({ success: true });
+});
 // Protected reads
 router.get("/", requireAuth, getOrders);                    // all orders – probably admin only
 router.get("/:id", requireAuth, getOrderById);  

@@ -35,6 +35,7 @@ transporter.verify((error, success) => {
 async function sendOrderEmail(toEmails, subject, templateData) {
     console.log('Preparing to send email to:', toEmails);
   if (!Array.isArray(toEmails)) toEmails = [toEmails];  // Ensure array
+  console.log('submittytt',toEmails,subject)
   toEmails = toEmails.filter(email => email && email.includes('@'));  // Validate/filter
 
   if (toEmails.length === 0) {

@@ -21,22 +21,40 @@ app.use(express.json());
 app.use(cookieParser());
 
 const allowedOrigins = process.env.CLIENT_ORIGINS
-  ? process.env.CLIENT_ORIGINS.split(",")
+  ? process.env.CLIENT_ORIGINS.split(",").map(o => o.trim())
   : [
       "http://localhost:5173",
+      "http://127.0.0.1:5501",
       "http://localhost:3000",
+      "http://localhost:5000",
+      "http://127.0.0.1:5000",
+      "http://localhost:5500",
+      "http://localhost:8000",          // python http.server
+      "http://192.168.100.160:56445",   // ← Add your exact current origin here (temporary)
+      "http://192.168.100.160:*",
+      "http://192.168.100.162:*",
+      "http://192.168.1.29:*",
+      "http://192.168.137.1:*",
+      "192.168.137.85:5000",
+      "origin: '*'",       // Wildcard port (not perfect, but works for testing)
       "https://imaginative-pothos-0a1193.netlify.app",
     ];
-
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: function (origin, callback) {
+      // Allow requests with NO origin (file://, Postman, curl, etc.)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.log(`Rejected origin: ${origin}`); // ← debug log
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-
 app.use("/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/vendors", vendorRoutes);
