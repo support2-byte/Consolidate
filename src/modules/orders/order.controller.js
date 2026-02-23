@@ -2907,6 +2907,236 @@ if (cids.length > 0) {
   }
 }
 
+export async function changeConsignmentStatus(req, res) {
+  console.log("Change Status Request:", { params: req.params, body: req.body });
+
+  let syncOrderIds = [];
+
+  try {
+    const { id } = req.params;
+    const numericId = parseInt(id, 10);
+    if (isNaN(numericId) || numericId <= 0) {
+      return res.status(400).json({ error: 'Invalid consignment ID.' });
+    }
+
+    const { newStatus } = req.body;
+
+    if (!newStatus || typeof newStatus !== 'string' || newStatus.trim() === '') {
+      return res.status(400).json({ error: 'newStatus is required and must be a non-empty string' });
+    }
+
+    const trimmedStatus = newStatus.trim();
+
+    // Fetch current status
+    const { rows } = await pool.query(
+      'SELECT status FROM consignments WHERE id = $1',
+      [numericId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Consignment not found' });
+    }
+
+    const currentStatus = rows[0].status;
+
+    if (currentStatus === trimmedStatus) {
+      return res.status(400).json({ error: 'New status is the same as current status' });
+    }
+
+    // Optional: strict validation – only allow certain transitions
+    // You can remove or adjust this block if you want full freedom
+    const allowedNextStatuses = {
+      'Drafts Cleared': ['Submitted On Vessel'],
+      'Submitted On Vessel': ['Customs Cleared'],
+      'Customs Cleared': ['Submitted'],
+      'Submitted': ['Under Shipment Processing'],
+      'Under Shipment Processing': ['In Transit'],
+      'In Transit': ['Arrived at Facility'],
+      'Arrived at Facility': ['Ready for Delivery'],
+      'Ready for Delivery': ['Arrived at Destination'],
+      'Arrived at Destination': ['Delivered'],
+      'Delivered': [], // terminal state – no further change allowed
+    };
+
+    const possibleNext = allowedNextStatuses[currentStatus] || [];
+    const isValidTransition = possibleNext.includes(trimmedStatus);
+
+    // If you want to enforce valid transitions → uncomment:
+    // if (!isValidTransition) {
+    //   return res.status(400).json({
+    //     error: `Invalid status transition from "${currentStatus}" to "${trimmedStatus}". Allowed: ${possibleNext.join(', ') || 'none'}`,
+    //   });
+    // }
+
+    // If you allow any status (more flexible for admins/support), just skip the above check
+
+    // Reuse your sync mapping
+    const statusSyncMap = {
+      'Drafts Cleared': 'Order Created',
+      'Submitted On Vessel': 'Ready for Loading',
+      'Customs Cleared': 'Loaded Into Container',
+      'Submitted': 'Shipment Processing',
+      'Under Shipment Processing': 'Shipment In Transit',
+      'In Transit': 'Under Processing',
+      'Arrived at Facility': 'Arrived at Sort Facility',
+      'Ready for Delivery': 'Ready for Delivery',
+      'Arrived at Destination': 'Ready for Delivery',
+      'Delivered': 'Shipment Delivered',
+      // Add more if needed for new statuses you might introduce
+    };
+
+    const syncedStatus = statusSyncMap[trimmedStatus] || trimmedStatus;
+
+    let consignmentEta = null;
+
+    await withTransaction(async (client) => {
+      // 1. Calculate ETA
+      if (trimmedStatus !== 'Delivered') {
+        const etaResult = await calculateETA(client, syncedStatus);
+        consignmentEta = etaResult.eta;
+      } else {
+        consignmentEta = new Date().toISOString().split('T')[0];
+      }
+
+      // 2. Update consignment
+      await client.query(
+        'UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
+        [trimmedStatus, consignmentEta, numericId]
+      );
+
+      // 3. Log to tracking
+    await client.query(`
+  INSERT INTO consignment_tracking 
+    (consignment_id, event_type, old_status, new_status, timestamp, details, created_at, source, action)
+  VALUES 
+    ($1, $2, $3, $4, NOW(), $5, NOW(), 'api', 'status_changed')   -- keep action if you like it descriptive
+`, [
+  numericId,
+  'status_updated',               // ← fixed to allowed value
+  currentStatus,
+  trimmedStatus,
+  JSON.stringify({
+    reason: req.body.reason || 'Manual status change',
+    newEta: consignmentEta,
+    syncedTo: syncedStatus,
+    user: req.user?.id || 'system',
+    previous: currentStatus,
+    requested: trimmedStatus
+  })
+]);
+      // 4. Get & sync linked orders
+      const orderIdsRes = await client.query(
+        'SELECT orders FROM consignments WHERE id = $1',
+        [numericId]
+      );
+      let rawOrders = orderIdsRes.rows[0]?.orders || [];
+      if (typeof rawOrders === 'string') rawOrders = JSON.parse(rawOrders || '[]');
+
+      syncOrderIds = rawOrders
+        .map(oid => parseInt(oid, 10))
+        .filter(oid => !isNaN(oid) && oid > 0);
+
+      if (syncOrderIds.length > 0) {
+        // Update orders
+        await client.query(
+          'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])',
+          [syncedStatus, syncOrderIds]
+        );
+
+        // Update receivers
+        await client.query(
+          `UPDATE receivers 
+           SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP
+           WHERE order_id = ANY($3::int[])`,
+          [syncedStatus, consignmentEta, syncOrderIds]
+        );
+
+        // Update container_details in order_items + container_status
+        const receiversRes = await client.query(
+          'SELECT id FROM receivers WHERE order_id = ANY($1::int[])',
+          [syncOrderIds]
+        );
+
+        for (const recvRow of receiversRes.rows) {
+          const receiverId = recvRow.id;
+
+          const itemsRes = await client.query(
+            'SELECT id, container_details FROM order_items WHERE receiver_id = $1',
+            [receiverId]
+          );
+
+          for (const itemRow of itemsRes.rows) {
+            const itemId = itemRow.id;
+            let containerDetails = safeParseJsonArray(itemRow.container_details);
+
+            containerDetails = containerDetails.map(entry => {
+              if (entry?.container?.cid) {
+                return { ...entry, status: syncedStatus };
+              }
+              return entry;
+            });
+
+            await client.query(
+              `UPDATE order_items 
+               SET container_details = $1::jsonb, updated_at = NOW()
+               WHERE id = $2`,
+              [JSON.stringify(containerDetails), itemId]
+            );
+
+            const cids = containerDetails
+              .map(e => Number(e?.container?.cid))
+              .filter(cid => !isNaN(cid));
+
+            if (cids.length > 0) {
+              console.log(`[changeStatus] Updating container_status.availability = "${syncedStatus}" for cids:`, cids);
+
+              await client.query(`
+                INSERT INTO container_status (cid, availability, created_time)
+                VALUES ${cids.map((cid, idx) => `($${idx * 3 + 1}, $${idx * 3 + 2}, NOW())`).join(', ')}
+                ON CONFLICT (cid) DO UPDATE 
+                SET 
+                  availability = EXCLUDED.availability,
+                  created_time = NOW()
+                RETURNING cid, availability
+              `, cids.flatMap(cid => [cid, syncedStatus]));
+            }
+          }
+
+          await updateLinkedContainersStatus(client, receiverId, syncedStatus, 'system');
+        }
+      }
+
+      // Notification
+      try {
+        const updated = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
+        await sendNotification(updated.rows[0], `status_changed_to_${trimmedStatus}`, {
+          reason: req.body.reason || 'Manual change',
+          syncedOrders: syncOrderIds.length,
+          syncedStatus,
+          previousStatus: currentStatus
+        });
+      } catch (notifErr) {
+        console.warn('Notification failed:', notifErr);
+      }
+    });
+
+    return res.json({
+      success: true,
+      message: `Status changed to "${trimmedStatus}"`,
+      data: {
+        previousStatus: currentStatus,
+        newStatus: trimmedStatus,
+        syncedStatus,
+        newEta: consignmentEta,
+        affectedOrders: syncOrderIds.length
+      }
+    });
+
+  } catch (err) {
+    console.error("Error changing status:", err.stack || err);
+    return res.status(500).json({ error: 'Failed to change status', details: err.message });
+  }
+}
 // export async function advanceStatus(req, res) {
 //   console.log("Advance Status Request Params:", req.params);    
 //   try {
@@ -3438,17 +3668,167 @@ function mapContainerStatusToReceiverStatus(containerStatus) {
   return mapping[containerStatus] || null;  // Null if no direct map
 }
 
-// Updated validation helper (case-insensitive, trimmed)
-function isValidReceiverStatus(status) {
-  if (!status) return false;
-  const trimmed = status.trim();
-  const validStatuses = [
-    'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-    'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
-    'Ready for Delivery', 'Shipment Delivered'
-  ];
-  return validStatuses.some(valid => valid.toLowerCase() === trimmed.toLowerCase());
+export async function updateSpecificItemsStatus(req, res) {
+  const { orderId } = req.params;
+  const { 
+    itemRefs, 
+    receiverId,             // optional – for extra safety check
+    status, 
+    notifyClient = true, 
+    notifyParties = false,
+    forceRecalcEta = false 
+  } = req.body || {};
+
+  const created_by = req.user?.id || 'system';
+
+  if (!Array.isArray(itemRefs) || itemRefs.length === 0) {
+    return res.status(400).json({ error: "itemRefs must be a non-empty array" });
+  }
+
+  if (itemRefs.length > 20) {
+    return res.status(400).json({ error: "Maximum 20 items per request" });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // ── 1. Validate & normalize status ────────────────────────────────────
+    const trimmedStatus = (status || '').trim();
+    const validStatuses = [
+      'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
+      'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
+      'Ready for Delivery', 'Shipment Delivered'
+    ];
+
+    if (!trimmedStatus || !validStatuses.some(s => s.toLowerCase() === trimmedStatus.toLowerCase())) {
+      throw new Error(`Invalid status. Allowed: ${validStatuses.join(', ')}`);
+    }
+
+    const normalizedStatus = validStatuses.find(
+      s => s.toLowerCase() === trimmedStatus.toLowerCase()
+    );
+
+    // ── 2. Build safe query with optional receiver filter ─────────────────
+    let extraWhere = '';
+    const queryParams = [normalizedStatus, Number(orderId), itemRefs];
+
+    if (receiverId) {
+      extraWhere = ' AND receiver_id = $4';
+      queryParams.push(Number(receiverId));
+    }
+
+    const updateResult = await client.query(`
+      UPDATE order_items
+         SET consignment_status = $1,
+             updated_at = CURRENT_TIMESTAMP
+       WHERE order_id = $2
+         AND item_ref = ANY($3)${extraWhere}
+   RETURNING id, receiver_id, item_ref, consignment_status
+    `, queryParams);
+
+    if (updateResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ 
+        error: "No matching items found",
+        hint: receiverId ? "Item(s) may not belong to this receiver" : "Check item references"
+      });
+    }
+
+    const updatedRows = updateResult.rows;
+    const affectedReceiverIds = [...new Set(updatedRows.map(r => r.receiver_id))];
+
+    // ── 3. Optional: auto-upgrade receiver only when ALL items are Delivered ──
+    //       (you can comment out or remove this block if you NEVER want auto-update)
+    for (const rid of affectedReceiverIds) {
+      const agg = await client.query(`
+        SELECT 
+          COUNT(*) AS total,
+          COUNT(CASE WHEN consignment_status = 'Shipment Delivered' THEN 1 END) AS delivered
+        FROM order_items
+        WHERE receiver_id = $1
+      `, [rid]);
+
+      const { total, delivered } = agg.rows[0];
+
+      if (total > 0 && delivered === total) {
+        await client.query(`
+          UPDATE receivers
+             SET status = 'Shipment Delivered',
+                 updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+             AND status != 'Shipment Delivered'
+        `, [rid]);
+      }
+    }
+
+    // ── 4. Optional ETA recalc per affected receiver ──────────────────────
+    if (forceRecalcEta) {
+      for (const rid of affectedReceiverIds) {
+        const etaResult = await calculateETA(client, normalizedStatus);
+        await client.query(`
+          UPDATE receivers 
+             SET eta = $1, updated_at = CURRENT_TIMESTAMP 
+           WHERE id = $2
+        `, [etaResult.eta, rid]);
+      }
+    }
+
+    // ── 5. Update order-level min ETA ─────────────────────────────────────
+    const minEtaRes = await client.query(
+      `SELECT MIN(eta) AS min_eta FROM receivers WHERE order_id = $1`,
+      [Number(orderId)]
+    );
+
+    if (minEtaRes.rows[0]?.min_eta) {
+      await client.query(
+        `UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [minEtaRes.rows[0].min_eta, Number(orderId)]
+      );
+    }
+
+    // ── 6. Log changes (one row per updated item) ─────────────────────────
+    for (const row of updatedRows) {
+      await client.query(`
+        INSERT INTO order_tracking 
+          (order_id, receiver_id, item_ref, status, old_status, created_by, created_time)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+      `, [
+        Number(orderId),
+        row.receiver_id,
+        row.item_ref,
+        normalizedStatus,
+        null, // ← you could SELECT old value before update if needed
+        created_by
+      ]);
+    }
+
+    await client.query('COMMIT');
+
+    return res.status(200).json({
+      success: true,
+      updatedCount: updateResult.rowCount,
+      updatedItems: updatedRows.map(r => ({
+        itemRef: r.item_ref,
+        receiverId: r.receiver_id,
+        status: r.consignment_status
+      })),
+      message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`
+    });
+
+  } catch (err) {
+    if (client) await client.query('ROLLBACK');
+    console.error('updateSpecificItemsStatus error:', err);
+    return res.status(500).json({
+      error: 'Failed to update items',
+      details: err.message
+    });
+  } finally {
+    if (client) client.release();
+  }
 }
+
 
 export async function updateReceiverStatus(req, res) {
   let client;
