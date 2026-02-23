@@ -11,7 +11,7 @@ import {
   getStatuses,
   calculateETAEndpoint
 } from '../consignment/consignment.controller.js'; // Adjust path as needed
-import { advanceStatus } from '../orders/order.controller.js'; // Import advanceStatus
+import { advanceStatus, changeConsignmentStatus } from '../orders/order.controller.js'; // Import advanceStatus
 const router = express.Router();
 
 // GET /api/consignments - Fetch all consignments (with pagination and filters)
@@ -35,6 +35,8 @@ router.patch('/:id', updateConsignment); // Reuse update for partial; adjust if 
 
 // PATCH /api/consignments/:id/next - Advance status (workflow) - Note: PUT used; consider PATCH for partial
 router.put('/:id/next', advanceStatus);
+router.put('/:id/status', changeConsignmentStatus);
+
 
 // DELETE /api/consignments/:id - Delete consignment
 router.delete('/:id', deleteConsignment);

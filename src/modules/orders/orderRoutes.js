@@ -13,6 +13,7 @@ import {
   getOrderByItemRef,
   assignContainersToOrders,
   updateReceiverStatus,
+  updateSpecificItemsStatus,
   getOrdersConsignments,
   getOrderByOrderId,
   getMyOrdersByRef,
@@ -76,9 +77,9 @@ router.put(
   updateOrder // ← assuming same handler, or create dedicated if needed
 );
 
-// PUT /api/orders/:orderId/receivers/:id/status - Update receiver status
-router.put("/:orderId/receivers/:id/status", requireAuth, updateReceiverStatus);
 
+// PUT /api/orders/:orderId/receivers/:id/status - Update receiver status
+router.put("/:orderId/receivers/:receiverId/items/:itemRef/status", requireAuth, updateSpecificItemsStatus);
 // ────────────────────────────────────────────────
 // Container assignment routes (protected)
 // ────────────────────────────────────────────────

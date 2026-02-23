@@ -36,6 +36,7 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
       "http://192.168.1.29:*",
       "http://192.168.137.1:*",
       "192.168.137.85:5000",
+      "https://consolidatetracking.onrender.com",
       "origin: '*'",       // Wildcard port (not perfect, but works for testing)
       "https://imaginative-pothos-0a1193.netlify.app",
     ];
