@@ -3004,23 +3004,23 @@ export async function changeConsignmentStatus(req, res) {
         [trimmedStatus, consignmentEta, numericId]
       );
 
-      // 3. Log to tracking
-    await client.query(`
+  // Inside the transaction, replace the INSERT with:
+await client.query(`
   INSERT INTO consignment_tracking 
     (consignment_id, event_type, old_status, new_status, timestamp, details, created_at, source, action)
   VALUES 
-    ($1, $2, $3, $4, NOW(), $5, NOW(), 'api', 'status_changed')   -- keep action if you like it descriptive
+    ($1, $2, COALESCE($3::varchar, 'Unknown'::varchar), $4::varchar, NOW(), $5::jsonb, NOW(), 'api', 'status_changed')
 `, [
   numericId,
-  'status_updated',               // ← fixed to allowed value
-  currentStatus,
+  'status_updated',
+  currentStatus,               // can be null – COALESCE handles it
   trimmedStatus,
   JSON.stringify({
     reason: req.body.reason || 'Manual status change',
     newEta: consignmentEta,
     syncedTo: syncedStatus,
     user: req.user?.id || 'system',
-    previous: currentStatus,
+    previous: currentStatus ?? 'null',
     requested: trimmedStatus
   })
 ]);
@@ -5679,11 +5679,8 @@ export async function getOrderByItemRef(req, res) {
     });
   }
 
-  console.log('rewaarddd',ref)
-
   const pattern = `%${ref.trim().toUpperCase()}%`;
-
-  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern,ref}"`);
+  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern}" (original: ${ref})`);
 
   try {
     const query = `
@@ -5694,8 +5691,8 @@ export async function getOrderByItemRef(req, res) {
         o.status AS order_base_status,
         o.eta,
         o.etd,
-        o.place_of_loading,          -- added
-        o.place_of_delivery,         -- added
+        o.place_of_loading,
+        o.place_of_delivery,
         o.total_assigned_qty,
         s.sender_name,
         s.sender_contact,
@@ -5714,12 +5711,12 @@ export async function getOrderByItemRef(req, res) {
         COALESCE((
           SELECT json_agg(
             json_build_object(
-              'drop_method', d.drop_method,
-              'dropoff_name', d.dropoff_name,
-              'drop_off_cnic', d.drop_off_cnic,
+              'drop_method',     d.drop_method,
+              'dropoff_name',    d.dropoff_name,
+              'drop_off_cnic',   d.drop_off_cnic,
               'drop_off_mobile', d.drop_off_mobile,
-              'plate_no', d.plate_no,
-              'drop_date', d.drop_date
+              'plate_no',        d.plate_no,
+              'drop_date',       d.drop_date
             ) ORDER BY d.id
           )
           FROM drop_off_details d
@@ -5740,10 +5737,13 @@ export async function getOrderByItemRef(req, res) {
         cah.created_at AS assign_created_at,
         cah.notes AS assign_notes,
         ct.id AS ct_tracking_id,
+        ct.old_status,
         ct.new_status AS ct_new_status,
-        ct.timestamp AS ct_timestamp,
+        ct."timestamp" AS ct_timestamp,
+        ct.event_type AS ct_event_type,
         ct.details AS ct_details,
-        ct.event_type AS ct_event_type
+        ct.reason,
+        ct.location
       FROM order_items oi
       INNER JOIN orders o ON oi.order_id = o.id
       LEFT JOIN senders s ON s.order_id = o.id
@@ -5752,23 +5752,30 @@ export async function getOrderByItemRef(req, res) {
       LEFT JOIN container_assignment_history cah ON cah.detail_id = oi.id
       LEFT JOIN container_master cm ON cm.cid = cah.cid
       LEFT JOIN consignments c ON (
-        c.orders @> jsonb_build_array(o.id::text) OR
-        c.orders @> jsonb_build_array(o.id)
+           c.orders @> jsonb_build_array(o.id::text)
+        OR c.orders @> jsonb_build_array(o.id)
+        OR c.orders ? o.id::text
       )
       LEFT JOIN consignment_tracking ct ON ct.consignment_id = c.id
-        AND ct.event_type IN ('status_advanced', 'status_updated', 'status_auto_updated')
+        AND ct.event_type IN (
+          'status_advanced',
+          'status_updated',
+          'order_synced',
+          'status_auto_updated'
+        )
       WHERE oi.item_ref ILIKE $1
-      ORDER BY o.created_at DESC, oi.id, cah.created_at, ct.timestamp DESC
+      ORDER BY o.created_at DESC, oi.id, cah.created_at, ct."timestamp" DESC
     `;
 
     const { rows } = await pool.query(query, [pattern]);
-console.log('rowsssss',rows[0])
-    // if (rows.length === 0) {
-    //   return res.status(404).json({
-    //     success: false,
-    //     message: `No items found matching reference "${ref.trim()}"`
-    //   });
-    // }
+    console.log(`Found ${rows.length} raw rows for ref pattern: ${pattern}`);
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No items found matching reference "${ref.trim()}"`
+      });
+    }
 
     // ────────────────────────────────────────────────
     // Group into clean nested structure
@@ -5777,7 +5784,7 @@ console.log('rowsssss',rows[0])
 
     rows.forEach(row => {
       const orderId = row.order_id;
-console.log('rewaard',row)
+
       if (!orderMap[orderId]) {
         orderMap[orderId] = {
           order_id: orderId,
@@ -5786,8 +5793,8 @@ console.log('rewaard',row)
           status: row.order_base_status,
           eta: row.eta,
           etd: row.etd,
-          place_of_loading: row.place_of_loading || null,     // added here
-          place_of_delivery: row.place_of_delivery || null,   // added here
+          place_of_loading: row.place_of_loading || null,
+          place_of_delivery: row.place_of_delivery || null,
           total_assigned_qty: row.total_assigned_qty || 0,
           sender: {
             name: row.sender_name || '—',
@@ -5804,7 +5811,6 @@ console.log('rewaard',row)
       }
 
       const ord = orderMap[orderId];
-
       const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
 
       if (!ord.receivers[recvKey]) {
@@ -5845,20 +5851,34 @@ console.log('rewaard',row)
 
       const recv = ord.receivers[recvKey];
 
-      // Add consignment tracking entries
-      if (row.ct_tracking_id && !recv.status_history.some(h => h.tracking_id === row.ct_tracking_id)) {
-        recv.status_history.push({
-          tracking_id: row.ct_tracking_id,
-          status: row.ct_new_status,
-          time: row.ct_timestamp,
-          event_type: row.ct_event_type,
-          details: row.ct_details || {},
-          notes: (row.ct_details?.notes || '') + 
-                (row.ct_details?.reason ? ` (${row.ct_details.reason})` : '') +
-                (row.ct_details?.location ? ` at ${row.ct_details.location}` : '')
-        });
+      // ── Add tracking history (deduplicated by ct.id) ──────────────────────
+      if (row.ct_tracking_id) {
+        const alreadyExists = recv.status_history.some(
+          h => h.tracking_id === row.ct_tracking_id
+        );
+
+        if (!alreadyExists) {
+          const notes = [
+            row.reason ? `Reason: ${row.reason}` : '',
+            row.location ? `Location: ${row.location}` : '',
+            row.ct_details?.notes ? row.ct_details.notes : ''
+          ].filter(Boolean).join(' | ');
+
+          recv.status_history.push({
+            tracking_id: row.ct_tracking_id,
+            old_status: row.old_status || null,
+            status: row.ct_new_status,
+            time: row.ct_timestamp,
+            event_type: row.ct_event_type,
+            details: row.ct_details || {},
+            reason: row.reason || null,
+            location: row.location || null,
+            notes: notes || null
+          });
+        }
       }
 
+      // ── Items & assignments ───────────────────────────────────────────────
       if (row.item_id) {
         if (!recv.items[row.item_id]) {
           const total = Number(row.total_number) || 0;
@@ -5894,13 +5914,18 @@ console.log('rewaard',row)
       }
     });
 
-    // Finalize response
+    // ── Finalize & sort history per receiver ───────────────────────────────
     const result = Object.values(orderMap).map(order => {
       Object.values(order.receivers).forEach(recv => {
+        // Sort history descending (newest first)
         recv.status_history.sort((a, b) => new Date(b.time) - new Date(a.time));
 
+        // Set current status from latest history entry (if any)
         if (recv.status_history.length > 0) {
-          recv.current_status = recv.status_history[0].status;
+          const latest = recv.status_history[0];
+          recv.current_status = latest.status;
+          // Optional: sync top-level status too
+          recv.status = latest.status;
         }
       });
 
@@ -5929,6 +5954,7 @@ console.log('rewaard',row)
     });
   }
 }
+
   export async function getOrderByTrackingId(req, res) {
   const { id } = req.params;
 
