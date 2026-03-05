@@ -2,22 +2,20 @@
 import jwt from 'jsonwebtoken';
 import { promisify } from 'util';
 
-// Recommended: Load from environment at startup (never hard-code in production)
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('[FATAL] JWT_SECRET is not set in environment variables');
-  process.exit(1); // Crash in production if missing
+  process.exit(1);
 }
 
 const jwtVerify = promisify(jwt.verify);
-
-// Optional: Define allowed algorithms (prevents downgrade attacks)
 const ALLOWED_ALGORITHMS = ['HS256', 'HS384', 'HS512'];
 
-// Blacklist or short-lived tokens pattern can be added later (Redis/memcache)
-// In requireRole middleware
+// ✅ Fixed: matches your actual roles table
+// id=1 superadmin, id=2 admin, id=3 manager, id=4 user
+const ROLE_MAP = { 1: 'superadmin', 2: 'admin', 3: 'manager', 4: 'user' };
 
-export const requireRole = (requiredRole) => (req, res, next) => {
+export const requireRole = (...requiredRoles) => (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
   }
@@ -27,17 +25,18 @@ export const requireRole = (requiredRole) => (req, res, next) => {
   if (typeof req.user.role === 'string') {
     userRoleStr = req.user.role.toLowerCase();
   } else if (typeof req.user.role === 'number') {
-    const roleMap = { 1: 'admin', 2: 'manager', 3: 'staff', 4: 'viewer' };
-    userRoleStr = (roleMap[req.user.role] || 'unknown').toLowerCase();
+    userRoleStr = (ROLE_MAP[req.user.role] || 'unknown').toLowerCase();
   } else {
     userRoleStr = 'unknown';
   }
 
-  if (userRoleStr !== requiredRole.toLowerCase()) {
+  // ✅ Support multiple roles: requireRole('admin', 'superadmin')
+  const allowed = requiredRoles.map(r => r.toLowerCase());
+  if (!allowed.includes(userRoleStr)) {
     return res.status(403).json({
       success: false,
       error: 'Forbidden',
-      message: `Insufficient permissions - requires ${requiredRole}`,
+      message: `Insufficient permissions - requires one of: ${requiredRoles.join(', ')}`,
     });
   }
 
@@ -45,7 +44,6 @@ export const requireRole = (requiredRole) => (req, res, next) => {
 };
 
 export function requireAuth(req, res, next) {
-  // 1. Get token from cookie (most common in your setup)
   const token = req.cookies?.token;
 
   if (!token) {
@@ -56,43 +54,21 @@ export function requireAuth(req, res, next) {
     });
   }
 
-  // 2. Verify token
-  jwtVerify(token, JWT_SECRET, {
-    algorithms: ALLOWED_ALGORITHMS,
-    // Optional: issuer, audience checks if you use them
-    // issuer: 'your-app',
-    // audience: 'your-app-frontend',
-  })
+  jwtVerify(token, JWT_SECRET, { algorithms: ALLOWED_ALGORITHMS })
     .then((decoded) => {
-      // 3. Basic token shape validation
       if (!decoded || typeof decoded !== 'object') {
-        return res.status(401).json({
-          success: false,
-          error: 'Invalid token payload',
-        });
+        return res.status(401).json({ success: false, error: 'Invalid token payload' });
       }
 
-      // 4. Required claims check (adjust according to your token structure)
       if (!decoded.id && !decoded.sub && !decoded.userId) {
-        return res.status(401).json({
-          success: false,
-          error: 'Token missing user identifier',
-        });
+        return res.status(401).json({ success: false, error: 'Token missing user identifier' });
       }
 
-      // Optional: check expiration manually if needed (already done by jwt.verify)
-      // if (decoded.exp && Date.now() >= decoded.exp * 1000) { ... }
-
-      // 5. Attach user to request (standard practice)
       req.user = {
         id: decoded.id || decoded.sub || decoded.userId,
         email: decoded.email,
-        role: decoded.role,           // if you store role in token
-        // ... other useful claims you include
+        role: decoded.role,
       };
-
-      // Optional: log successful auth (for audit/security monitoring)
-      // logger.info(`Authenticated user: ${req.user.id} (${req.user.email})`);
 
       return next();
     })
@@ -100,7 +76,6 @@ export function requireAuth(req, res, next) {
       console.error('[Auth Middleware] Token verification failed', {
         name: err.name,
         message: err.message,
-        // Do NOT log full token in production
         tokenPrefix: token.substring(0, 10) + '...',
       });
 
@@ -122,15 +97,10 @@ export function requireAuth(req, res, next) {
           message = 'Internal authentication error';
       }
 
-      return res.status(status).json({
-        success: false,
-        error: 'Unauthenticated',
-        message,
-      });
+      return res.status(status).json({ success: false, error: 'Unauthenticated', message });
     });
 }
 
-// Optional: variant for optional authentication (useful for public + logged-in routes)
 export function optionalAuth(req, res, next) {
   const token = req.cookies?.token;
   if (!token) {
