@@ -1,8 +1,8 @@
 import express from "express";
-import multer from "multer";
-import path from "path";
-import upload from "../../middleware/upload.js"; // assuming this is your configured multer
-import { requireAuth } from "../../modules/auth/auth.middleware.js"; // ← use this one
+import multer from "multer";                  // only if you define multer inline (optional)
+import path from "path";                      // can remove if not used elsewhere
+import upload from "../../middleware/upload.js"; // ← your Cloudinary multer instance
+import { requireAuth } from "../../modules/auth/auth.middleware.js";
 
 import {
   createOrder,
@@ -26,20 +26,6 @@ import {
 
 const router = express.Router();
 
-// Multer configuration (moved here for clarity – you can keep it in middleware/upload.js too)
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${Date.now()}${ext}`);
-  },
-});
-
-// If you want custom multer per route, you can define it here
-// But assuming ../../middleware/upload.js already exports a configured multer instance
-
 // ────────────────────────────────────────────────
 // Protected routes – require authentication
 // ────────────────────────────────────────────────
@@ -55,7 +41,7 @@ router.post(
   createOrder
 );
 
-// PUT /api/orders/:id - Update order (with files)
+// PUT /api/orders/:id - Update order (with possible new files)
 router.put(
   "/:id",
   requireAuth,
@@ -66,7 +52,7 @@ router.put(
   updateOrder
 );
 
-// PUT /api/orders/:id/shipping - Update shipping details
+// PUT /api/orders/:id/shipping - Update shipping details (if it also accepts files)
 router.put(
   "/:id/shipping",
   requireAuth,
@@ -74,15 +60,11 @@ router.put(
     { name: "attachments", maxCount: 10 },
     { name: "gatepass", maxCount: 10 },
   ]),
-  updateOrder // ← assuming same handler, or create dedicated if needed
+  updateOrder   // ← or create a dedicated handler if different logic needed
 );
 
-
-// PUT /api/orders/:orderId/receivers/:id/status - Update receiver status
+// Other routes remain unchanged (no file uploads)
 router.put("/:orderId/receivers/:receiverId/items/:itemRef/status", requireAuth, updateSpecificItemsStatus);
-// ────────────────────────────────────────────────
-// Container assignment routes (protected)
-// ────────────────────────────────────────────────
 
 router.post("/assign-container", requireAuth, assignContainersToOrders);
 router.post("/assign-containers-batch", requireAuth, assignContainersBatch);
@@ -93,31 +75,25 @@ router.post(
 );
 router.post("/remove-assign-container", requireAuth, removeContainerAssignments);
 
-// ────────────────────────────────────────────────
-// Read routes – some public, some protected
-// ────────────────────────────────────────────────
-
-// Public or semi-public tracking routes (no auth required?)
+// Read / tracking routes
 router.get("/track/item/:ref", getOrderByItemRef);
 router.get("/track/order/:ref", getOrderByOrderId);
 router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
 router.get("/track/consignment_no/:id", getOrderByTrackingId);
 router.get('/consignmentsOrders', requireAuth, getOrdersConsignments);
-// Probably in your Express route handler
+
 router.post('/notify/me', async (req, res) => {
   const { email } = req.query;
-
-  // You probably also expect body with shipment data
-  const shipmentData = req.body; // ← most likely
-  console.log('hit',email,shipmentData)
+  const shipmentData = req.body;
+  console.log('hit', email, shipmentData);
 
   await sendShipmentEmail(email, shipmentData);
   res.json({ success: true });
 });
+
 // Protected reads
-router.get("/", requireAuth, getOrders);                    // all orders – probably admin only
-router.get("/:id", requireAuth, getOrderById);  
-// User-specific orders (protected)
+router.get("/", requireAuth, getOrders);
+router.get("/:id", requireAuth, getOrderById);
 router.get("/myOrderByRef", requireAuth, getMyOrdersByRef);
 
 export default router;
