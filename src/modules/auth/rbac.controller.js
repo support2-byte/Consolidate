@@ -119,6 +119,229 @@ export async function getModules(req, res) {
   }
 }
 
+export async function createNotification(req, res) {
+  const {
+    module_code,
+    type_code,
+    name,
+    description,
+    default_recipients,
+    enabled = true,
+  } = req.body;
+
+  if (!module_code || !type_code || !name) {
+    return res.status(400).json({ success: false, error: 'module_code, type_code, and name are required' });
+  }
+
+  try {
+    const result = await pool.query(`
+      INSERT INTO notification_types (
+        module_code, type_code, name, description, default_recipients, default_enabled
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (module_code, type_code) DO NOTHING
+      RETURNING id, module_code, type_code, name
+    `, [
+      module_code,
+      type_code,
+      name,
+      description || null,
+      default_recipients || 'customer',
+      enabled,
+    ]);
+
+    if (result.rowCount === 0) {
+      return res.status(409).json({ success: false, error: 'Notification type already exists' });
+    }
+
+    // Optionally create default settings row
+    await pool.query(`
+      INSERT INTO notification_settings (type_id, enabled)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+    `, [result.rows[0].id, enabled]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Notification type created',
+      notification: result.rows[0],
+    });
+  } catch (err) {
+    console.error('[createNotification] Error:', err);
+    res.status(500).json({ success: false, error: 'Failed to create notification' });
+  }
+}
+
+export async function getNotifications(req, res) {
+  try {
+    const { rows } = await pool.query(`
+      SELECT 
+        nt.id,
+        nt.module_code,
+        nt.type_code,
+        nt.name,
+        nt.description,
+        nt.default_recipients,
+        COALESCE(ns.enabled, nt.default_enabled) AS enabled,
+        ns.subject,
+        ns.heading,
+        ns.additional_content,
+        ns.email_type,
+        ns.recipients
+      FROM notification_types nt
+      LEFT JOIN notification_settings ns ON ns.type_id = nt.id
+      ORDER BY nt.module_code, nt.name
+    `);
+
+    // Group by module for easier frontend consumption (optional but helpful)
+    const grouped = rows.reduce((acc, row) => {
+      if (!acc[row.module_code]) acc[row.module_code] = [];
+      acc[row.module_code].push(row);
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      notifications: rows,
+      groupedByModule: grouped, // { "orders": [...], "consignments": [...] }
+    });
+  } catch (err) {
+    console.error('[getNotifications] Error:', err.message, err.stack?.substring(0, 200));
+    res.status(500).json({ success: false, error: 'Failed to fetch notification types' });
+  }
+}
+
+export async function getNotificationById(req, res) {
+  const { id } = req.params;
+
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ success: false, error: 'Invalid ID' });
+  }
+
+  try {
+    const result = await pool.query(`
+      SELECT 
+        nt.id,
+        nt.module_code,
+        nt.type_code,
+        nt.name,
+        nt.description,
+        nt.default_recipients,
+        COALESCE(ns.enabled, nt.default_enabled) AS enabled,
+        ns.subject,
+        ns.heading,
+        ns.additional_content,
+        ns.email_type,
+        ns.recipients,
+        ns.cc,
+        ns.bcc,
+        ns.template_html,           -- now included
+        ns.updated_at
+      FROM notification_types nt
+      LEFT JOIN notification_settings ns ON ns.type_id = nt.id
+      WHERE nt.id = $1
+    `, [Number(id)]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Notification not found' });
+    }
+
+    res.json({
+      success: true,
+      notification: result.rows[0],
+    });
+  } catch (err) {
+    console.error('[getNotificationById] SQL Error:', err.message, err.stack);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+}
+export async function updateNotification(req, res) {
+  const { id } = req.params;
+  const {
+    enabled,
+    subject,
+    heading,
+    additional_content,
+    email_type,
+    recipients,
+    trigger_statuses,
+    template_html,  // ← ADD THIS
+  } = req.body;
+
+  // ... existing check if row exists ...
+
+  await pool.query(`
+    UPDATE notification_settings
+    SET 
+      enabled = COALESCE($1, enabled),
+      subject = COALESCE($2, subject),
+      heading = COALESCE($3, heading),
+      additional_content = COALESCE($4, additional_content),
+      email_type = COALESCE($5, email_type),
+      recipients = COALESCE($6, recipients),
+      trigger_statuses = COALESCE($7, trigger_statuses),
+      template_html = COALESCE($8, template_html),   -- ← ADD THIS
+      updated_at = NOW()
+    WHERE type_id = $9
+  `, [
+    enabled,
+    subject,
+    heading,
+    additional_content,
+    email_type,
+    recipients,
+    trigger_statuses,
+    template_html,   // ← ADD THIS
+    id,
+  ]);
+
+  res.json({ success: true, message: 'Notification settings updated' });
+}
+
+// export async function createNotificationType(req, res) {
+//   const {
+//     module_code,
+//     type_code,
+//     name,
+//     description,
+//     default_recipients,
+//     default_enabled = true,
+//   } = req.body;
+
+//   if (!module_code || !type_code || !name) {
+//     return res.status(400).json({ success: false, error: 'module_code, type_code, name are required' });
+//   }
+
+//   try {
+//     const result = await pool.query(`
+//       INSERT INTO notification_types (
+//         module_code, type_code, name, description, default_recipients, default_enabled
+//       ) VALUES ($1, $2, $3, $4, $5, $6)
+//       ON CONFLICT (module_code, type_code) DO NOTHING
+//       RETURNING id, module_code, type_code, name
+//     `, [
+//       module_code,
+//       type_code,
+//       name,
+//       description || null,
+//       default_recipients || null,
+//       default_enabled,
+//     ]);
+
+//     if (result.rowCount === 0) {
+//       return res.status(409).json({ success: false, error: 'Notification type already exists' });
+//     }
+
+//     res.status(201).json({
+//       success: true,
+//       message: 'Notification type created',
+//       notification: result.rows[0],
+//     });
+//   } catch (err) {
+//     console.error('[createNotificationType] Error:', err.message);
+//     res.status(500).json({ success: false, error: 'Failed to create notification type' });
+//   }
+// }
+ 
 
 export async function getRoles(req, res) {
  try {
