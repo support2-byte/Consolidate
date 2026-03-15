@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
-
+import { getNotificationSettings } from '../modules/orders/order.controller.js';  // Adjust path as needed
+// import  pool  from '../db/pool';  // Assuming you have a db.js that exports a configured pg Pool 
 // Load environment variables
 dotenv.config();
 console.log('Email configuration:', {
@@ -22,6 +23,43 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// // e.g. src/utils/notificationUtils.js
+// async function getNotificationSettings(typeCode) {
+//   try {
+//     const client = await pool.connect();
+//     const result = await client.query(`
+//       SELECT 
+//         nt.type_code,
+//         nt.name,
+//         ns.enabled,
+//         ns.subject,
+//         ns.heading,
+//         ns.additional_content,
+//         ns.email_type,
+//         ns.recipients,
+//         ns.trigger_statuses
+//       FROM notification_types nt
+//       LEFT JOIN notification_settings ns ON ns.type_id = nt.id
+//       WHERE nt.type_code = $1
+//     `, [typeCode]);
+
+//     if (result.rows.length === 0) {
+//       return null; // or default settings
+//     }
+
+//     const settings = result.rows[0];
+//     return {
+//       ...settings,
+//       trigger_statuses: settings.trigger_statuses
+//         ? settings.trigger_statuses.split(',').map(s => s.trim().toLowerCase())
+//         : [],
+//     };
+//   } catch (err) {
+//     console.error('Failed to fetch notification settings:', err);
+//     return null;
+//   }
+// }
+
 // Verify on startup (optional, for debugging)
 transporter.verify((error, success) => {
   if (error) {
@@ -31,238 +69,263 @@ transporter.verify((error, success) => {
   }
 });
 
-// Main email-sending function (handles multiple recipients, uses your HTML templates)
-async function sendOrderEmail(toEmails, subject, templateData) {
-    console.log('Preparing to send email to:', toEmails);
-  if (!Array.isArray(toEmails)) toEmails = [toEmails];  // Ensure array
-  console.log('submittytt',toEmails,subject)
-  toEmails = toEmails.filter(email => email && email.includes('@'));  // Validate/filter
+
+// Safe escape function (defined first – no initialization errors)
+// const escapeHtml = (unsafe) => {
+//   const safeString = String(unsafe ?? '');
+//   return safeString
+//     .replace(/&/g, "&amp;")
+//     .replace(/</g, "&lt;")
+//     .replace(/>/g, "&gt;")
+//     .replace(/"/g, "&quot;")
+//     .replace(/'/g, "&#039;");
+// };
+
+// Route city mapping
+const ROUTE_CITY_MAP = {
+  '1': 'Shenzhen',
+  '2': 'Karachi',
+  '3': 'London',
+  '5': 'Dubai',
+  // Add more as needed
+};
+
+// ────────────────────────────────────────────────────────────────────────────────
+//  Helper: Basic HTML escape (you can also use he or a real template engine)
+function escapeHtml(unsafe) {
+  if (typeof unsafe !== 'string') return '';
+  return unsafe
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+async function sendOrderEmail(toEmails, notificationType, templateData) {
+  console.log(`Preparing to send ${notificationType} email to:`, toEmails);
+
+  // Normalize recipients
+  if (!Array.isArray(toEmails)) {
+    toEmails = [toEmails].filter(Boolean);
+  }
+
+  toEmails = toEmails
+    .filter(email => typeof email === 'string' && email.trim() && email.includes('@'))
+    .map(email => email.trim());
 
   if (toEmails.length === 0) {
-    console.warn('No valid emails to send to.');
-    return { success: false, message: 'No recipients' };
+    console.warn('No valid email recipients found.');
+    return { success: false, message: 'No valid recipients' };
   }
 
-  // Your shipment update template (from code)
-  const shipmentUpdateTemplate = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Royal Gulf Shipping – Shipment Update</title>
-    <style>
-      body{margin:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;color:#334155;}
-      a{text-decoration:none}
-      .wrap{max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;box-shadow:0 8px 26px rgba(2,8,23,.06);overflow:hidden}
-      .logo-bar{background:#ffffff;text-align:center;padding:18px 0}
-      .logo{height:52px}
-      .brand{padding:0 22px 14px;text-align:center}
-      .brand h1{margin:0;font-size:18px;font-weight:800;color:#0f172a;letter-spacing:.2px}
-      .brand p{margin:4px 0 0;font-size:12px;color:#64748b}
-      .accent{height:4px;background:#faae56;opacity:.9;border:0}
-      .tag-row{position:relative}
-      .tag{position:absolute;right:18px;top:18px;background:#fff7ed;border:1px solid #facc15;
-           color:#9a6700;font-weight:700;font-size:12px;padding:6px 10px;border-radius:999px;float: right;
-      margin: 22px 20px 0px 0px;}
-      .content{padding:24px 22px}
-      h2.title{margin:0 0 10px;font-size:20px;font-weight:800;color:#0f172a}
-      p{margin:0 0 10px;line-height:1.55}
-      .status{background:#ecfdf5;border-left:5px solid #f97316;border-radius:10px;padding:14px 16px;margin:16px 0}
-      .status .label{font-weight:800;color:#0f172a;font-size:16px}
-      .status .msg{margin-top:6px;color:#475569;font-size:14px;white-space:pre-line}
-      table.info{width:100%;border-collapse:collapse;margin-top:14px}
-      .info td{padding:7px 0;font-size:13px;border-bottom:1px dashed #e5e7eb}
-      .info td:first-child{width:160px;color:#64748b;text-transform:uppercase;font-size:11px;letter-spacing:.4px}
-      .cta{display:inline-block;margin:22px 0 6px;background:linear-gradient(135deg,#faae56,#68bb75);
-           color:#ffffff;font-weight:800;padding:12px 22px;border-radius:999px;text-align:center;text-decoration:none}
-      .foot{background:#f1f5f9;padding:18px;text-align:center;font-size:12px;color:#64748b;line-height:1.6}
-      .muted{font-size:12px;color:#94a3b8;margin-top:14px}
-      @media (max-width:480px){
-        .content{padding:18px}
-        .tag{position:static;display:inline-block;margin:12px auto 0}
-        .cta{display:block;width:100%;text-align:center;box-sizing:border-box}
-      }
-    </style>
-  </head>
-  <body style="padding:16px">
-    <div class="wrap">
-      <!-- Header -->
-      <div class="logo-bar">
+  // 1. Fetch notification settings
+  let settings;
+  try {
+    settings = await getNotificationSettings(notificationType);
+  } catch (err) {
+    console.error(`Failed to load notification settings for ${notificationType}:`, err);
+    // Decide policy: fail silently / fail hard / send default email
+    // Here: fail silently but log
+    settings = {};
+  }
+
+  // Disabled / missing config → skip (uncomment when ready)
+  if (!settings || settings.enabled === false) {
+    console.log(`Notification "${notificationType}" is disabled or not configured. Skipping.`);
+    return { success: false, message: `Notification type "${notificationType}" is disabled` };
+  }
+
+  // 2. Optional: status filter for status-update notifications
+  if (notificationType.includes('status-update') && templateData?.currentStatus) {
+    const currentStatus = String(templateData.currentStatus).toLowerCase().trim();
+    const allowed = Array.isArray(settings.trigger_statuses) ? settings.trigger_statuses : [];
+
+    if (allowed.length > 0 && !allowed.map(s => s.toLowerCase().trim()).includes(currentStatus)) {
+      console.log(
+        `Status "${currentStatus}" not in allowed list [${allowed.join(', ')}]. Skipping email.`
+      );
+      return {
+        success: false,
+        message: `Current status "${currentStatus}" not configured for notifications`,
+      };
+    }
+  }
+
+  // 3. Prepare route display (city names)
+  let routeDisplay = templateData.route || '—';
+  if (routeDisplay.includes('→')) {
+    const [fromCode, toCode] = routeDisplay.split('→').map(s => s.trim());
+    const fromCity = ROUTE_CITY_MAP?.[fromCode] || fromCode || '—';
+    const toCity   = ROUTE_CITY_MAP?.[toCode]   || toCode   || '—';
+    routeDisplay = `${fromCity} → ${toCity}`;
+  }
+
+  const currentYear      = new Date().getFullYear();
+  const formattedLastUpdated = templateData.lastUpdated
+    ? new Date(templateData.lastUpdated).toLocaleString('en-GB', {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      })
+    : '—';
+
+  // 4. Subject with fallback
+  const defaultSubject = `Royal Gulf Shipping – Shipment Update (Ref: ${templateData.refId || '—'})`;
+
+  const subject = settings.subject
+    ? settings.subject
+        .replace(/{order_number}/gi,   templateData.orderNumber   || '')
+        .replace(/{consignment_id}/gi, templateData.consignmentId || '')
+        .replace(/{status}/gi,         templateData.statusLabel   || '')
+        .replace(/{ref_id}/gi,         templateData.refId         || '')
+    : defaultSubject;
+
+  // 5. Build HTML safely
+  const receiverName   = escapeHtml(templateData.receiverName   || 'Valued Customer');
+  const statusLabel    = escapeHtml(templateData.statusLabel    || 'Status Updated');
+  const statusMsg      = escapeHtml(templateData.statusMsg      || 'We are working on your shipment.');
+  const trackLink      = escapeHtml(templateData.trackLink      || 'https://royalgulfshipping.com/track-your-shipment/');
+  const refId          = escapeHtml(templateData.refId          || '—');
+
+  let itemsHtml = '<p style="color:#64748b;">No specific item details available.</p>';
+
+  if (
+    Array.isArray(templateData.updatedItems) &&
+    templateData.updatedItems.length > 0
+  ) {
+    const rows = templateData.updatedItems
+      .map(item => escapeHtml(item.itemRef || '—'))
+      .map(ref => `<div style="margin-bottom:4px;">${ref}</div>`)
+      .join('');
+
+    itemsHtml = `
+      <h3 style="margin:20px 0 10px; font-size:18px;">Your Updated Shipments</h3>
+      <table class="info" role="presentation" style="width:100%; border-collapse:collapse;">
+        <tr style="background:#f1f5f9;">
+          <td style="padding:10px; font-weight:bold;">Item Ref</td>
+          <td style="padding:10px;">${rows}</td>
+        </tr>
+        <!-- Add more rows if you have more fields (description, qty, etc.) -->
+      </table>
+    `;
+  }
+
+  const additionalContent = settings.additional_content
+    ? `<div style="margin:20px 0; padding:16px; background:#f8f9fa; border-left:4px solid #faae56;">
+         ${settings.additional_content.replace(/\n/g, '<br>')}
+       </div>`
+    : '';
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Royal Gulf Shipping – Shipment Update</title>
+  <style>
+    /* ── Paste your full original CSS here ── */
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height:1.5; color:#1e293b; background:#f8fafc; margin:0; }
+    .wrap { max-width:600px; margin:0 auto; background:white; border-radius:8px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.08); }
+    .logo-bar { padding:24px; text-align:center; background:#0f172a; }
+    .logo { max-width:220px; height:auto; }
+    .brand { text-align:center; padding:16px 24px; background:#1e293b; color:white; }
+    .brand h1 { margin:0; font-size:22px; }
+    .brand p { margin:4px 0 0; opacity:0.8; font-size:14px; }
+    .accent { border:none; height:4px; background:linear-gradient(90deg, #68bb75, #faae56); margin:0; }
+    .tag-row { padding:24px; }
+    .tag { display:inline-block; padding:6px 12px; background:#68bb75; color:white; font-weight:600; border-radius:4px; margin-bottom:12px; }
+    .title { margin:0 0 16px; color:#1e293b; font-size:24px; }
+    .status { padding:16px; background:#f0fdf4; border-radius:8px; margin:16px 0; border:1px solid #bbf7d0; }
+    .status .label { font-weight:700; color:#15803d; font-size:18px; margin-bottom:6px; }
+    .cta { display:inline-block; margin:20px 0; padding:14px 32px; background:#68bb75; color:white; text-decoration:none; font-weight:600; border-radius:6px; }
+    .cta:hover { background:#5ea66a; }
+    .foot { text-align:center; padding:24px; background:#f1f5f9; font-size:13px; color:#64748b; }
+    .muted { color:#64748b; font-size:13px; }
+  </style>
+</head>
+<body style="padding:16px;background:#f8fafc;">
+  <div class="wrap">
+    <div class="logo-bar">
       <img class="logo" src="https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg" alt="Royal Gulf Shipping Logo">
-      </div>
-      <div class="brand">
-        <h1>Royal Gulf Shipping &amp; Logistics LLC</h1>
-        <p>Dubai • London • Karachi • Shenzhen</p>
-      </div>
-      <hr class="accent">
-
-      <!-- Tag + Content -->
-      <div class="tag-row">
-        <div class="tag">&#128276; Shipment Update</div> <!-- 🔔 -->
-        <div class="content">
-          <h2 class="title">Your shipment status has changed</h2>
-          <p>Dear Customer,</p>
-          <p>We’re pleased to inform you that your shipment has a new update.</p>
-
-          <!-- Status block -->
-          <div class="status">
-            <div class="label">&#128674; ${templateData.statusLabel}</div> <!-- 🚢 -->
-            <div class="msg">${templateData.statusMsg}</div>
-          </div>
-
-          <!-- Progress mini-bar (static for now) -->
-          <div style="display:flex;justify-content:center;gap:8px;margin:8px 0 14px">
-            <div style="width:10px;height:10px;border-radius:50%;background:#68bb75"></div>
-            <div style="width:10px;height:10px;border-radius:50%;background:#faae56;box-shadow:0 0 0 4px rgba(250,174,86,.3)"></div>
-            <div style="width:10px;height:10px;border-radius:50%;background:#e5e7eb"></div>
-          </div>
-
-          <!-- Shipment details -->
-          <table class="info" role="presentation">
-            <tr><td>Ref ID</td><td><strong>${templateData.refId}</strong></td></tr>
-            <tr><td>Order ID</td><td>${templateData.orderId}</td></tr>
-            <tr><td>Route</td><td>${templateData.route}</td></tr>
-            <tr><td>ETA</td><td>${templateData.etaFormatted}</td></tr>
-            <tr><td>Last Updated</td><td>${templateData.lastUpdated}</td></tr>
-          </table>
-
-          <!-- CTA Button -->
-          <a class="cta" href="${templateData.trackLink}" target="_blank" rel="noopener noreferrer">View Live Tracking</a>
-          <p class="muted" style="font-size:10px;">If the button above is not working, please visit the following link: https://royalgulfshipping.com/track-your-shipment/ and paste your reference ID to track your shipment.</p>
-          <p class="muted">You’re receiving this because you subscribed to shipment notifications on our website.</p>
-        </div>
-      </div>
-
-      <!-- Footer -->
-      <div class="foot">
-        © 2025 Royal Gulf Shipping &amp; Logistics LLC — All rights reserved.<br>
-        Need help? Call +971 555 658 321 or email
-        <a href="mailto:sales@royalgulfshipping.com" style="color:#68bb75">sales@royalgulfshipping.com</a>
-      </div>
     </div>
-  </body>
-</html>`;
-
-  // Your subscription confirmation template (from code)
-  const subscriptionTemplate = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Royal Gulf Shipping – Subscription Confirmed</title>
-    <style>
-      body{margin:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;color:#334155;}
-      a{text-decoration:none}
-      .wrap{max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;box-shadow:0 8px 26px rgba(2,8,23,.06);overflow:hidden}
-      .logo-bar{background:#ffffff;text-align:center;padding:18px 0}
-      .logo{height:52px}
-      .brand{padding:0 22px 14px;text-align:center}
-      .brand h1{margin:0;font-size:18px;font-weight:800;color:#0f172a;letter-spacing:.2px}
-      .brand p{margin:4px 0 0;font-size:12px;color:#64748b}
-      .accent{height:4px;background:#faae56;opacity:.9;border:0}
-      .content{padding:24px 22px}
-      h2.title{margin:0 0 10px;font-size:20px;font-weight:800;color:#0f172a}
-      p{margin:0 0 10px;line-height:1.55}
-      .status{background:#ecfdf5;border-left:5px solid #10b981;border-radius:10px;padding:14px 16px;margin:16px 0}
-      .status .label{font-weight:800;color:#0f172a;font-size:16px}
-      .status .msg{margin-top:6px;color:#475569;font-size:14px;white-space:pre-line}
-      table.info{width:100%;border-collapse:collapse;margin-top:14px}
-      .info td{padding:7px 0;font-size:13px;border-bottom:1px dashed #e5e7eb}
-      .info td:first-child{width:160px;color:#64748b;text-transform:uppercase;font-size:11px;letter-spacing:.4px}
-      .cta{display:inline-block;margin:22px 0 6px;background:linear-gradient(135deg,#faae56,#68bb75);
-           color:#ffffff;font-weight:800;padding:12px 22px;border-radius:999px;text-align:center;text-decoration:none}
-      .foot{background:#f1f5f9;padding:18px;text-align:center;font-size:12px;color:#64748b;line-height:1.6}
-      .muted{font-size:12px;color:#94a3b8;margin-top:14px}
-      @media (max-width:480px){
-        .content{padding:18px}
-        .cta{display:block;width:100%;text-align:center;box-sizing:border-box}
-      }
-    </style>
-  </head>
-  <body style="padding:16px">
-    <div class="wrap">
-      <!-- Header -->
-      <div class="logo-bar">
-        <img class="logo" src="https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg" alt="Royal Gulf Shipping Logo">
-      </div>
-      <div class="brand">
-        <h1>Royal Gulf Shipping &amp; Logistics LLC</h1>
-        <p>Dubai • London • Karachi • Shenzhen</p>
-      </div>
-      <hr class="accent">
-
-      <!-- Content -->
+    <div class="brand">
+      <h1>Royal Gulf Shipping & Logistics LLC</h1>
+      <p>Dubai • London • Karachi • Shenzhen</p>
+    </div>
+    <hr class="accent">
+    <div class="tag-row">
+      <div class="tag">🔔 Shipment Update</div>
       <div class="content">
-        <h2 class="title">Subscription Confirmed</h2>
-        <p>Dear Customer,</p>
-        <p>You’ve successfully subscribed to updates for your shipment.</p>
-        <p>You’ll receive notifications whenever there’s a status change.</p>
+        <h2 class="title">${escapeHtml(settings.heading || 'Your shipment status has changed')}</h2>
+        <p>Dear ${receiverName},</p>
+        <p>We’re pleased to inform you that your shipment has a new update.</p>
 
-        <!-- Status block -->
         <div class="status">
-          <div class="label">&#128276; Current Status: ${templateData.phaseLabel}</div>
-          <div class="msg">${templateData.phaseMsg}</div>
+          <div class="label">🚢 ${statusLabel}</div>
+          <div class="msg">${statusMsg}</div>
         </div>
 
-        <!-- Shipment details -->
-        <table class="info" role="presentation">
-          <tr><td>Ref ID</td><td><strong>${templateData.referenceId}</strong></td></tr>
-          <tr><td>Route</td><td>${templateData.route}</td></tr>
-          <tr><td>ETA</td><td>${templateData.etaFormatted}</td></tr>
-        </table>
+        <!-- Minimal progress indicator -->
+        <div style="display:flex; justify-content:center; gap:10px; margin:16px 0 24px;">
+          <div style="width:12px; height:12px; border-radius:50%; background:#68bb75;"></div>
+          <div style="width:12px; height:12px; border-radius:50%; background:#faae56; box-shadow:0 0 0 4px rgba(250,174,86,0.3);"></div>
+          <div style="width:12px; height:12px; border-radius:50%; background:#e5e7eb;"></div>
+        </div>
 
-        <!-- CTA Button -->
-        <a class="cta" href="${templateData.trackLink}" target="_blank" rel="noopener noreferrer">View Live Tracking</a>
-        <p class="muted">You can unsubscribe anytime by contacting support.</p>
-      </div>
+        ${itemsHtml}
 
-      <!-- Footer -->
-      <div class="foot">
-        © 2025 Royal Gulf Shipping &amp; Logistics LLC — All rights reserved.<br>
-        Need help? Call +971 555 658 321 or email
-        <a href="mailto:sales@royalgulfshipping.com" style="color:#68bb75">sales@royalgulfshipping.com</a>
+        ${additionalContent}
+
+        <a class="cta" href="${trackLink}" target="_blank" rel="noopener noreferrer">
+          View Live Tracking
+        </a>
+
+        <p class="muted" style="margin:16px 0;">
+          If the button doesn’t work, visit:<br>
+          <a href="https://royalgulfshipping.com/track-your-shipment/">https://royalgulfshipping.com/track-your-shipment/</a><br>
+          and enter reference ID: <strong>${refId}</strong>
+        </p>
+
+        <p class="muted">
+          You’re receiving this because you subscribed to shipment notifications.
+        </p>
       </div>
     </div>
-  </body>
+
+    <div class="foot">
+      © ${currentYear} Royal Gulf Shipping & Logistics LLC — All rights reserved.<br>
+      Need help? Call <a href="tel:+971555658321" style="color:#68bb75;">+971 555 658 321</a> or email
+      <a href="mailto:sales@royalgulfshipping.com" style="color:#68bb75;">sales@royalgulfshipping.com</a>
+    </div>
+  </div>
+</body>
 </html>`;
 
-  // Select template based on data type (shipment or subscription)
-  let html;
-  if (templateData.type === 'subscription') {
-    html = subscriptionTemplate.replace('${templateData.phaseLabel}', templateData.phaseLabel || '')
-                               .replace('${templateData.phaseMsg}', templateData.phaseMsg || '')
-                               .replace('${templateData.referenceId}', templateData.referenceId || '')
-                               .replace('${templateData.route}', templateData.route || '')
-                               .replace('${templateData.etaFormatted}', templateData.etaFormatted || '')
-                               .replace('${templateData.trackLink}', templateData.trackLink || '');
-  } else {
-    // Default to shipment update
-    html = shipmentUpdateTemplate.replace('${templateData.statusLabel}', templateData.statusLabel || '')
-                                 .replace('${templateData.statusMsg}', templateData.statusMsg || '')
-                                 .replace('${templateData.refId}', templateData.refId || '')
-                                 .replace('${templateData.orderId}', templateData.orderId || '')
-                                 .replace('${templateData.route}', templateData.route || '')
-                                 .replace('${templateData.etaFormatted}', templateData.etaFormatted || '')
-                                 .replace('${templateData.lastUpdated}', templateData.lastUpdated || '')
-                                 .replace('${templateData.trackLink}', templateData.trackLink || '');
-  }
-
+  // ── Send ───────────────────────────────────────────────────────────────
   const mailOptions = {
-    from: `"${process.env.EMAIL_FROM_NAME}" <${process.env.EMAIL_FROM_ADDRESS}>`,
-    to: toEmails.join(', '),  // Comma-separated for multiple
-    subject: subject,
-    html: html
+    from: `"${process.env.EMAIL_FROM_NAME || 'Royal Gulf Shipping'}" <${process.env.EMAIL_FROM_ADDRESS || 'support@royalgulfshipping.com'}>`,
+    to: toEmails.join(', '),
+    subject,
+    html,
+    // Optional: add text fallback version later
+    // text: `Dear ${receiverName}, ...`,
   };
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log(`Email sent successfully to ${toEmails.length} recipients: ${info.messageId}`);
+    console.log(`✅ ${notificationType} email sent to ${toEmails.length} recipient(s) → ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('Email send failed:', error.message);
+    console.error(`❌ Failed to send ${notificationType} email`, {
+      to: toEmails,
+      subject,
+      error: error.message,
+      code: error.code,
+      response: error.response,
+    });
     return { success: false, error: error.message };
   }
 }
-
 export { transporter, sendOrderEmail };
 export default sendOrderEmail;

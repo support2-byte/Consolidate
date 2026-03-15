@@ -22,6 +22,11 @@ import {
   updateUserPermission,
   getAllPossiblePermissions,
   getRoles,
+  getNotifications,
+  getNotificationById,
+  updateNotification,
+  // createNotificationType,
+  createNotification,
 } from "../auth/rbac.controller.js";
 
 import { requireAuth, requireRole } from "../auth/auth.middleware.js";
@@ -78,7 +83,12 @@ router.post(
 // ────────────────────────────────────────────────────────────────
 router.get("/admin/rbac/modules", requireAuth, requireRole("admin"), getModules);
 router.get("/admin/rbac/actions", requireAuth, requireRole("admin"), getActions);
-
+// In your router file (e.g., adminRoutes.js)
+router.get('/admin/notifications', getNotifications);
+router.get('/admin/notifications/:id', getNotificationById);
+router.patch('/admin/notifications/:id', updateNotification);
+router.post('/admin/notifications', createNotification); // optional
+// router.post('/admin/notifications', createNotification);
 // ────────────────────────────────────────────────────────────────
 // Admin-only: Role Permission Management
 // ────────────────────────────────────────────────────────────────
