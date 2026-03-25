@@ -22,6 +22,8 @@ import {
   assignOneContainerToMultipleReceivers,
   assignContainersBatch,
   sendShipmentEmail,
+  removeReceiver,
+  removeOrderItem,
 } from "./order.controller.js";
 
 const router = express.Router();
@@ -65,7 +67,8 @@ router.put(
 
 // Other routes remain unchanged (no file uploads)
 router.put("/:orderId/receivers/:receiverId/items/:itemRef/status", requireAuth, updateSpecificItemsStatus);
-
+router.delete('/:orderId/receivers/:receiverId', requireAuth,removeReceiver);
+router.delete('/:orderId/order-items/:itemId', removeOrderItem);
 router.post("/assign-container", requireAuth, assignContainersToOrders);
 router.post("/assign-containers-batch", requireAuth, assignContainersBatch);
 router.post(
