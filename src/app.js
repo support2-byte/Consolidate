@@ -10,6 +10,7 @@ import containerRoutes from "./modules/containers/container.routes.js";
 import orderRoutes from './modules/orders/orderRoutes.js'
 import consignmentRoutes from './modules/consignment/consignment.routes.js';
 import optionsRoutes from './modules/options/options.routes.js';
+import monitorRoutes from './modules/monitoring/monitorRoutes.js';
 import sendOrderEmail from "./middleware/nodeMailer.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js"
@@ -65,6 +66,7 @@ app.use("/api/consignments", consignmentRoutes);
 app.use('/api/options', optionsRoutes);
 app.use('/api/zohoCustomer', webhook);
 app.use('/api/customerPanals', getCustomersPanel);
+app.use('/api/monitoring', monitorRoutes);
 
 // Serve uploads folder statically on /uploads
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
