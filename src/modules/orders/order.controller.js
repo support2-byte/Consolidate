@@ -1682,6 +1682,8 @@ export async function getOrderByReference(req, res) {
     });
   }
 }
+
+
 export async function getOrdersConsignments(req, res) {
   // console.log('[getOrdersConsignments] Request query:', req,res);
   // console.log('[getOrdersConsignments] Auth user:', req.user ? req.user.email : 'unauthenticated');s
@@ -2195,7 +2197,7 @@ export async function getOrderById(req, res) {
       'loaded into container':  'Loaded Into Container',
       'shipment processing':    'Shipment Processing',
       'shipment in transit':    'Shipment In Transit',
-      'arrived at sort facility': 'Arrived at Sort Facility',
+      'arrived at facility': 'Arrived at Facility',
       'ready for delivery':     'Ready for Delivery',
       'shipment delivered':     'Shipment Delivered',
       'order created':          'Order Created',
@@ -2406,7 +2408,7 @@ const CONSIGNMENT_TO_STATUS_MAP = {
   'Loaded':                     { container: 'Loaded',                shipment: 'Loaded Into Container' },         // 9 days
   'Ready for loading':          { container: 'Ready for Loading',     shipment: 'Ready for Loading' },             // 12 days
   'Created':                    { container: 'Created',               shipment: 'Order Created' },                 // 15 days (or 'Created' → 15)
-  'Arrived':                    { container: 'Arrived at Sort Facility', shipment: 'Arrived at Sort Facility' },   // 1 day
+  'Arrived':                    { container: 'Arrived at Facility', shipment: 'Arrived at Facility' },   // 1 day
   'De-Linked':                  { container: 'Arrived at Sort Facility', shipment: 'Arrived at Sort Facility' },   // 1 day
   'Delivered':                  { container: 'Delivered',             shipment: 'Shipment Delivered' },            // 0 days
 };
@@ -2785,7 +2787,7 @@ export function getStatusColor(status) {
 
     // ── Arrival & Facility ─────────────────────────────────────────────
     'Arrived at Facility': '#795548',       // Brown – at location
-    'Arrived at Sort Facility': '#795548',
+    'Arrived at Facility': '#795548',
     'Arrived': '#795548',                   // Container-specific
 
     // ── Ready / Pending Final Steps ────────────────────────────────────
@@ -2923,7 +2925,7 @@ export async function updateContainer(req, res) {
       'De-Linked', 'Under Repair', 'Returned', 'Cleared', 'Occupied',
       'Hired', 'Quarantined', 'Order Created', 'Ready for Loading',
       'Loaded Into Container', 'Shipment Processing', 'Shipment In Transit',
-      'Under Processing', 'Arrived at Sort Facility', 'Ready for Delivery',
+      'Under Processing', 'Arrived at Facility', 'Ready for Delivery',
       'Shipment Delivered'
     ];
 
@@ -3123,7 +3125,7 @@ export async function updateReceiverStatus(req, res) {
     console.log('Received request to update receiver status:', { orderId, receiverId }, { status, notifyClient, notifyParties, forceRecalcEta });
      const validStatuses = [
       'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-      'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
+      'Shipment In Transit', 'Under Processing', 'Arrived at Facility',
       'Ready for Delivery', 'Shipment Delivered'
     ];
     // Enhanced validation with logging and case-insensitivity
@@ -3138,7 +3140,7 @@ export async function updateReceiverStatus(req, res) {
       console.log('Invalid status provided:', trimmedStatus);  // Debug log
       const validStatuses = [
         'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-        'Shipment In Transit', 'Under Processing', 'Arrived at Sort Facility',
+        'Shipment In Transit', 'Under Processing', 'Arrived at Facility',
         'Ready for Delivery', 'Shipment Delivered'
       ];
       return res.status(400).json({ 
@@ -3310,7 +3312,7 @@ function mapReceiverStatusToContainerStatus(receiverStatus) {
 
     // Arrival / destination
     'Arrived at Facility'        : 'Arrived',
-    'Arrived at Sort Facility'   : 'Arrived',
+    // 'Arrived at Facility'   : 'Arrived',
     'Arrived at Destination'     : 'Arrived',
     'Ready for Delivery'         : 'Arrived',
     'Customs Cleared'            : 'Cleared',
@@ -5036,7 +5038,7 @@ export async function advanceStatus(req, res) {
       'Submitted': 'Shipment Processing',
       'Under Shipment Processing': 'Shipment In Transit',
       'In Transit': 'Under Processing',
-      'Arrived at Facility': 'Arrived at Sort Facility',
+      'Arrived at Facility': 'Arrived at Facility',
       'Ready for Delivery': 'Ready for Delivery',
       'Arrived at Destination': 'Ready for Delivery',
       'Delivered': 'Shipment Delivered'
@@ -5442,7 +5444,7 @@ export async function changeConsignmentStatus(req, res) {
       'Submitted': 'Shipment Processing',
       'Under Shipment Processing': 'Shipment In Transit',
       'In Transit': 'Under Processing',
-      'Arrived at Sort Facility': 'Arrived at Sort Facility',
+      'Arrived at Facility': 'Arrived at Facility',
       'Ready for Delivery': 'Ready for Delivery',
       'Arrived at Destination': 'Ready for Delivery',
       'Delivered': 'Shipment Delivered',
@@ -5752,7 +5754,7 @@ export async function updateSpecificItemsStatus(req, res) {
       'shipment processing',
       'shipment in transit', 
       'under processing', 
-      'arrived at sort facility',
+      'arrived at facility',
       'ready for delivery', 
       'shipment delivered'
     ];
@@ -6205,7 +6207,7 @@ export async function getOrderByItemRef(req, res) {
           'Shipment Processing',
           'Shipment In Transit',
           'Under Processing',
-          'Arrived at Sort Facility',
+          'Arrived at Facility',
           'Ready for Delivery',
           'Shipment Delivered'
         ];
