@@ -90,7 +90,7 @@ router.post('/notify/me', async (req, res) => {
   const shipmentData = req.body;
   console.log('hit', email, shipmentData);
 
-  await sendShipmentEmail(email, shipmentData);
+  // await sendShipmentEmail(email, shipmentData);
   res.json({ success: true });
 });
 
