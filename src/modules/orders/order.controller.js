@@ -657,15 +657,14 @@ export async function updateOrder(req, res) {
     const updates = req.body || {};
     const files = req.files || {};
 
-    // ── FIX: declare all flags before use ───────────────────────────────────
     let hasAnyChange = false;
     let hasAttachmentChange = false;
     let hasGatepassChange = false;
 
     console.log('[updateOrder] Starting update for order ID:', id);
-    console.log('[updateOrder] Received keys:', Object.keys(updates));
+    console.log('[updateOrder] Received body keys:', Object.keys(updates));
 
-    // ── 1. Fetch current state ──────────────────────────────────────────────
+    // ── 1. Fetch current state ─────────────────────────────────────
     const currentOrderRes = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
     if (currentOrderRes.rowCount === 0) {
       await client.query('ROLLBACK');
@@ -679,7 +678,7 @@ export async function updateOrder(req, res) {
     const currentTransportRes = await client.query('SELECT * FROM transport_details WHERE order_id = $1', [id]);
     const currentTransport = currentTransportRes.rows[0] || {};
 
-    // ── 2. Parse incoming complex arrays ────────────────────────────────────
+    // ── 2. Parse incoming data ─────────────────────────────────────
     let incomingReceivers = [];
     const panel2Key = updates.sender_type === 'sender' ? 'receivers' : 'senders';
     if (updates[panel2Key]) {
@@ -694,28 +693,11 @@ export async function updateOrder(req, res) {
     if (updates.order_items) {
       try {
         incomingOrderItems = JSON.parse(updates.order_items);
-
-        console.log('[DEBUG] Total incoming order_items:', incomingOrderItems.length);
-        console.log('[DEBUG] First 3 items receiver_index values:',
-          incomingOrderItems.slice(0, 3).map(item => ({
-            receiver_index: item.receiver_index ?? item.receiverIndex ?? 'MISSING',
-            item_ref: item.item_ref || 'no-ref',
-            total_number: item.total_number || 0
-          }))
-        );
-
-        const indexCounts = {};
-        incomingOrderItems.forEach(item => {
-          const idx = String(item.receiver_index ?? item.receiverIndex ?? 'unknown');
-          indexCounts[idx] = (indexCounts[idx] || 0) + 1;
-        });
-        console.log('[DEBUG] Receiver index distribution:', indexCounts);
       } catch (e) {
         console.warn('[updateOrder] Failed to parse order_items:', e);
       }
     }
 
-    // ── 3. Parse drop-off details ───────────────────────────────────────────
     let incomingDropOffs = [];
     if (updates.drop_off_details) {
       try {
@@ -725,31 +707,21 @@ export async function updateOrder(req, res) {
       }
     }
 
-    // ── 4. Attachments handling ─────────────────────────────────────────────
+    // ── 3. Attachments Handling ───────────────────────────────────
     let currentAttachments = currentOrder.attachments || [];
     if (typeof currentAttachments === 'string') {
-      try {
-        currentAttachments = JSON.parse(currentAttachments);
-      } catch (e) {
-        console.warn('[updateOrder] Failed to parse existing attachments:', e);
-        currentAttachments = [];
-      }
+      currentAttachments = JSON.parse(currentAttachments) || [];
     }
 
     let newAttachments = currentAttachments;
 
     if (updates.attachments_existing) {
-      try {
-        newAttachments = JSON.parse(updates.attachments_existing);
-        console.log('[Attachments] Using existing list from frontend:', newAttachments.length);
-        hasAttachmentChange = true;
-      } catch (e) {
-        console.warn('[updateOrder] Failed to parse attachments_existing:', e);
-      }
+      newAttachments = JSON.parse(updates.attachments_existing) || [];
+      hasAttachmentChange = true;
     }
 
-    if (files.attachments && files.attachments.length > 0) {
-      const uploadedAttachments = files.attachments.map(file => ({
+    if (files.attachments?.length > 0) {
+      const uploaded = files.attachments.map(file => ({
         url: file.path || file.secure_url || file.location || '',
         public_id: file.filename || file.public_id || '',
         originalname: file.originalname || '',
@@ -757,39 +729,28 @@ export async function updateOrder(req, res) {
         size: file.size || 0,
         uploadedAt: new Date().toISOString(),
       }));
-      newAttachments = [...newAttachments, ...uploadedAttachments];
-      console.log('[Attachments] Added new files:', uploadedAttachments.length);
+      newAttachments = [...newAttachments, ...uploaded];
       hasAttachmentChange = true;
     }
 
     const attachmentsJson = JSON.stringify(newAttachments);
-    console.log('[Attachments] Final count:', newAttachments.length);
     if (hasAttachmentChange) hasAnyChange = true;
 
-    // ── 5. Gatepass handling ────────────────────────────────────────────────
+    // ── 4. Gatepass Handling ──────────────────────────────────────
     let currentGatepass = currentTransport.gatepass || [];
     if (typeof currentGatepass === 'string') {
-      try {
-        currentGatepass = JSON.parse(currentGatepass);
-      } catch (e) {
-        console.warn('[updateOrder] Failed to parse existing gatepass:', e);
-        currentGatepass = [];
-      }
+      currentGatepass = JSON.parse(currentGatepass) || [];
     }
 
     let newGatepass = currentGatepass;
 
     if (updates.gatepass_existing) {
-      try {
-        newGatepass = JSON.parse(updates.gatepass_existing);
-        hasGatepassChange = true;
-      } catch (e) {
-        console.warn('[updateOrder] Failed to parse gatepass_existing:', e);
-      }
+      newGatepass = JSON.parse(updates.gatepass_existing) || [];
+      hasGatepassChange = true;
     }
 
-    if (files.gatepass && files.gatepass.length > 0) {
-      const uploadedGatepasses = files.gatepass.map(file => ({
+    if (files.gatepass?.length > 0) {
+      const uploaded = files.gatepass.map(file => ({
         url: file.path || file.secure_url || file.location || '',
         public_id: file.filename || file.public_id || '',
         originalname: file.originalname || '',
@@ -797,14 +758,14 @@ export async function updateOrder(req, res) {
         size: file.size || 0,
         uploadedAt: new Date().toISOString(),
       }));
-      newGatepass = [...newGatepass, ...uploadedGatepasses];
+      newGatepass = [...newGatepass, ...uploaded];
       hasGatepassChange = true;
     }
 
     const gatepassJson = JSON.stringify(newGatepass);
     if (hasGatepassChange) hasAnyChange = true;
 
-    // ── 6. Upsert receivers + order_items + drop_off_details ────────────────
+    // ── 5. Upsert Receivers + Order Items ─────────────────────────
     const receiverIdMap = {};
 
     const existingReceiversRes = await client.query(
@@ -816,144 +777,99 @@ export async function updateOrder(req, res) {
     for (let i = 0; i < incomingReceivers.length; i++) {
       const rec = incomingReceivers[i];
 
-      const name         = rec.receiver_name    || rec.sender_name    || '';
-      const contact      = rec.receiver_contact || rec.sender_contact || '';
-      const address      = rec.receiver_address || rec.sender_address || '';
-      const email        = rec.receiver_email   || rec.sender_email   || '';
-      const marks        = rec.marks_and_number || '';
-      const eta          = rec.eta  ? normalizeDate(rec.eta)  : null;
-      const etd          = rec.etd  ? normalizeDate(rec.etd)  : null;
-      const status       = rec.status || 'Order Created';
-      const remarks      = rec.remarks || '';
-      const fullPartial  = rec.full_partial || 'Full';
+      const name = rec.receiver_name || rec.sender_name || '';
+      const contact = rec.receiver_contact || rec.sender_contact || '';
+      const address = rec.receiver_address || rec.sender_address || '';
+      const email = rec.receiver_email || rec.sender_email || '';
+      const marks = rec.receiver_marks_and_number || rec.marks_and_number || '';
+      const eta = rec.eta ? normalizeDate(rec.eta) : null;
+      const etd = rec.etd ? normalizeDate(rec.etd) : null;
+      const status = rec.status || 'Order Created';
+      const remarks = rec.remarks || '';
+      const fullPartial = rec.full_partial || 'Full';
       const qtyDelivered = rec.qty_delivered || null;
       const shippingLine = rec.shipping_line || '';
 
       let containersJson = '[]';
-      if (rec.containers) {
-        containersJson = JSON.stringify(rec.containers);
-      }
+      if (rec.containers) containersJson = JSON.stringify(rec.containers);
 
+      const existingId = rec.id || existingReceiverIds[i] || null;
       let receiverId;
-     const existingId = rec.id || existingReceiverIds[i] || null;
-
 
       if (existingId) {
         await client.query(
-          `UPDATE receivers SET
+          `UPDATE receivers SET 
             receiver_name = $2, receiver_contact = $3, receiver_address = $4,
             receiver_email = $5, receiver_marks_and_number = $6,
             eta = $7, etd = $8, status = $9, remarks = $10,
             full_partial = $11, qty_delivered = $12, shipping_line = $13,
             containers = $14, updated_at = NOW()
            WHERE id = $1`,
-          [existingId, name, contact, address, email, marks, eta, etd, status, remarks,
+          [existingId, name, contact, address, email, marks, eta, etd, status, remarks, 
            fullPartial, qtyDelivered, shippingLine, containersJson]
         );
         receiverId = existingId;
-        console.log(`[Receiver ${i}] Updated existing ID: ${receiverId}`);
       } else {
         const insertRes = await client.query(
-          `INSERT INTO receivers (
-            order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
-            receiver_marks_and_number, eta, etd, status, remarks, full_partial,
-            qty_delivered, shipping_line, containers, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
-          RETURNING id`,
-          [id, name, contact, address, email, marks, eta, etd, status, remarks,
+          `INSERT INTO receivers (order_id, receiver_name, receiver_contact, receiver_address, 
+            receiver_email, receiver_marks_and_number, eta, etd, status, remarks, 
+            full_partial, qty_delivered, shipping_line, containers, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW()) RETURNING id`,
+          [id, name, contact, address, email, marks, eta, etd, status, remarks, 
            fullPartial, qtyDelivered, shippingLine, containersJson]
         );
         receiverId = insertRes.rows[0].id;
-        console.log(`[Receiver ${i}] Inserted new ID: ${receiverId}`);
       }
 
       receiverIdMap[String(i)] = receiverId;
 
-      // ── Order items for this receiver ─────────────────────────────────────
- // ── Order items for this receiver ─────────────────────────────────────────
-const itemsForThisReceiver = incomingOrderItems.filter(item =>
-  String(item.receiver_index ?? item.receiverIndex) === String(i)
-);
+      // Order Items for this receiver
+      const itemsForThisReceiver = incomingOrderItems.filter(item =>
+        String(item.receiver_index ?? item.receiverIndex) === String(i)
+      );
 
-console.log(`[Receiver ${i}] Matched ${itemsForThisReceiver.length} order items`);
+      for (const item of itemsForThisReceiver) {
+        const containerDetailsJson = item.container_details 
+          ? JSON.stringify(item.container_details) 
+          : '[]';
 
-for (const item of itemsForThisReceiver) {
-  let containerDetailsJson = '[]';
-  if (item.container_details) {
-    containerDetailsJson = JSON.stringify(item.container_details);
-  }
+        const itemRef = item.item_ref || `ITEM-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+        const existingItemId = item.existing_id || null;
 
-  const itemRef = item.item_ref || `ITEM-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const existingId = item.existing_id || null;
-
-  if (existingId) {
-    // ── UPDATE existing item by DB id ──────────────────────────────────────
-    await client.query(
-      `UPDATE order_items SET
-        receiver_id       = $2,
-        total_number      = $3,
-        weight            = $4,
-        total_weight      = $5,
-        container_details = $6,
-        category          = $7,
-        subcategory       = $8,
-        type              = $9,
-        pickup_location   = $10,
-        delivery_address  = $11,
-        shipping_line     = $12,
-        item_ref          = $13,
-        updated_at        = NOW()
-       WHERE id = $1`,
-      [
-        existingId,
-        receiverId,
-        item.total_number     || null,
-        item.weight           || null,
-        item.total_weight     || null,
-        containerDetailsJson,
-        item.category         || null,
-        item.subcategory      || null,
-        item.type             || null,
-        item.pickup_location  || null,
-        item.delivery_address || null,
-        item.shipping_line    || null,
-        itemRef,
-      ]
-    );
-    console.log(`[OrderItem] Updated existing id: ${existingId}`);
-  } else {
-    // ── INSERT new item ────────────────────────────────────────────────────
-    await client.query(
-      `INSERT INTO order_items (
-        order_id, receiver_id, total_number, weight, total_weight,
-        container_details, category, subcategory, type,
-        pickup_location, delivery_address, shipping_line,
-        item_ref, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
-      [
-        id,
-        receiverId,
-        item.total_number     || null,
-        item.weight           || null,
-        item.total_weight     || null,
-        containerDetailsJson,
-        item.category         || null,
-        item.subcategory      || null,
-        item.type             || null,
-        item.pickup_location  || null,
-        item.delivery_address || null,
-        item.shipping_line    || null,
-        itemRef,
-      ]
-    );
-    console.log(`[OrderItem] Inserted new item with ref: ${itemRef}`);
-  }
-}
+        if (existingItemId) {
+          await client.query(
+            `UPDATE order_items SET receiver_id = $2, total_number = $3, weight = $4, 
+              total_weight = $5, container_details = $6, category = $7, subcategory = $8, 
+              type = $9, pickup_location = $10, delivery_address = $11, 
+              shipping_line = $12, item_ref = $13, updated_at = NOW()
+             WHERE id = $1`,
+            [existingItemId, receiverId, item.total_number || null, item.weight || null,
+             item.total_weight || null, containerDetailsJson, item.category || null,
+             item.subcategory || null, item.type || null, item.pickup_location || null,
+             item.delivery_address || null, item.shipping_line || null, itemRef]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO order_items (order_id, receiver_id, total_number, weight, total_weight,
+              container_details, category, subcategory, type, pickup_location, 
+              delivery_address, shipping_line, item_ref, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
+            [id, receiverId, item.total_number || null, item.weight || null,
+             item.total_weight || null, containerDetailsJson, item.category || null,
+             item.subcategory || null, item.type || null, item.pickup_location || null,
+             item.delivery_address || null, item.shipping_line || null, itemRef]
+          );
+        }
+      }
     }
 
-    // ── Drop-off details ────────────────────────────────────────────────────
+    // ── 6. Drop-off Details (Clear old + Insert new) ─────────────────────
     if (incomingDropOffs.length > 0) {
       hasAnyChange = true;
+
+      // First, delete old drop-off details for this order (recommended)
+      await client.query(`DELETE FROM drop_off_details WHERE order_id = $1`, [id]);
+
       for (const drop of incomingDropOffs) {
         const idx = String(drop.receiver_index ?? drop.receiverIndex);
         const realReceiverId = receiverIdMap[idx];
@@ -963,8 +879,8 @@ for (const item of itemsForThisReceiver) {
           continue;
         }
 
-        const dropDate = (drop.drop_date || drop.dropDate)
-          ? normalizeDate(drop.drop_date || drop.dropDate)
+        const dropDate = (drop.drop_date || drop.dropDate) 
+          ? normalizeDate(drop.drop_date || drop.dropDate) 
           : null;
 
         await client.query(
@@ -972,10 +888,10 @@ for (const item of itemsForThisReceiver) {
             order_id, receiver_id, drop_method, dropoff_name,
             drop_off_cnic, drop_off_mobile, plate_no, drop_date,
             created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
-          ON CONFLICT DO NOTHING`,
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())`,
           [
-            id, realReceiverId,
+            id, 
+            realReceiverId,
             drop.drop_method     || null,
             drop.dropoff_name    || null,
             drop.drop_off_cnic   || null,
@@ -987,23 +903,68 @@ for (const item of itemsForThisReceiver) {
       }
     }
 
-    // ── 7. Prepare order-level fields ───────────────────────────────────────
+    // ── 7. Update Transport Details ─────────────────────────────────────
+    const transportUpdateQuery = `
+      INSERT INTO transport_details (order_id, transport_type, collection_scope, 
+        collection_method, third_party_transport, driver_name, driver_contact, 
+        driver_nic, driver_pickup_location, truck_number, client_receiver_name, 
+        client_receiver_id, client_receiver_mobile, delivery_date, gatepass,
+        created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+      ON CONFLICT (order_id) DO UPDATE SET
+        transport_type = EXCLUDED.transport_type,
+        collection_scope = EXCLUDED.collection_scope,
+        collection_method = EXCLUDED.collection_method,
+        third_party_transport = EXCLUDED.third_party_transport,
+        driver_name = EXCLUDED.driver_name,
+        driver_contact = EXCLUDED.driver_contact,
+        driver_nic = EXCLUDED.driver_nic,
+        driver_pickup_location = EXCLUDED.driver_pickup_location,
+        truck_number = EXCLUDED.truck_number,
+        client_receiver_name = EXCLUDED.client_receiver_name,
+        client_receiver_id = EXCLUDED.client_receiver_id,
+        client_receiver_mobile = EXCLUDED.client_receiver_mobile,
+        delivery_date = EXCLUDED.delivery_date,
+        gatepass = EXCLUDED.gatepass,
+        updated_at = NOW()
+    `;
+
+    await client.query(transportUpdateQuery, [
+      id,
+      updates.transport_type || currentTransport.transport_type || null,
+      updates.collection_scope || currentTransport.collection_scope || 'Partial',
+      updates.collection_method || currentTransport.collection_method || null,
+      updates.third_party_transport || currentTransport.third_party_transport || null,
+      updates.driver_name || currentTransport.driver_name || null,
+      updates.driver_contact || currentTransport.driver_contact || null,
+      updates.driver_nic || currentTransport.driver_nic || null,
+      updates.driver_pickup_location || currentTransport.driver_pickup_location || null,
+      updates.truck_number || currentTransport.truck_number || null,
+      updates.client_receiver_name || currentTransport.client_receiver_name || null,
+      updates.client_receiver_id || currentTransport.client_receiver_id || null,
+      updates.client_receiver_mobile || currentTransport.client_receiver_mobile || null,
+      updates.delivery_date ? normalizeDate(updates.delivery_date) : currentTransport.delivery_date,
+      gatepassJson
+    ]);
+
+    hasAnyChange = true;
+
+    // ── 8. Update Orders Table ─────────────────────────────────────
     const updatedFields = {
-      booking_ref:        updates.booking_ref          ?? currentOrder.booking_ref,
-      status:             updates.status               ?? currentOrder.status,
-      rgl_booking_number: updates.rgl_booking_number   ?? currentOrder.rgl_booking_number,
-      place_of_loading:   updates.place_of_loading     ?? currentOrder.place_of_loading,
-      point_of_origin:    updates.point_of_origin      ?? currentOrder.point_of_origin,
-      final_destination:  updates.final_destination    ?? currentOrder.final_destination,
-      place_of_delivery:  updates.place_of_delivery    ?? currentOrder.place_of_delivery,
-      order_remarks:      updates.order_remarks        ?? currentOrder.order_remarks,
-      eta:                updates.eta ? normalizeDate(updates.eta) : currentOrder.eta,
-      etd:                updates.etd ? normalizeDate(updates.etd) : currentOrder.etd,
-      attachments:        attachmentsJson,
-      gatepass:           gatepassJson,
+      booking_ref: updates.booking_ref ?? currentOrder.booking_ref,
+      status: updates.status ?? currentOrder.status,
+      rgl_booking_number: updates.rgl_booking_number ?? currentOrder.rgl_booking_number,
+      place_of_loading: updates.place_of_loading ?? currentOrder.place_of_loading,
+      point_of_origin: updates.point_of_origin ?? currentOrder.point_of_origin,
+      final_destination: updates.final_destination ?? currentOrder.final_destination,
+      place_of_delivery: updates.place_of_delivery ?? currentOrder.place_of_delivery,
+      order_remarks: updates.order_remarks ?? currentOrder.order_remarks,
+      eta: updates.eta ? normalizeDate(updates.eta) : currentOrder.eta,
+      etd: updates.etd ? normalizeDate(updates.etd) : currentOrder.etd,
+      attachments: attachmentsJson,
+      // sender_ref, sender_remarks etc. can be added here if needed
     };
 
-    // ── 8. Build and execute orders UPDATE ──────────────────────────────────
     const ordersSet = [];
     const ordersValues = [];
     let paramIndex = 1;
@@ -1016,25 +977,21 @@ for (const item of itemsForThisReceiver) {
       }
     });
 
-    if (ordersSet.length > 0 || hasAnyChange || incomingReceivers.length > 0 || incomingOrderItems.length > 0) {
+    if (ordersSet.length > 0 || hasAnyChange) {
       ordersSet.push('updated_at = NOW()');
-    }
-
-    if (ordersSet.length > 0) {
       ordersValues.push(id);
+
       await client.query(
         `UPDATE orders SET ${ordersSet.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
         ordersValues
       );
-      console.log('[Orders] Updated fields:', ordersSet.join(', '));
-    } else {
-      console.log('[Orders] No changes detected in orders table');
     }
 
-    // ── 9. COMMIT & Refetch ─────────────────────────────────────────────────
+    // ── 9. COMMIT ─────────────────────────────────────────────────
     await client.query('COMMIT');
 
-    const updatedOrder    = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
+    // Refetch updated data
+    const updatedOrder = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
     const updatedReceivers = await client.query(
       `SELECT *, receiver_marks_and_number AS "marksAndNumber"
        FROM receivers WHERE order_id = $1 ORDER BY id`,
@@ -1057,8 +1014,7 @@ for (const item of itemsForThisReceiver) {
     return res.status(500).json({
       error: 'Failed to update order',
       message: error.message,
-      code:    error.code   || null,
-      detail:  error.detail || null
+      detail: error.detail || null
     });
   } finally {
     if (client) client.release();
@@ -1687,9 +1643,9 @@ export async function getOrderByReference(req, res) {
 export async function getOrdersConsignments(req, res) {
   // console.log('[getOrdersConsignments] Request query:', req,res);
   // console.log('[getOrdersConsignments] Auth user:', req.user ? req.user.email : 'unauthenticated');s
-  //   const { id } = req.params;
-  //   const { includeContainer = 'true' } = req.query;
-  // // Early auth check (optional – remove if endpoint should be public)
+    // const { id } = req.params;
+    // const { includeContainer = 'true' } = req.query;
+  // Early auth check (optional – remove if endpoint should be public)
   if (!req.user) {
     return res.status(401).json({
       success: false,
@@ -1697,10 +1653,10 @@ export async function getOrdersConsignments(req, res) {
       details: 'Please log in to view orders'
     });
   }
+    const client = await pool.connect();
 
-  let client;
+  // let client;
   try {
-    client = await pool.connect();
 
     // ────────────────────────────────────────────────
     // Pagination – safe + early validation
@@ -4728,7 +4684,7 @@ console.log(`Found ${orderId} subscribers for order ${orderId}:`, order);
        const email='support2@royalgulfshipping.com'; // For testing, send to fixed email
     // Send to each subscriber (uses updated sendShipmentEmail)
     // for (const email of subscribers) {
-      await sendShipmentEmail(email, shipmentData); 
+      // await sendShipmentEmail(email, shipmentData); 
       console.log(`Update email sent to ${email} for order ${orderId}: ${newStatus}`);
     // }
   } catch (err) {
@@ -5177,80 +5133,65 @@ export async function advanceStatus(req, res) {
         // ───────────────────────────────────────────────
 
         // Prepare shared template base
-        const statusLabel = syncedStatus.charAt(0).toUpperCase() + syncedStatus.slice(1);
-        const templateBase = {
-          type: 'shipment',
-          statusLabel,
-          statusMsg: `Your shipment status has been updated to ${statusLabel}.`,
-          refId: `Consignment #${numericId}`, // or fetch real booking_ref if available
-          orderId: syncOrderIds[0] || '—',   // primary order or first one
-          route: '—',                        // ← improve later if you have route data
-          etaFormatted: consignmentEta 
-            ? new Date(consignmentEta).toLocaleDateString('en-GB') 
-            : 'TBD',
-          lastUpdated: new Date().toLocaleString('en-GB'),
-          trackLink: 'https://consolidatetracking.onrender.com/'
-        };
+//         const statusLabel = syncedStatus.charAt(0).toUpperCase() + syncedStatus.slice(1);
+//         const templateBase = {
+//           type: 'shipment',
+//           statusLabel,
+//           statusMsg: `Your shipment status has been updated to ${statusLabel}.`,
+//           refId: `Consignment #${numericId}`, // or fetch real booking_ref if available
+//           orderId: syncOrderIds[0] || '—',   // primary order or first one
+//           route: '—',                        // ← improve later if you have route data
+//           etaFormatted: consignmentEta 
+//             ? new Date(consignmentEta).toLocaleDateString('en-GB') 
+//             : 'TBD',
+//           lastUpdated: new Date().toLocaleString('en-GB'),
+//           trackLink: 'https://consolidatetracking.onrender.com/'
+//         };
 
-        const emailPromises = [];
+//         const emailPromises = [];
 
-        // Send to receivers
-        for (const recv of receiversRes.rows) {
-          if (!recv.receiver_email?.trim()) continue;
+//         // Send to receivers
+//         for (const recv of receiversRes.rows) {
+//           if (!recv.receiver_email?.trim()) continue;
 
-          const personalizedData = {
-            ...templateBase,
-            receiverName: recv.receiver_name?.trim() || 'Valued Customer'
-          };
+//           const personalizedData = {
+//             ...templateBase,
+//             receiverName: recv.receiver_name?.trim() || 'Valued Customer'
+//           };
 
-          console.log(`Preparing shipment update email for receiver ${recv.receiver_email} (${personalizedData.receiverName})`);
+//           console.log(`Preparing shipment update email for receiver ${recv.receiver_email} (${personalizedData.receiverName})`);
 
-          emailPromises.push(
-        await sendShipmentEmail(person.email, {
-  receiverName: person.name || 'Valued Customer',
-  statusLabel: normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
-  statusMsg: getStatusMessage(normalizedStatus),
-  refId: order.booking_ref || '—',
-  orderId: orderId,
-  route: routeDisplay,
-  etaFormatted: order.eta_formatted || '—',
-  lastUpdated: new Date(),
-  trackLink: 'https://consolidatetracking.onrender.com/',
-  currentStatus: normalizedStatus,           // ← critical for filtering
-  updatedItems: shipmentData.updatedItems || []
-}, notificationType)
-              .then(result => {
-                console.log(`Email send result for ${recv.receiver_email}:`, result);
-                if (result.success) {
-                  console.log(`Shipment update email sent to ${recv.receiver_email}`);
-                } else {
-                  console.log(`Email failed for ${recv.receiver_email}: ${result.error}`);
-                }
-              })
-              .catch(err => {
-                console.error(`Email error for ${recv.receiver_email}: ${err.message}`);
-              })
-          );
-        }
+//           emailPromises.push(
+//         await sendShipmentEmail(person.email, {
+//   receiverName: person.name || 'Valued Customer',
+//   statusLabel: normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
+//   statusMsg: getStatusMessage(normalizedStatus),
+//   refId: order.booking_ref || '—',
+//   orderId: orderId,
+//   route: routeDisplay,
+//   etaFormatted: order.eta_formatted || '—',
+//   lastUpdated: new Date(),
+//   trackLink: 'https://consolidatetracking.onrender.com/',
+//   currentStatus: normalizedStatus,           // ← critical for filtering
+//   updatedItems: shipmentData.updatedItems || []
+// }, notificationType)
+//               .then(result => {
+//                 console.log(`Email send result for ${recv.receiver_email}:`, result);
+//                 if (result.success) {
+//                   console.log(`Shipment update email sent to ${recv.receiver_email}`);
+//                 } else {
+//                   console.log(`Email failed for ${recv.receiver_email}: ${result.error}`);
+//                 }
+//               })
+//               .catch(err => {
+//                 console.error(`Email error for ${recv.receiver_email}: ${err.message}`);
+//               })
+//           );
+//         }
 
-        // Optional: also notify sender if you have sender_email from consignments or orders
-        // Example:
-        /*
-        const senderRes = await client.query(
-          'SELECT sender_email, sender_name FROM orders WHERE id = ANY($1::int[]) LIMIT 1',
-          [syncOrderIds]
-        );
-        if (senderRes.rows[0]?.sender_email) {
-          const senderData = {
-            ...templateBase,
-            receiverName: senderRes.rows[0].sender_name || 'Valued Sender'
-          };
-          emailPromises.push(sendShipmentEmail(senderRes.rows[0].sender_email, senderData));
-        }
-        */
 
-        // Fire and forget – emails send in background
-        Promise.allSettled(emailPromises);
+//         // Fire and forget – emails send in background
+//         Promise.allSettled(emailPromises);
 
       } catch (innerErr) {
         throw innerErr;
@@ -5578,131 +5519,124 @@ export async function changeConsignmentStatus(req, res) {
         console.warn('Notification failed:', notifErr);
       }
     });
-
-    // ───────────────────────────────────────────────────────
-    // EMAIL NOTIFICATIONS – AFTER commit
-    // ───────────────────────────────────────────────────────
-// EMAIL NOTIFICATIONS – AFTER commit
-// ───────────────────────────────────────────────────────
-
 // ───────────────────────────────────────────────────────
 // EMAIL NOTIFICATIONS – AFTER commit
 // ───────────────────────────────────────────────────────
 
-if (syncOrderIds.length > 0 && affectedReceiverIds.length > 0) {
-  console.log(`Linked orders: ${syncOrderIds.join(', ')} | Affected receivers: ${affectedReceiverIds.join(', ')}`);
+// if (syncOrderIds.length > 0 && affectedReceiverIds.length > 0) {
+//   console.log(`Linked orders: ${syncOrderIds.join(', ')} | Affected receivers: ${affectedReceiverIds.join(', ')}`);
 
-  // Fetch ONLY items + details for THIS consignment (via order_items -> orders -> consignments)
-  const shipmentDataRes = await pool.query(`
-    SELECT DISTINCT
-      r.receiver_email,
-      r.receiver_name,
-      oi.item_ref,
-      o.booking_ref AS ref_id,
-      o.place_of_loading,
-      o.place_of_delivery,
-      TO_CHAR(o.eta, 'DD Mon YYYY') AS eta_formatted,
-      oi.consignment_status AS current_status,
-      TO_CHAR(NOW(), 'DD Mon YYYY, HH24:MI') AS last_updated
-    FROM order_items oi
-    JOIN receivers r ON oi.receiver_id = r.id
-    JOIN orders o ON oi.order_id = o.id
-    JOIN consignments c ON o.id = ANY(
-      SELECT jsonb_array_elements_text(c.orders)::int 
-      FROM consignments c 
-      WHERE c.id = $1
-    )
-    WHERE r.receiver_email IS NOT NULL
-      AND r.receiver_email != ''
-      AND c.id = $1  -- critical: only this consignment
-    ORDER BY r.receiver_email, oi.item_ref
-  `, [numericId]);  // ← pass only the current consignment ID
+//   // Fetch ONLY items + details for THIS consignment (via order_items -> orders -> consignments)
+//   const shipmentDataRes = await pool.query(`
+//     SELECT DISTINCT
+//       r.receiver_email,
+//       r.receiver_name,
+//       oi.item_ref,
+//       o.booking_ref AS ref_id,
+//       o.place_of_loading,
+//       o.place_of_delivery,
+//       TO_CHAR(o.eta, 'DD Mon YYYY') AS eta_formatted,
+//       oi.consignment_status AS current_status,
+//       TO_CHAR(NOW(), 'DD Mon YYYY, HH24:MI') AS last_updated
+//     FROM order_items oi
+//     JOIN receivers r ON oi.receiver_id = r.id
+//     JOIN orders o ON oi.order_id = o.id
+//     JOIN consignments c ON o.id = ANY(
+//       SELECT jsonb_array_elements_text(c.orders)::int 
+//       FROM consignments c 
+//       WHERE c.id = $1
+//     )
+//     WHERE r.receiver_email IS NOT NULL
+//       AND r.receiver_email != ''
+//       AND c.id = $1  -- critical: only this consignment
+//     ORDER BY r.receiver_email, oi.item_ref
+//   `, [numericId]);  // ← pass only the current consignment ID
 
-  // Group by receiver email – only receivers with items in THIS consignment
-  const receiversMap = new Map(); // email → { name, items: [] }
+//   // Group by receiver email – only receivers with items in THIS consignment
+//   const receiversMap = new Map(); // email → { name, items: [] }
 
-  for (const row of shipmentDataRes.rows) {
-    const email = row.receiver_email.trim();
-    if (!email) continue;
+//   for (const row of shipmentDataRes.rows) {
+//     const email = row.receiver_email.trim();
+//     if (!email) continue;
 
-    if (!receiversMap.has(email)) {
-      receiversMap.set(email, {
-        receiverName: row.receiver_name?.trim() || 'Valued Customer',
-        items: []
-      });
-    }
+//     if (!receiversMap.has(email)) {
+//       receiversMap.set(email, {
+//         receiverName: row.receiver_name?.trim() || 'Valued Customer',
+//         items: []
+//       });
+//     }
 
-    receiversMap.get(email).items.push({
-      itemRef: row.item_ref || '—',
-      refId: row.ref_id || `Consignment #${numericId}`,
-      route: row.place_of_loading && row.place_of_delivery
-        ? `${row.place_of_loading.trim()} → ${row.place_of_delivery.trim()}`
-        : '—',
-      etaFormatted: row.eta_formatted || 'To be confirmed',
-      currentStatus: row.current_status || '—',
-      lastUpdated: row.last_updated || new Date().toLocaleString('en-GB')
-    });
-  }
+//     receiversMap.get(email).items.push({
+//       itemRef: row.item_ref || '—',
+//       refId: row.ref_id || `Consignment #${numericId}`,
+//       route: row.place_of_loading && row.place_of_delivery
+//         ? `${row.place_of_loading.trim()} → ${row.place_of_delivery.trim()}`
+//         : '—',
+//       etaFormatted: row.eta_formatted || 'To be confirmed',
+//       currentStatus: row.current_status || '—',
+//       lastUpdated: row.last_updated || new Date().toLocaleString('en-GB')
+//     });
+//   }
 
-  // If no receivers have items in this consignment → skip emails
-  if (receiversMap.size === 0) {
-    console.log(`No receivers found with items in consignment ${numericId} → skipping emails`);
-  } else {
-    console.log(`Sending emails to ${receiversMap.size} unique receivers for consignment ${numericId}`);
+//   // If no receivers have items in this consignment → skip emails
+//   if (receiversMap.size === 0) {
+//     console.log(`No receivers found with items in consignment ${numericId} → skipping emails`);
+//   } else {
+//     console.log(`Sending emails to ${receiversMap.size} unique receivers for consignment ${numericId}`);
 
-    const normalizedStatus = syncedStatus.toLowerCase();
-    const statusLabel = normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1);
+//     const normalizedStatus = syncedStatus.toLowerCase();
+//     const statusLabel = normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1);
 
-    const sharedTemplateBase = {
-      type: 'shipment',
-      statusLabel,
-      statusMsg: getStatusMessage(normalizedStatus) || `Your shipment status has been updated to ${statusLabel}.`,
-      lastUpdated: new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }),
-      trackLink: 'https://consolidatetracking.onrender.com/'
-    };
+//     const sharedTemplateBase = {
+//       type: 'shipment',
+//       statusLabel,
+//       statusMsg: getStatusMessage(normalizedStatus) || `Your shipment status has been updated to ${statusLabel}.`,
+//       lastUpdated: new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }),
+//       trackLink: 'https://consolidatetracking.onrender.com/'
+//     };
 
-    const emailPromises = [];
+//     const emailPromises = [];
 
-    for (const [email, data] of receiversMap) {
- const templateData = {
-  ...sharedTemplateBase,
-  receiverName: data.receiverName,
-  statusLabel: sharedTemplateBase.statusLabel,   // string
-  refId: data.items[0]?.refId || `Consignment #${numericId}`,  // string
-  route: data.items[0]?.route || '—',           // string
-  etaFormatted: data.items[0]?.etaFormatted || 'To be confirmed',  // string
-  lastUpdated: sharedTemplateBase.lastUpdated,   // string
-  trackLink: sharedTemplateBase.trackLink,
-  updatedItems: data.items
-};
+//     for (const [email, data] of receiversMap) {
+//  const templateData = {
+//   ...sharedTemplateBase,
+//   receiverName: data.receiverName,
+//   statusLabel: sharedTemplateBase.statusLabel,   // string
+//   refId: data.items[0]?.refId || `Consignment #${numericId}`,  // string
+//   route: data.items[0]?.route || '—',           // string
+//   etaFormatted: data.items[0]?.etaFormatted || 'To be confirmed',  // string
+//   lastUpdated: sharedTemplateBase.lastUpdated,   // string
+//   trackLink: sharedTemplateBase.trackLink,
+//   updatedItems: data.items
+// };
 
-console.log(`Preparing email for ${email} (${data.receiverName}) with ${data.items.length} items:`, {
-  status: templateData.statusLabel,
-  refId: templateData.refId,
-  route: templateData.route,
-  eta: templateData.etaFormatted,
-  itemRefs: data.items.map(i => i.itemRef)
-});
+// console.log(`Preparing email for ${email} (${data.receiverName}) with ${data.items.length} items:`, {
+//   status: templateData.statusLabel,
+//   refId: templateData.refId,
+//   route: templateData.route,
+//   eta: templateData.etaFormatted,
+//   itemRefs: data.items.map(i => i.itemRef)
+// });
 
-      emailPromises.push(
-        sendShipmentEmail(email, templateData)
-          .then(result => {
-            if (result.success) {
-              console.log(`Email sent successfully to ${email}`);
-            } else {
-              console.warn(`Email failed for ${email}: ${result.error || 'Unknown'}`);
-            }
-          })
-          .catch(err => {
-            console.error(`Email error for ${email}: ${err.message}`);
-          })
-      );
-    }
+//       emailPromises.push(
+//         sendShipmentEmail(email, templateData)
+//           .then(result => {
+//             if (result.success) {
+//               console.log(`Email sent successfully to ${email}`);
+//             } else {
+//               console.warn(`Email failed for ${email}: ${result.error || 'Unknown'}`);
+//             }
+//           })
+//           .catch(err => {
+//             console.error(`Email error for ${email}: ${err.message}`);
+//           })
+//       );
+//     }
 
-    // Non-blocking send
-    Promise.allSettled(emailPromises);
-  }
-}
+//     // Non-blocking send
+//     Promise.allSettled(emailPromises);
+//   }
+// }
     return res.json({
       success: true,
       message: `Status changed to "${trimmedStatus}"`,
@@ -5720,6 +5654,9 @@ console.log(`Preparing email for ${email} (${data.receiverName}) with ${data.ite
     return res.status(500).json({ error: 'Failed to change status', details: err.message });
   }
 }
+
+
+
 export async function updateSpecificItemsStatus(req, res) {
   const { orderId } = req.params;
   const { 
@@ -5942,18 +5879,18 @@ export async function updateSpecificItemsStatus(req, res) {
 
       console.log(`Preparing ${notificationType} email for ${person.party} (${person.email})`);
 
-      emailPromises.push(
-   sendShipmentEmail(person.email, templateData, notificationType)
-          .then(result => {
-            if (result.success) {
-              console.log(`Email sent to ${person.party} (${person.email})`);
-            } else {
-              console.warn(`Email failed for ${person.party} (${person.email}): ${result.error || 'Unknown error'}`);
-            }          })
-          .catch(err => {
-            console.error(`Email exception for ${person.email}: ${err.message}`);
-          })
-      );
+  //     emailPromises.push(
+  // //  sendShipmentEmail(person.email, templateData, notificationType)
+  //         .then(result => {
+  //           if (result.success) {
+  //             console.log(`Email sent to ${person.party} (${person.email})`);
+  //           } else {
+  //             console.warn(`Email failed for ${person.party} (${person.email}): ${result.error || 'Unknown error'}`);
+  //           }          })
+  //         .catch(err => {
+  //           console.error(`Email exception for ${person.email}: ${err.message}`);
+  //         })
+  //     );
     }
 
     // Non-blocking – fire and forget
