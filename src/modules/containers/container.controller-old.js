@@ -196,8 +196,7 @@ export async function createContainer(req, res) {
     const {
       container_number, container_size, container_type, owner_type, remarks, created_by,
       // SOC (owned)
-      // location, availability, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
-      location, availability, derived_status, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
+      location, availability, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
       // COC (hired)
       hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination,
     } = req.body;
@@ -264,13 +263,7 @@ export async function createContainer(req, res) {
     // Insert initial status history
     await client.query(
       'INSERT INTO container_status (cid, location, availability, status_notes, created_by) VALUES ($1, $2, $3, $4, $5)',
-      [
-        cid,
-        location || 'karachi_port',
-        derived_status || availability || 'Available',
-        'Initial creation',
-        created_by || 'system'
-      ]
+      [cid, location || 'Unknown', availability || 'Available', 'Initial creation', created_by]
     );
 
     // Conditional insert
@@ -590,9 +583,15 @@ export async function getAllContainers(req, res) {
         cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
         COALESCE(cs.location, 'karachi_port') as location,
         CASE 
-          WHEN cs.availability IS NOT NULL THEN cs.availability
+          WHEN cs.availability = 'Cleared' THEN 'Cleared'
+          WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+          WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+          WHEN cs.availability = 'Arrived' THEN 'Arrived'
+          WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+          WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+          WHEN cs.availability = 'Returned' THEN 'Returned'
           ELSE 'Available'
         END as derived_status,
         cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
@@ -698,9 +697,15 @@ export async function getContainerById(req, res) {
         cm.*, 
         cs.location, 
         CASE 
-          WHEN cs.availability IS NOT NULL THEN cs.availability
+          WHEN cs.availability = 'Cleared' THEN 'Cleared'
+          WHEN chd.hire_end_date < CURRENT_DATE AND cs.availability = 'Cleared' THEN 'Returned'
           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+          WHEN cs.availability IN ('In Transit', 'Loaded', 'Assigned to Job') THEN cs.availability
+          WHEN cs.availability = 'Arrived' THEN 'Arrived'
+          WHEN cs.availability = 'De-Linked' THEN 'De-Linked'
+          WHEN cs.availability = 'Under Repair' THEN 'Under Repair'
+          WHEN cs.availability = 'Returned' THEN 'Returned'
           ELSE 'Available'
         END as derived_status,
         cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
