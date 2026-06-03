@@ -1200,13 +1200,45 @@ export async function getOrders(req, res) {
     let params = [];
 
     if (status) {
-      whereClauses.push(`o.status = $${params.length + 1}`);
+      whereClauses.push(`
+    EXISTS (
+      SELECT 1
+      FROM receivers r
+      WHERE r.order_id = o.id
+      AND LOWER(TRIM(r.status)) = LOWER(TRIM($${params.length + 1}))
+    )
+  `);
+
       params.push(status);
     }
 
     if (search) {
-      whereClauses.push(`o.rgl_booking_number ILIKE $${params.length + 1}`);
-      params.push(`%${search}%`);
+      const searchParam = `%${search.trim()}%`;
+
+      whereClauses.push(`
+    (
+      CAST(o.id AS TEXT) ILIKE $${params.length + 1}
+      OR COALESCE(o.booking_ref, '') ILIKE $${params.length + 1}
+      OR COALESCE(o.rgl_booking_number, '') ILIKE $${params.length + 1}
+      OR COALESCE(o.status, '') ILIKE $${params.length + 1}
+      OR COALESCE(s.sender_name, '') ILIKE $${params.length + 1}
+      OR COALESCE(s.sender_contact, '') ILIKE $${params.length + 1}
+      OR EXISTS (
+        SELECT 1
+        FROM receivers r
+        WHERE r.order_id = o.id
+        AND (
+          COALESCE(r.receiver_name, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_contact, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_address, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.status, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_ref, '') ILIKE $${params.length + 1}
+        )
+      )
+    )
+  `);
+
+      params.push(searchParam);
     }
 
     // Container filter (unchanged)
