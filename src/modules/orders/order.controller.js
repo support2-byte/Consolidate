@@ -4,28 +4,36 @@ import { withUserAudit } from "../../middleware/dbAudit.js";
 
 // Updated validation: Distinguish missing vs. invalid; cleaner messages
 function validateOrderFields({
-  bookingRef, status, eta, etd, placeOfLoading, finalDestination, placeOfDelivery,
-  senderName, receiverName, shippingLine
+  bookingRef,
+  status,
+  eta,
+  etd,
+  placeOfLoading,
+  finalDestination,
+  placeOfDelivery,
+  senderName,
+  receiverName,
+  shippingLine,
 }) {
   const errors = [];
   // Required non-dates: Check if missing
-  if (!bookingRef) errors.push('booking_ref required');
-  if (!status) errors.push('status required');
-  if (!placeOfLoading) errors.push('place_of_loading required');
-  if (!finalDestination) errors.push('final_destination required');
-  if (!placeOfDelivery) errors.push('place_of_delivery required');
-  if (!senderName) errors.push('sender_name required');
-  if (!receiverName) errors.push('receiver_name required');
+  if (!bookingRef) errors.push("booking_ref required");
+  if (!status) errors.push("status required");
+  if (!placeOfLoading) errors.push("place_of_loading required");
+  if (!finalDestination) errors.push("final_destination required");
+  if (!placeOfDelivery) errors.push("place_of_delivery required");
+  if (!senderName) errors.push("sender_name required");
+  if (!receiverName) errors.push("receiver_name required");
   // if (!shippingLine) errors.push('shipping_line required');
 
   // Required dates: Check if missing or invalid
-  if (eta === undefined || eta === null || eta === '') {
-    errors.push('eta required');
+  if (eta === undefined || eta === null || eta === "") {
+    errors.push("eta required");
   } else if (!isValidDate(eta)) {
     errors.push(`eta invalid format (got: "${eta}")`);
   }
-  if (etd === undefined || etd === null || etd === '') {
-    errors.push('etd required');
+  if (etd === undefined || etd === null || etd === "") {
+    errors.push("etd required");
   } else if (!isValidDate(etd)) {
     errors.push(`etd invalid format (got: "${etd}")`);
   }
@@ -47,21 +55,25 @@ function validateOrderFields({
 // Map order status to container availability (unchanged)
 export function getContainerAvailability(orderStatus) {
   switch (orderStatus) {
-    case 'Created': return 'Assigned to Job';
-    case 'In Transit': return 'In Transit';
-    case 'Delivered': return 'Available';
-    case 'Cancelled': return 'Available';
-    default: return 'Available';
+    case "Created":
+      return "Assigned to Job";
+    case "In Transit":
+      return "In Transit";
+    case "Delivered":
+      return "Available";
+    case "Cancelled":
+      return "Available";
+    default:
+      return "Available";
   }
 }
 
-
 // Helper function (assume defined elsewhere)
 function normalizeDate(dateStr) {
-  console.log('Normalizing date:', dateStr);
+  console.log("Normalizing date:", dateStr);
   if (!dateStr) return null;
   const date = new Date(dateStr);
-  return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
+  return isNaN(date.getTime()) ? null : date.toISOString().split("T")[0];
 }
 
 function isValidDate(dateStr) {
@@ -85,10 +97,15 @@ export async function createOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const updates = req.body || {};
     const files = req.files || {};
+
+    console.log("REQ BODY:");
+    console.log(req.body);
+
+    console.log("Transport Values:");
 
     // ── Map snake_case → camelCase ────────────────────────────────────────
     const camelUpdates = {
@@ -115,7 +132,7 @@ export async function createOrder(req, res) {
       receiverRef: updates.receiver_ref,
       receiverRemarks: updates.receiver_remarks,
       senderType: updates.sender_type,
-      selectedSenderOwner: updates.selected_sender_owner || '',
+      selectedSenderOwner: updates.selected_sender_owner || "",
       transportType: updates.transport_type,
       thirdPartyTransport: updates.third_party_transport,
       driverName: updates.driver_name,
@@ -144,28 +161,30 @@ export async function createOrder(req, res) {
       dropOffDetails: updates.drop_off_details,
     };
 
-    console.log('Order create body (key fields):', {
+    console.log("Order create body (key fields):", {
       bookingRef: camelUpdates.bookingRef,
       status: camelUpdates.status,
       rglBookingNumber: camelUpdates.rglBookingNumber,
       senderType: camelUpdates.senderType,
-      receivers_sample: camelUpdates.receivers ? JSON.parse(camelUpdates.receivers)?.slice(0, 1) : null,
+      receivers_sample: camelUpdates.receivers
+        ? JSON.parse(camelUpdates.receivers)?.slice(0, 1)
+        : null,
       marks_and_number_sample: camelUpdates.receivers
         ? JSON.parse(camelUpdates.receivers)?.[0]?.receiver_marks_and_number
-        : null
+        : null,
     });
-    console.log('Files received:', Object.keys(files));
+    console.log("Files received:", Object.keys(files));
 
-    const senderType = camelUpdates.senderType || 'sender';
+    const senderType = camelUpdates.senderType || "sender";
 
     // ── Parse shipping parties ─────────────────────────────────────────────
     let parsedShippingParties = [];
-    if (senderType === 'sender') {
+    if (senderType === "sender") {
       if (camelUpdates.receivers) {
         try {
           parsedShippingParties = JSON.parse(camelUpdates.receivers);
         } catch (e) {
-          console.warn('Failed to parse receivers:', e.message);
+          console.warn("Failed to parse receivers:", e.message);
         }
       }
     } else {
@@ -173,22 +192,24 @@ export async function createOrder(req, res) {
         try {
           parsedShippingParties = JSON.parse(camelUpdates.senders);
         } catch (e) {
-          console.warn('Failed to parse senders:', e.message);
+          console.warn("Failed to parse senders:", e.message);
         }
       }
     }
 
     if (parsedShippingParties.length === 0) {
-      throw new Error(`Shipping parties (${senderType === 'sender' ? 'receivers' : 'senders'}) is required`);
+      throw new Error(
+        `Shipping parties (${senderType === "sender" ? "receivers" : "senders"}) is required`,
+      );
     }
 
     // ── Parse order_items ───────────────────────────────────────────────────
     let parsedShippingItems = [];
     try {
-      const flatOrderItems = JSON.parse(camelUpdates.order_items || '[]');
+      const flatOrderItems = JSON.parse(camelUpdates.order_items || "[]");
       const itemsByParty = flatOrderItems.reduce((acc, item) => {
-        const itemRef = item.item_ref || item.itemRef || '';
-        const parts = itemRef.split('-');
+        const itemRef = item.item_ref || item.itemRef || "";
+        const parts = itemRef.split("-");
         let partyIdx = 0;
         if (parts.length >= 6) {
           partyIdx = parseInt(parts[3]) - 1;
@@ -201,31 +222,38 @@ export async function createOrder(req, res) {
         parsedShippingItems[i] = itemsByParty[i] || [];
       }
     } catch (e) {
-      console.warn('Failed to parse order_items:', e.message);
+      console.warn("Failed to parse order_items:", e.message);
       parsedShippingItems = parsedShippingParties.map(() => []);
     }
 
     // ── Map to receiver format ─────────────────────────────────────────────
-    let parsedReceivers = parsedShippingParties.map(party => ({
-      receiver_name: party.receiver_name || party.receiverName || '',
-      receiver_contact: party.receiver_contact || party.receiverContact || '',
-      receiver_address: party.receiver_address || party.receiverAddress || '',
-      receiver_email: party.receiver_email || party.receiverEmail || '',
-      receiver_marks_and_number: party.receiver_marks_and_number || '',
+    let parsedReceivers = parsedShippingParties.map((party) => ({
+      receiver_name: party.receiver_name || party.receiverName || "",
+      receiver_contact: party.receiver_contact || party.receiverContact || "",
+      receiver_address: party.receiver_address || party.receiverAddress || "",
+      receiver_email: party.receiver_email || party.receiverEmail || "",
+      receiver_marks_and_number: party.receiver_marks_and_number || "",
       containers: party.containers || party.containerDetails || [],
-      status: party.status || 'Created',
+      status: party.status || "Created",
       eta: party.eta,
       etd: party.etd,
-      remarks: party.remarks || '',
-      full_partial: party.full_partial || 'Full',
+      remarks: party.remarks || "",
+      full_partial: party.full_partial || "Full",
       qty_delivered: party.qty_delivered || 0,
     }));
 
     // Aggregate totals
     parsedReceivers = parsedReceivers.map((rec, i) => {
       const shippingDetails = parsedShippingItems[i] || [];
-      const totalNum = shippingDetails.reduce((sum, item) => sum + (parseInt(item.total_number || item.totalNumber || 0) || 0), 0);
-      const totalWt = shippingDetails.reduce((sum, item) => sum + (parseFloat(item.weight || 0) || 0), 0);
+      const totalNum = shippingDetails.reduce(
+        (sum, item) =>
+          sum + (parseInt(item.total_number || item.totalNumber || 0) || 0),
+        0,
+      );
+      const totalWt = shippingDetails.reduce(
+        (sum, item) => sum + (parseFloat(item.weight || 0) || 0),
+        0,
+      );
       return {
         ...rec,
         total_number: totalNum > 0 ? totalNum : null,
@@ -236,23 +264,23 @@ export async function createOrder(req, res) {
     // ── Parse drop-off details ──────────────────────────────────────────────
     let parsedDropOffDetails = {};
     try {
-      const flatDropOffs = JSON.parse(camelUpdates.dropOffDetails || '[]');
-      flatDropOffs.forEach(dropOff => {
+      const flatDropOffs = JSON.parse(camelUpdates.dropOffDetails || "[]");
+      flatDropOffs.forEach((dropOff) => {
         const idx = parseInt(dropOff.receiver_index);
         if (!isNaN(idx)) {
           if (!parsedDropOffDetails[idx]) parsedDropOffDetails[idx] = [];
           parsedDropOffDetails[idx].push({
-            drop_method: dropOff.dropMethod || '',
-            dropoff_name: dropOff.dropoffName || '',
-            drop_off_cnic: dropOff.dropOffCnic || '',
-            drop_off_mobile: dropOff.dropOffMobile || '',
-            plate_no: dropOff.plateNo || '',
-            drop_date: dropOff.dropDate || ''
+            drop_method: dropOff.drop_method || "",
+            dropoff_name: dropOff.dropoff_name || "",
+            drop_off_cnic: dropOff.drop_off_cnic || "",
+            drop_off_mobile: dropOff.drop_off_mobile || "",
+            plate_no: dropOff.plate_no || "",
+            drop_date: dropOff.drop_date || "",
           });
         }
       });
     } catch (e) {
-      console.warn('Failed to parse drop_off_details:', e.message);
+      console.warn("Failed to parse drop_off_details:", e.message);
     }
 
     // ── Attachments (Cloudinary) ────────────────────────────────────────────
@@ -263,28 +291,36 @@ export async function createOrder(req, res) {
         // Ensure it's an array
         if (!Array.isArray(newAttachments)) newAttachments = [];
       } catch (e) {
-        console.warn('Failed to parse attachments_existing:', e);
+        console.warn("Failed to parse attachments_existing:", e);
       }
     }
 
-    if (files.attachments && Array.isArray(files.attachments) && files.attachments.length > 0) {
-      const uploadedAttachments = files.attachments.map(file => {
-        const url = file.path || file.secure_url || file.url;
-        if (!url) {
-          console.warn('File missing URL:', file);
-          return null;
-        }
-        return {
-          url,
-          public_id: file.filename || file.public_id,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-          uploadedAt: new Date().toISOString(),
-        };
-      }).filter(Boolean); // remove null entries
+    if (
+      files.attachments &&
+      Array.isArray(files.attachments) &&
+      files.attachments.length > 0
+    ) {
+      const uploadedAttachments = files.attachments
+        .map((file) => {
+          const url = file.path || file.secure_url || file.url;
+          if (!url) {
+            console.warn("File missing URL:", file);
+            return null;
+          }
+          return {
+            url,
+            public_id: file.filename || file.public_id,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+          };
+        })
+        .filter(Boolean); // remove null entries
 
-      console.log(`[CREATE] Added ${uploadedAttachments.length} new attachments`);
+      console.log(
+        `[CREATE] Added ${uploadedAttachments.length} new attachments`,
+      );
       newAttachments = [...newAttachments, ...uploadedAttachments];
     }
 
@@ -297,26 +333,32 @@ export async function createOrder(req, res) {
         newGatepass = JSON.parse(camelUpdates.gatepass_existing);
         if (!Array.isArray(newGatepass)) newGatepass = [];
       } catch (e) {
-        console.warn('Failed to parse gatepass_existing:', e);
+        console.warn("Failed to parse gatepass_existing:", e);
       }
     }
 
-    if (files.gatepass && Array.isArray(files.gatepass) && files.gatepass.length > 0) {
-      const uploadedGatepasses = files.gatepass.map(file => {
-        const url = file.path || file.secure_url || file.url;
-        if (!url) {
-          console.warn('Gatepass file missing URL:', file);
-          return null;
-        }
-        return {
-          url,
-          public_id: file.filename || file.public_id,
-          originalname: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-          uploadedAt: new Date().toISOString(),
-        };
-      }).filter(Boolean);
+    if (
+      files.gatepass &&
+      Array.isArray(files.gatepass) &&
+      files.gatepass.length > 0
+    ) {
+      const uploadedGatepasses = files.gatepass
+        .map((file) => {
+          const url = file.path || file.secure_url || file.url;
+          if (!url) {
+            console.warn("Gatepass file missing URL:", file);
+            return null;
+          }
+          return {
+            url,
+            public_id: file.filename || file.public_id,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+          };
+        })
+        .filter(Boolean);
 
       console.log(`[CREATE] Added ${uploadedGatepasses.length} new gatepasses`);
       newGatepass = [...newGatepass, ...uploadedGatepasses];
@@ -325,26 +367,31 @@ export async function createOrder(req, res) {
     const gatepassJson = JSON.stringify(newGatepass);
 
     // ── Owner fields ────────────────────────────────────────────────────────
-    let ownerName, ownerContact, ownerAddress, ownerEmail, ownerRef, ownerRemarks;
-    if (senderType === 'sender') {
-      ownerName = camelUpdates.senderName || '';
-      ownerContact = camelUpdates.senderContact || '';
-      ownerAddress = camelUpdates.senderAddress || '';
-      ownerEmail = camelUpdates.senderEmail || '';
-      ownerRef = camelUpdates.senderRef || '';
-      ownerRemarks = camelUpdates.senderRemarks || '';
+    let ownerName,
+      ownerContact,
+      ownerAddress,
+      ownerEmail,
+      ownerRef,
+      ownerRemarks;
+    if (senderType === "sender") {
+      ownerName = camelUpdates.senderName || "";
+      ownerContact = camelUpdates.senderContact || "";
+      ownerAddress = camelUpdates.senderAddress || "";
+      ownerEmail = camelUpdates.senderEmail || "";
+      ownerRef = camelUpdates.senderRef || "";
+      ownerRemarks = camelUpdates.senderRemarks || "";
     } else {
-      ownerName = camelUpdates.receiverName || '';
-      ownerContact = camelUpdates.receiverContact || '';
-      ownerAddress = camelUpdates.receiverAddress || '';
-      ownerEmail = camelUpdates.receiverEmail || '';
-      ownerRef = camelUpdates.receiverRef || '';
-      ownerRemarks = camelUpdates.receiverRemarks || '';
+      ownerName = camelUpdates.receiverName || "";
+      ownerContact = camelUpdates.receiverContact || "";
+      ownerAddress = camelUpdates.receiverAddress || "";
+      ownerEmail = camelUpdates.receiverEmail || "";
+      ownerRef = camelUpdates.receiverRef || "";
+      ownerRemarks = camelUpdates.receiverRemarks || "";
     }
 
     const updatedFields = {
       bookingRef: camelUpdates.bookingRef,
-      status: camelUpdates.status || 'Created',
+      status: camelUpdates.status || "Created",
       rglBookingNumber: camelUpdates.rglBookingNumber,
       placeOfLoading: camelUpdates.placeOfLoading,
       pointOfOrigin: camelUpdates.pointOfOrigin,
@@ -357,7 +404,7 @@ export async function createOrder(req, res) {
       senderEmail: ownerEmail,
       senderRef: ownerRef,
       senderRemarks: ownerRemarks,
-      senderType: camelUpdates.senderType || 'sender',
+      senderType: camelUpdates.senderType || "sender",
       selectedSenderOwner: camelUpdates.selectedSenderOwner,
       transportType: camelUpdates.transportType,
       thirdPartyTransport: camelUpdates.thirdPartyTransport,
@@ -384,8 +431,8 @@ export async function createOrder(req, res) {
     // ── Validation ──────────────────────────────────────────────────────────
     const updateErrors = [];
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const requiredFields = ['rglBookingNumber', 'senderType'];
-    requiredFields.forEach(camelField => {
+    const requiredFields = ["rglBookingNumber", "senderType"];
+    requiredFields.forEach((camelField) => {
       const value = updatedFields[camelField];
       if (!value || !value.trim()) {
         updateErrors.push(`${camelField} is required`);
@@ -393,11 +440,11 @@ export async function createOrder(req, res) {
     });
 
     if (updateErrors.length > 0) {
-      console.warn('Create validation failed:', updateErrors);
-      await client.query('ROLLBACK');
+      console.warn("Create validation failed:", updateErrors);
+      await client.query("ROLLBACK");
       return res.status(400).json({
-        error: 'Invalid create fields',
-        details: updateErrors.join('; ')
+        error: "Invalid create fields",
+        details: updateErrors.join("; "),
       });
     }
 
@@ -407,7 +454,7 @@ export async function createOrder(req, res) {
       try {
         normDropDate = normalizeDate(updatedFields.dropDate);
       } catch (e) {
-        console.warn('Failed to normalize dropDate:', e);
+        console.warn("Failed to normalize dropDate:", e);
       }
     }
 
@@ -416,9 +463,26 @@ export async function createOrder(req, res) {
       try {
         normDeliveryDate = normalizeDate(updatedFields.deliveryDate);
       } catch (e) {
-        console.warn('Failed to normalize deliveryDate:', e);
+        console.warn("Failed to normalize deliveryDate:", e);
       }
     }
+
+    console.log({
+      transportType: updatedFields.transportType,
+      thirdPartyTransport: updatedFields.thirdPartyTransport,
+      driverName: updatedFields.driverName,
+      driverContact: updatedFields.driverContact,
+      driverNic: updatedFields.driverNic,
+      driverPickupLocation: updatedFields.driverPickupLocation,
+      truckNumber: updatedFields.truckNumber,
+      collectionMethod: updatedFields.collectionMethod,
+      collectionScope: updatedFields.collectionScope,
+      qtyDelivered: updatedFields.qtyDelivered,
+      clientReceiverName: updatedFields.clientReceiverName,
+      clientReceiverId: updatedFields.clientReceiverId,
+      clientReceiverMobile: updatedFields.clientReceiverMobile,
+      deliveryDate: updatedFields.deliveryDate,
+    });
 
     // ── Insert into orders ──────────────────────────────────────────────────
     const ordersValues = [
@@ -429,8 +493,8 @@ export async function createOrder(req, res) {
       updatedFields.pointOfOrigin,
       updatedFields.finalDestination,
       updatedFields.placeOfDelivery,
-      updatedFields.orderRemarks || '',
-      attachmentsJson
+      updatedFields.orderRemarks || "",
+      attachmentsJson,
     ];
 
     const ordersQuery = `
@@ -449,13 +513,13 @@ export async function createOrder(req, res) {
     const sendersValues = [
       orderId,
       updatedFields.senderName,
-      updatedFields.senderContact || '',
-      updatedFields.senderAddress || '',
-      updatedFields.senderEmail || '',
-      updatedFields.senderRef || '',
-      updatedFields.senderRemarks || '',
+      updatedFields.senderContact || "",
+      updatedFields.senderAddress || "",
+      updatedFields.senderEmail || "",
+      updatedFields.senderRef || "",
+      updatedFields.senderRemarks || "",
       updatedFields.senderType,
-      updatedFields.selectedSenderOwner || ''
+      updatedFields.selectedSenderOwner || "",
     ];
 
     const sendersQuery = `
@@ -474,31 +538,41 @@ export async function createOrder(req, res) {
 
     for (let i = 0; i < parsedReceivers.length; i++) {
       const rec = parsedReceivers[i];
-      console.log(`[Receiver ${i + 1}] marks_and_number:`, rec.receiver_marks_and_number);
+      console.log(
+        `[Receiver ${i + 1}] marks_and_number:`,
+        rec.receiver_marks_and_number,
+      );
 
-      const etaCalc = rec.eta ? normalizeDate(rec.eta) : await calculateETA(client, rec.status || 'Created');
-      const recNormEta = typeof etaCalc === 'string' ? etaCalc : (etaCalc?.eta || null);
+      const etaCalc = rec.eta
+        ? normalizeDate(rec.eta)
+        : await calculateETA(client, rec.status || "Created");
+      const recNormEta =
+        typeof etaCalc === "string" ? etaCalc : etaCalc?.eta || null;
       const recNormEtd = rec.etd ? normalizeDate(rec.etd) : null;
 
       const recContainersJson = JSON.stringify(rec.containers || []);
 
       const receiversValues = [
         orderId,
-        rec.receiver_name || '',
-        rec.receiver_contact || '',
-        rec.receiver_address || '',
-        rec.receiver_email || '',
-        rec.receiver_marks_and_number || '',
+        rec.receiver_name || "",
+        rec.receiver_contact || "",
+        rec.receiver_address || "",
+        rec.receiver_email || "",
+        rec.receiver_marks_and_number || "",
         recNormEta,
         recNormEtd,
-        '', '', '', '', '',
+        "",
+        "",
+        "",
+        "",
+        "",
         rec.total_number,
         rec.total_weight,
-        rec.remarks || '',
+        rec.remarks || "",
         recContainersJson,
-        rec.status || 'Created',
-        rec.full_partial || 'Full',
-        rec.qty_delivered ? parseInt(rec.qty_delivered) : null
+        rec.status || "Created",
+        rec.full_partial || "Full",
+        rec.qty_delivered ? parseInt(rec.qty_delivered) : null,
       ];
 
       const receiversQuery = `
@@ -511,7 +585,11 @@ export async function createOrder(req, res) {
         RETURNING id, receiver_name
       `;
 
-      const recResult = await withUserAudit(req, receiversQuery, receiversValues);
+      const recResult = await withUserAudit(
+        req,
+        receiversQuery,
+        receiversValues,
+      );
       const receiverId = recResult.rows[0].id;
       receiverIds.push(receiverId);
 
@@ -519,15 +597,17 @@ export async function createOrder(req, res) {
       const shippingDetails = parsedShippingItems[i] || [];
       for (let j = 0; j < shippingDetails.length; j++) {
         const item = shippingDetails[j];
-        const pickupLoc = item.pickup_location || item.pickupLocation || '';
-        const deliveryAddr = item.delivery_address || item.deliveryAddress || '';
-        const category = item.category || '';
-        const subcategory = item.subcategory || '';
-        const type = item.type || '';
+        const pickupLoc = item.pickup_location || item.pickupLocation || "";
+        const deliveryAddr =
+          item.delivery_address || item.deliveryAddress || "";
+        const category = item.category || "";
+        const subcategory = item.subcategory || "";
+        const type = item.type || "";
         const totalNum = parseInt(item.total_number || item.totalNumber || 0);
         const weight = parseFloat(item.weight || 0);
-        const itemRef = item.item_ref || item.itemRef || '';
-        const containerDetails = item.containerDetails || item.container_details || [];
+        const itemRef = item.item_ref || item.itemRef || "";
+        const containerDetails =
+          item.containerDetails || item.container_details || [];
 
         const orderItemsQuery = `
           INSERT INTO order_items (
@@ -547,7 +627,7 @@ export async function createOrder(req, res) {
           type,
           totalNum,
           weight,
-          JSON.stringify(containerDetails)
+          JSON.stringify(containerDetails),
         ];
 
         await withUserAudit(req, orderItemsQuery, orderItemsValues);
@@ -557,7 +637,9 @@ export async function createOrder(req, res) {
       const receiverDropOffs = parsedDropOffDetails[i] || [];
       for (let d = 0; d < receiverDropOffs.length; d++) {
         const dropOff = receiverDropOffs[d];
-        const normDropDate = dropOff.drop_date ? normalizeDate(dropOff.drop_date) : null;
+        const normDropDate = dropOff.drop_date
+          ? normalizeDate(dropOff.drop_date)
+          : null;
 
         const dropOffQuery = `
           INSERT INTO drop_off_details (
@@ -573,7 +655,7 @@ export async function createOrder(req, res) {
           dropOff.drop_off_cnic || null,
           dropOff.drop_off_mobile || null,
           dropOff.plate_no || null,
-          normDropDate
+          normDropDate,
         ];
 
         await withUserAudit(req, dropOffQuery, dropOffValues);
@@ -583,7 +665,7 @@ export async function createOrder(req, res) {
         receiverId,
         status: rec.status || updatedFields.status,
         totalShippingDetails: shippingDetails.length,
-        totalDropOffDetails: receiverDropOffs.length
+        totalDropOffDetails: receiverDropOffs.length,
       });
     }
 
@@ -610,7 +692,7 @@ export async function createOrder(req, res) {
       updatedFields.driverContact || null,
       updatedFields.driverNic || null,
       updatedFields.driverPickupLocation || null,
-      updatedFields.truckNumber || null
+      updatedFields.truckNumber || null,
     ];
 
     const transportQuery = `
@@ -624,24 +706,23 @@ export async function createOrder(req, res) {
 
     await withUserAudit(req, transportQuery, transportValues);
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // ── Final response ──────────────────────────────────────────────────────
     res.status(201).json({
       success: true,
       order: newOrder,
       tracking: trackingData,
-      attachments: newAttachments,        // always array
-      gatepass: newGatepass               // always array
+      attachments: newAttachments, // always array
+      gatepass: newGatepass, // always array
     });
-
   } catch (error) {
-    console.error('Error processing order:', error);
-    if (client) await client.query('ROLLBACK');
+    console.error("Error processing order:", error);
+    if (client) await client.query("ROLLBACK");
     return res.status(500).json({
-      error: 'Internal server error',
+      error: "Internal server error",
       details: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   } finally {
     if (client) client.release();
@@ -651,7 +732,7 @@ export async function updateOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { id } = req.params;
     const updates = req.body || {};
@@ -661,31 +742,41 @@ export async function updateOrder(req, res) {
     let hasAttachmentChange = false;
     let hasGatepassChange = false;
 
-    console.log('[updateOrder] Starting update for order ID:', id);
-    console.log('[updateOrder] Received body keys:', Object.keys(updates));
+    console.log("[updateOrder] Starting update for order ID:", id);
+    console.log("[updateOrder] Received body keys:", Object.keys(updates));
 
     // ── 1. Fetch current state ─────────────────────────────────────
-    const currentOrderRes = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
+    const currentOrderRes = await client.query(
+      "SELECT * FROM orders WHERE id = $1",
+      [id],
+    );
     if (currentOrderRes.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order not found' });
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Order not found" });
     }
     const currentOrder = currentOrderRes.rows[0];
 
-    const currentSenderRes = await client.query('SELECT * FROM senders WHERE order_id = $1', [id]);
+    const currentSenderRes = await client.query(
+      "SELECT * FROM senders WHERE order_id = $1",
+      [id],
+    );
     const currentSender = currentSenderRes.rows[0] || {};
 
-    const currentTransportRes = await client.query('SELECT * FROM transport_details WHERE order_id = $1', [id]);
+    const currentTransportRes = await client.query(
+      "SELECT * FROM transport_details WHERE order_id = $1",
+      [id],
+    );
     const currentTransport = currentTransportRes.rows[0] || {};
 
     // ── 2. Parse incoming data ─────────────────────────────────────
     let incomingReceivers = [];
-    const panel2Key = updates.sender_type === 'sender' ? 'receivers' : 'senders';
+    const panel2Key =
+      updates.sender_type === "sender" ? "receivers" : "senders";
     if (updates[panel2Key]) {
       try {
         incomingReceivers = JSON.parse(updates[panel2Key]);
       } catch (e) {
-        console.warn('[updateOrder] Failed to parse receivers/senders:', e);
+        console.warn("[updateOrder] Failed to parse receivers/senders:", e);
       }
     }
 
@@ -694,7 +785,7 @@ export async function updateOrder(req, res) {
       try {
         incomingOrderItems = JSON.parse(updates.order_items);
       } catch (e) {
-        console.warn('[updateOrder] Failed to parse order_items:', e);
+        console.warn("[updateOrder] Failed to parse order_items:", e);
       }
     }
 
@@ -703,13 +794,13 @@ export async function updateOrder(req, res) {
       try {
         incomingDropOffs = JSON.parse(updates.drop_off_details);
       } catch (e) {
-        console.warn('[updateOrder] Failed to parse drop_off_details:', e);
+        console.warn("[updateOrder] Failed to parse drop_off_details:", e);
       }
     }
 
     // ── 3. Attachments Handling ───────────────────────────────────
     let currentAttachments = currentOrder.attachments || [];
-    if (typeof currentAttachments === 'string') {
+    if (typeof currentAttachments === "string") {
       currentAttachments = JSON.parse(currentAttachments) || [];
     }
 
@@ -721,11 +812,11 @@ export async function updateOrder(req, res) {
     }
 
     if (files.attachments?.length > 0) {
-      const uploaded = files.attachments.map(file => ({
-        url: file.path || file.secure_url || file.location || '',
-        public_id: file.filename || file.public_id || '',
-        originalname: file.originalname || '',
-        mimetype: file.mimetype || '',
+      const uploaded = files.attachments.map((file) => ({
+        url: file.path || file.secure_url || file.location || "",
+        public_id: file.filename || file.public_id || "",
+        originalname: file.originalname || "",
+        mimetype: file.mimetype || "",
         size: file.size || 0,
         uploadedAt: new Date().toISOString(),
       }));
@@ -738,7 +829,7 @@ export async function updateOrder(req, res) {
 
     // ── 4. Gatepass Handling ──────────────────────────────────────
     let currentGatepass = currentTransport.gatepass || [];
-    if (typeof currentGatepass === 'string') {
+    if (typeof currentGatepass === "string") {
       currentGatepass = JSON.parse(currentGatepass) || [];
     }
 
@@ -750,11 +841,11 @@ export async function updateOrder(req, res) {
     }
 
     if (files.gatepass?.length > 0) {
-      const uploaded = files.gatepass.map(file => ({
-        url: file.path || file.secure_url || file.location || '',
-        public_id: file.filename || file.public_id || '',
-        originalname: file.originalname || '',
-        mimetype: file.mimetype || '',
+      const uploaded = files.gatepass.map((file) => ({
+        url: file.path || file.secure_url || file.location || "",
+        public_id: file.filename || file.public_id || "",
+        originalname: file.originalname || "",
+        mimetype: file.mimetype || "",
         size: file.size || 0,
         uploadedAt: new Date().toISOString(),
       }));
@@ -770,27 +861,27 @@ export async function updateOrder(req, res) {
 
     const existingReceiversRes = await client.query(
       `SELECT id FROM receivers WHERE order_id = $1 ORDER BY id`,
-      [id]
+      [id],
     );
-    const existingReceiverIds = existingReceiversRes.rows.map(r => r.id);
+    const existingReceiverIds = existingReceiversRes.rows.map((r) => r.id);
 
     for (let i = 0; i < incomingReceivers.length; i++) {
       const rec = incomingReceivers[i];
 
-      const name = rec.receiver_name || rec.sender_name || '';
-      const contact = rec.receiver_contact || rec.sender_contact || '';
-      const address = rec.receiver_address || rec.sender_address || '';
-      const email = rec.receiver_email || rec.sender_email || '';
-      const marks = rec.receiver_marks_and_number || rec.marks_and_number || '';
+      const name = rec.receiver_name || rec.sender_name || "";
+      const contact = rec.receiver_contact || rec.sender_contact || "";
+      const address = rec.receiver_address || rec.sender_address || "";
+      const email = rec.receiver_email || rec.sender_email || "";
+      const marks = rec.receiver_marks_and_number || rec.marks_and_number || "";
       const eta = rec.eta ? normalizeDate(rec.eta) : null;
       const etd = rec.etd ? normalizeDate(rec.etd) : null;
-      const status = rec.status || 'Order Created';
-      const remarks = rec.remarks || '';
-      const fullPartial = rec.full_partial || 'Full';
+      const status = rec.status || "Order Created";
+      const remarks = rec.remarks || "";
+      const fullPartial = rec.full_partial || "Full";
       const qtyDelivered = rec.qty_delivered || null;
-      const shippingLine = rec.shipping_line || '';
+      const shippingLine = rec.shipping_line || "";
 
-      let containersJson = '[]';
+      let containersJson = "[]";
       if (rec.containers) containersJson = JSON.stringify(rec.containers);
 
       const existingId = rec.id || existingReceiverIds[i] || null;
@@ -805,8 +896,22 @@ export async function updateOrder(req, res) {
             full_partial = $11, qty_delivered = $12, shipping_line = $13,
             containers = $14, updated_at = NOW()
            WHERE id = $1`,
-          [existingId, name, contact, address, email, marks, eta, etd, status, remarks,
-            fullPartial, qtyDelivered, shippingLine, containersJson]
+          [
+            existingId,
+            name,
+            contact,
+            address,
+            email,
+            marks,
+            eta,
+            etd,
+            status,
+            remarks,
+            fullPartial,
+            qtyDelivered,
+            shippingLine,
+            containersJson,
+          ],
         );
         receiverId = existingId;
       } else {
@@ -815,8 +920,22 @@ export async function updateOrder(req, res) {
             receiver_email, receiver_marks_and_number, eta, etd, status, remarks, 
             full_partial, qty_delivered, shipping_line, containers, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW()) RETURNING id`,
-          [id, name, contact, address, email, marks, eta, etd, status, remarks,
-            fullPartial, qtyDelivered, shippingLine, containersJson]
+          [
+            id,
+            name,
+            contact,
+            address,
+            email,
+            marks,
+            eta,
+            etd,
+            status,
+            remarks,
+            fullPartial,
+            qtyDelivered,
+            shippingLine,
+            containersJson,
+          ],
         );
         receiverId = insertRes.rows[0].id;
       }
@@ -824,16 +943,19 @@ export async function updateOrder(req, res) {
       receiverIdMap[String(i)] = receiverId;
 
       // Order Items for this receiver
-      const itemsForThisReceiver = incomingOrderItems.filter(item =>
-        String(item.receiver_index ?? item.receiverIndex) === String(i)
+      const itemsForThisReceiver = incomingOrderItems.filter(
+        (item) =>
+          String(item.receiver_index ?? item.receiverIndex) === String(i),
       );
 
       for (const item of itemsForThisReceiver) {
         const containerDetailsJson = item.container_details
           ? JSON.stringify(item.container_details)
-          : '[]';
+          : "[]";
 
-        const itemRef = item.item_ref || `ITEM-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const itemRef =
+          item.item_ref ||
+          `ITEM-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const existingItemId = item.existing_id || null;
 
         if (existingItemId) {
@@ -843,10 +965,21 @@ export async function updateOrder(req, res) {
               type = $9, pickup_location = $10, delivery_address = $11, 
               shipping_line = $12, item_ref = $13, updated_at = NOW()
              WHERE id = $1`,
-            [existingItemId, receiverId, item.total_number || null, item.weight || null,
-              item.total_weight || null, containerDetailsJson, item.category || null,
-              item.subcategory || null, item.type || null, item.pickup_location || null,
-              item.delivery_address || null, item.shipping_line || null, itemRef]
+            [
+              existingItemId,
+              receiverId,
+              item.total_number || null,
+              item.weight || null,
+              item.total_weight || null,
+              containerDetailsJson,
+              item.category || null,
+              item.subcategory || null,
+              item.type || null,
+              item.pickup_location || null,
+              item.delivery_address || null,
+              item.shipping_line || null,
+              itemRef,
+            ],
           );
         } else {
           await client.query(
@@ -854,10 +987,21 @@ export async function updateOrder(req, res) {
               container_details, category, subcategory, type, pickup_location, 
               delivery_address, shipping_line, item_ref, created_at, updated_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
-            [id, receiverId, item.total_number || null, item.weight || null,
-              item.total_weight || null, containerDetailsJson, item.category || null,
-              item.subcategory || null, item.type || null, item.pickup_location || null,
-              item.delivery_address || null, item.shipping_line || null, itemRef]
+            [
+              id,
+              receiverId,
+              item.total_number || null,
+              item.weight || null,
+              item.total_weight || null,
+              containerDetailsJson,
+              item.category || null,
+              item.subcategory || null,
+              item.type || null,
+              item.pickup_location || null,
+              item.delivery_address || null,
+              item.shipping_line || null,
+              itemRef,
+            ],
           );
         }
       }
@@ -868,7 +1012,9 @@ export async function updateOrder(req, res) {
       hasAnyChange = true;
 
       // First, delete old drop-off details for this order (recommended)
-      await client.query(`DELETE FROM drop_off_details WHERE order_id = $1`, [id]);
+      await client.query(`DELETE FROM drop_off_details WHERE order_id = $1`, [
+        id,
+      ]);
 
       for (const drop of incomingDropOffs) {
         const idx = String(drop.receiver_index ?? drop.receiverIndex);
@@ -879,9 +1025,10 @@ export async function updateOrder(req, res) {
           continue;
         }
 
-        const dropDate = (drop.drop_date || drop.dropDate)
-          ? normalizeDate(drop.drop_date || drop.dropDate)
-          : null;
+        const dropDate =
+          drop.drop_date || drop.dropDate
+            ? normalizeDate(drop.drop_date || drop.dropDate)
+            : null;
 
         await client.query(
           `INSERT INTO drop_off_details (
@@ -897,8 +1044,8 @@ export async function updateOrder(req, res) {
             drop.drop_off_cnic || null,
             drop.drop_off_mobile || null,
             drop.plate_no || null,
-            dropDate
-          ]
+            dropDate,
+          ],
         );
       }
     }
@@ -932,19 +1079,31 @@ export async function updateOrder(req, res) {
     await client.query(transportUpdateQuery, [
       id,
       updates.transport_type || currentTransport.transport_type || null,
-      updates.collection_scope || currentTransport.collection_scope || 'Partial',
+      updates.collection_scope ||
+        currentTransport.collection_scope ||
+        "Partial",
       updates.collection_method || currentTransport.collection_method || null,
-      updates.third_party_transport || currentTransport.third_party_transport || null,
+      updates.third_party_transport ||
+        currentTransport.third_party_transport ||
+        null,
       updates.driver_name || currentTransport.driver_name || null,
       updates.driver_contact || currentTransport.driver_contact || null,
       updates.driver_nic || currentTransport.driver_nic || null,
-      updates.driver_pickup_location || currentTransport.driver_pickup_location || null,
+      updates.driver_pickup_location ||
+        currentTransport.driver_pickup_location ||
+        null,
       updates.truck_number || currentTransport.truck_number || null,
-      updates.client_receiver_name || currentTransport.client_receiver_name || null,
+      updates.client_receiver_name ||
+        currentTransport.client_receiver_name ||
+        null,
       updates.client_receiver_id || currentTransport.client_receiver_id || null,
-      updates.client_receiver_mobile || currentTransport.client_receiver_mobile || null,
-      updates.delivery_date ? normalizeDate(updates.delivery_date) : currentTransport.delivery_date,
-      gatepassJson
+      updates.client_receiver_mobile ||
+        currentTransport.client_receiver_mobile ||
+        null,
+      updates.delivery_date
+        ? normalizeDate(updates.delivery_date)
+        : currentTransport.delivery_date,
+      gatepassJson,
     ]);
 
     hasAnyChange = true;
@@ -953,11 +1112,15 @@ export async function updateOrder(req, res) {
     const updatedFields = {
       booking_ref: updates.booking_ref ?? currentOrder.booking_ref,
       status: updates.status ?? currentOrder.status,
-      rgl_booking_number: updates.rgl_booking_number ?? currentOrder.rgl_booking_number,
-      place_of_loading: updates.place_of_loading ?? currentOrder.place_of_loading,
+      rgl_booking_number:
+        updates.rgl_booking_number ?? currentOrder.rgl_booking_number,
+      place_of_loading:
+        updates.place_of_loading ?? currentOrder.place_of_loading,
       point_of_origin: updates.point_of_origin ?? currentOrder.point_of_origin,
-      final_destination: updates.final_destination ?? currentOrder.final_destination,
-      place_of_delivery: updates.place_of_delivery ?? currentOrder.place_of_delivery,
+      final_destination:
+        updates.final_destination ?? currentOrder.final_destination,
+      place_of_delivery:
+        updates.place_of_delivery ?? currentOrder.place_of_delivery,
       order_remarks: updates.order_remarks ?? currentOrder.order_remarks,
       eta: updates.eta ? normalizeDate(updates.eta) : currentOrder.eta,
       etd: updates.etd ? normalizeDate(updates.etd) : currentOrder.etd,
@@ -978,43 +1141,45 @@ export async function updateOrder(req, res) {
     });
 
     if (ordersSet.length > 0 || hasAnyChange) {
-      ordersSet.push('updated_at = NOW()');
+      ordersSet.push("updated_at = NOW()");
       ordersValues.push(id);
 
       await client.query(
-        `UPDATE orders SET ${ordersSet.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
-        ordersValues
+        `UPDATE orders SET ${ordersSet.join(", ")} WHERE id = $${paramIndex} RETURNING *`,
+        ordersValues,
       );
     }
 
     // ── 9. COMMIT ─────────────────────────────────────────────────
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // Refetch updated data
-    const updatedOrder = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
+    const updatedOrder = await client.query(
+      "SELECT * FROM orders WHERE id = $1",
+      [id],
+    );
     const updatedReceivers = await client.query(
       `SELECT *, receiver_marks_and_number AS "marksAndNumber"
        FROM receivers WHERE order_id = $1 ORDER BY id`,
-      [id]
+      [id],
     );
 
     res.status(200).json({
-      message: 'Order updated successfully',
+      message: "Order updated successfully",
       order: updatedOrder.rows[0],
-      receivers: updatedReceivers.rows.map(r => ({
+      receivers: updatedReceivers.rows.map((r) => ({
         ...r,
-        eta: r.eta ? String(r.eta).split('T')[0] : '',
-        etd: r.etd ? String(r.etd).split('T')[0] : '',
+        eta: r.eta ? String(r.eta).split("T")[0] : "",
+        etd: r.etd ? String(r.etd).split("T")[0] : "",
       })),
     });
-
   } catch (error) {
-    console.error('Error updating order:', error);
-    if (client) await client.query('ROLLBACK');
+    console.error("Error updating order:", error);
+    if (client) await client.query("ROLLBACK");
     return res.status(500).json({
-      error: 'Failed to update order',
+      error: "Failed to update order",
       message: error.message,
-      detail: error.detail || null
+      detail: error.detail || null,
     });
   } finally {
     if (client) client.release();
@@ -1035,40 +1200,80 @@ export async function getOrders(req, res) {
     let params = [];
 
     if (status) {
-      whereClauses.push(`o.status = $${params.length + 1}`);
+      whereClauses.push(`
+    EXISTS (
+      SELECT 1
+      FROM receivers r
+      WHERE r.order_id = o.id
+      AND LOWER(TRIM(r.status)) = LOWER(TRIM($${params.length + 1}))
+    )
+  `);
+
       params.push(status);
     }
 
     if (search) {
-      whereClauses.push(`o.rgl_booking_number ILIKE $${params.length + 1}`);
-      params.push(`%${search}%`);
+      const searchParam = `%${search.trim()}%`;
+
+      whereClauses.push(`
+    (
+      CAST(o.id AS TEXT) ILIKE $${params.length + 1}
+      OR COALESCE(o.booking_ref, '') ILIKE $${params.length + 1}
+      OR COALESCE(o.rgl_booking_number, '') ILIKE $${params.length + 1}
+      OR COALESCE(o.status, '') ILIKE $${params.length + 1}
+      OR COALESCE(s.sender_name, '') ILIKE $${params.length + 1}
+      OR COALESCE(s.sender_contact, '') ILIKE $${params.length + 1}
+      OR EXISTS (
+        SELECT 1
+        FROM receivers r
+        WHERE r.order_id = o.id
+        AND (
+          COALESCE(r.receiver_name, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_contact, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_address, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.status, '') ILIKE $${params.length + 1}
+          OR COALESCE(r.receiver_ref, '') ILIKE $${params.length + 1}
+        )
+      )
+    )
+  `);
+
+      params.push(searchParam);
     }
 
     // Container filter (unchanged)
-    let containerFilter = '';
+    let containerFilter = "";
     if (container_id) {
       const containerIds = container_id
-        .split(',')
-        .map(id => id.trim())
-        .filter(id => id && !isNaN(parseInt(id)))
-        .map(id => parseInt(id));
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => id && !isNaN(parseInt(id)))
+        .map((id) => parseInt(id));
 
       if (containerIds.length === 0) {
-        return res.json({ data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+        return res.json({
+          data: [],
+          pagination: { page, limit, total: 0, totalPages: 0 },
+        });
       }
 
       const cmRes = await client.query(
-        'SELECT cid, container_number FROM container_master WHERE cid = ANY($1)',
-        [containerIds]
+        "SELECT cid, container_number FROM container_master WHERE cid = ANY($1)",
+        [containerIds],
       );
-      const containerMap = new Map(cmRes.rows.map(r => [r.cid, r.container_number]));
+      const containerMap = new Map(
+        cmRes.rows.map((r) => [r.cid, r.container_number]),
+      );
 
       if (containerMap.size === 0) {
-        return res.json({ data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+        return res.json({
+          data: [],
+          pagination: { page, limit, total: 0, totalPages: 0 },
+        });
       }
 
       const conditions = [];
-      containerIds.forEach(cid => {
+      containerIds.forEach((cid) => {
         params.push(cid);
         conditions.push(`h.cid = $${params.length}`);
         if (containerMap.has(cid)) {
@@ -1077,12 +1282,15 @@ export async function getOrders(req, res) {
         }
       });
 
-      containerFilter = ` AND (${conditions.join(' OR ')})`;
+      containerFilter = ` AND (${conditions.join(" OR ")})`;
     }
 
-    const whereClause = whereClauses.length > 0
-      ? 'WHERE ' + whereClauses.join(' AND ') + containerFilter
-      : (containerFilter ? 'WHERE 1=1' + containerFilter : '');
+    const whereClause =
+      whereClauses.length > 0
+        ? "WHERE " + whereClauses.join(" AND ") + containerFilter
+        : containerFilter
+          ? "WHERE 1=1" + containerFilter
+          : "";
 
     // Safe casting helpers
     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
@@ -1098,7 +1306,7 @@ export async function getOrders(req, res) {
               'cid', (cd_obj->'container'->>'cid')::int,
               'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
             ),
-            'total_number', ${safeIntCast('(cd_obj->>\'total_number\')::int')},
+            'total_number', ${safeIntCast("(cd_obj->>'total_number')::int")},
             'assign_weight', COALESCE(cd_obj->>'assign_weight', '0')::text,
             'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
             'assign_total_box', COALESCE(cd_obj->>'assign_total_box', '0')::text
@@ -1125,8 +1333,8 @@ export async function getOrders(req, res) {
       'type',              COALESCE(oi.type, ''),
       'pickupLocation',    COALESCE(oi.pickup_location, ''),
       'deliveryAddress',   COALESCE(oi.delivery_address, ''),
-      'totalNumber',       ${safeIntCast('oi.total_number')},
-      'weight',            ${safeNumericCast('oi.weight')},
+      'totalNumber',       ${safeIntCast("oi.total_number")},
+      'weight',            ${safeNumericCast("oi.weight")},
       'totalWeight',       0,
       'itemRef',           COALESCE(oi.item_ref, ''),
       'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
@@ -1150,8 +1358,8 @@ export async function getOrders(req, res) {
       r.receiver_contact            AS "receiverContact",
       r.receiver_address            AS "receiverAddress",
       r.receiver_email              AS "receiverEmail",
-      ${safeIntCast('r.total_number')}       AS "totalNumber",
-      ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+      ${safeIntCast("r.total_number")}       AS "totalNumber",
+      ${safeNumericCast("r.total_weight")}   AS "totalWeight",
       r.receiver_ref                AS "receiverRef",
       r.remarks,
       r.containers,
@@ -1164,9 +1372,9 @@ export async function getOrders(req, res) {
       r.consignment_marks           AS "consignmentMarks",
       r.consignment_voyage          AS "consignmentVoyage",
       r.full_partial                AS "fullPartial",
-      ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+      ${safeIntCast("r.qty_delivered")}      AS "qtyDelivered",
       ${shippingDetailsAgg}                  AS "shippingDetails",
-       ${shippingDetailsAgg.replace('shippingDetails', 'shippingdetails')} AS shippingdetails,
+       ${shippingDetailsAgg.replace("shippingDetails", "shippingdetails")} AS shippingdetails,
       COALESCE((
         SELECT jsonb_agg(
           jsonb_build_object(
@@ -1241,16 +1449,16 @@ export async function getOrders(req, res) {
 
     const [dataRes, countRes] = await Promise.all([
       client.query(mainQuery, params),
-      client.query(countQuery, countParams)
+      client.query(countQuery, countParams),
     ]);
 
     // Get real total count
-    const total = parseInt(countRes.rows[0]?.total || '0', 10);
+    const total = parseInt(countRes.rows[0]?.total || "0", 10);
 
     // Format response (unchanged)
-    const formattedData = dataRes.rows.map(row => {
+    const formattedData = dataRes.rows.map((row) => {
       let receivers = row.receivers || [];
-      if (typeof receivers === 'string') {
+      if (typeof receivers === "string") {
         try {
           receivers = JSON.parse(receivers);
         } catch (e) {
@@ -1332,7 +1540,7 @@ export async function getOrders(req, res) {
         dropoff_name: null,
         overall_status: row.status,
         assignmentHistory: [],
-        color: "#E0E0E0"
+        color: "#E0E0E0",
       };
     });
 
@@ -1342,17 +1550,16 @@ export async function getOrders(req, res) {
         page,
         limit,
         total,
-        totalPages: total === 0 ? 0 : Math.ceil(total / limit)
-      }
+        totalPages: total === 0 ? 0 : Math.ceil(total / limit),
+      },
     });
-
   } catch (err) {
     console.error("Error in getOrders:", err);
     res.status(500).json({
-      error: 'Failed to fetch orders',
+      error: "Failed to fetch orders",
       message: err.message,
       code: err.code,
-      position: err.position
+      position: err.position,
     });
   } finally {
     client.release();
@@ -1362,7 +1569,7 @@ export async function getMyOrdersByRef(req, res) {
   try {
     const userId = req.user.sub;
     if (!userId) {
-      return res.status(401).json({ error: 'User ID not found in token' });
+      return res.status(401).json({ error: "User ID not found in token" });
     }
 
     const { limit = 20, offset = 0, status, search } = req.query;
@@ -1372,7 +1579,7 @@ export async function getMyOrdersByRef(req, res) {
     // ────────────────────────────────────────────────
     // Base WHERE clause (user + optional filters)
     // ────────────────────────────────────────────────
-    let whereClauses = ['o.user_id = $1'];
+    let whereClauses = ["o.user_id = $1"];
     let params = [userId];
 
     if (status) {
@@ -1390,7 +1597,8 @@ export async function getMyOrdersByRef(req, res) {
       params.push(term);
     }
 
-    const whereSql = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const whereSql =
+      whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : "";
 
     // ────────────────────────────────────────────────
     // Main query – rich order data
@@ -1461,17 +1669,17 @@ export async function getMyOrdersByRef(req, res) {
       return res.json({
         success: true,
         data: [],
-        message: 'No orders found',
-        count: 0
+        message: "No orders found",
+        count: 0,
       });
     }
 
     // Optional: enrich with full assignment history (only if needed – can be heavy)
     // If you want full history per order, do a second query or lateral join
 
-    const enriched = ordersResult.rows.map(row => ({
+    const enriched = ordersResult.rows.map((row) => ({
       ...row,
-      overall_status: row.latest_tracking_status || row.status || 'Created',
+      overall_status: row.latest_tracking_status || row.status || "Created",
       // you can add computed fields here, e.g. progress = assigned / total
     }));
 
@@ -1487,16 +1695,15 @@ export async function getMyOrdersByRef(req, res) {
         total,
         limit: safeLimit,
         offset: safeOffset,
-        pages: Math.ceil(total / safeLimit)
-      }
+        pages: Math.ceil(total / safeLimit),
+      },
     });
-
   } catch (err) {
-    console.error('getMyOrdersByRef error:', err);
+    console.error("getMyOrdersByRef error:", err);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch your orders',
-      error: err.message
+      message: "Failed to fetch your orders",
+      error: err.message,
     });
   }
 }
@@ -1505,23 +1712,22 @@ export async function getOrderByReference(req, res) {
   try {
     const { ref, limit = 10, offset = 0, status, search } = req.query;
 
-    if (!ref || typeof ref !== 'string' || ref.trim().length < 3) {
+    if (!ref || typeof ref !== "string" || ref.trim().length < 3) {
       return res.status(400).json({
         success: false,
-        message: 'Valid booking reference (ref) is required in query parameters'
+        message:
+          "Valid booking reference (ref) is required in query parameters",
       });
     }
 
-    const safeLimit = Math.min(20, Math.max(1, parseInt(limit) || 10));   // smaller default for public endpoint
+    const safeLimit = Math.min(20, Math.max(1, parseInt(limit) || 10)); // smaller default for public endpoint
     const safeOffset = parseInt(offset) || 0;
     const refClean = ref.trim();
 
     // ────────────────────────────────────────────────
     // Base WHERE clause – reference-based + optional filters
     // ────────────────────────────────────────────────
-    let whereClauses = [
-      `(o.booking_ref = $1 OR o.rgl_booking_number = $1)`
-    ];
+    let whereClauses = [`(o.booking_ref = $1 OR o.rgl_booking_number = $1)`];
     let params = [refClean];
 
     if (status) {
@@ -1539,7 +1745,7 @@ export async function getOrderByReference(req, res) {
       params.push(term);
     }
 
-    const whereSql = 'WHERE ' + whereClauses.join(' AND ');
+    const whereSql = "WHERE " + whereClauses.join(" AND ");
 
     // ────────────────────────────────────────────────
     // Main query – same rich structure as before
@@ -1607,9 +1813,9 @@ export async function getOrderByReference(req, res) {
     const ordersResult = await pool.query(ordersQuery, params);
 
     // For public endpoint, usually expect 0 or 1 result
-    const data = ordersResult.rows.map(row => ({
+    const data = ordersResult.rows.map((row) => ({
       ...row,
-      overall_status: row.latest_tracking_status || row.status || 'Created',
+      overall_status: row.latest_tracking_status || row.status || "Created",
     }));
 
     // Total count (useful if allowing multiple matches)
@@ -1624,21 +1830,20 @@ export async function getOrderByReference(req, res) {
         total,
         limit: safeLimit,
         offset: safeOffset,
-        pages: Math.ceil(total / safeLimit)
+        pages: Math.ceil(total / safeLimit),
       },
-      message: data.length === 0 ? 'No order found for this reference' : undefined
+      message:
+        data.length === 0 ? "No order found for this reference" : undefined,
     });
-
   } catch (err) {
-    console.error('getOrderByReference error:', err);
+    console.error("getOrderByReference error:", err);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order details',
-      error: err.message   // ← remove in production if you don't want to leak details
+      message: "Failed to fetch order details",
+      error: err.message, // ← remove in production if you don't want to leak details
     });
   }
 }
-
 
 export async function getOrdersConsignments(req, res) {
   // console.log('[getOrdersConsignments] Request query:', req,res);
@@ -1649,27 +1854,26 @@ export async function getOrdersConsignments(req, res) {
   if (!req.user) {
     return res.status(401).json({
       success: false,
-      error: 'Authentication required',
-      details: 'Please log in to view orders'
+      error: "Authentication required",
+      details: "Please log in to view orders",
     });
   }
   const client = await pool.connect();
 
   // let client;
   try {
-
     // ────────────────────────────────────────────────
     // Pagination – safe + early validation
     // ────────────────────────────────────────────────
-    const rawPage = req.query.page || '1';
-    const rawLimit = req.query.limit || '10';
+    const rawPage = req.query.page || "1";
+    const rawLimit = req.query.limit || "10";
     const safePage = Math.max(1, parseInt(rawPage, 10));
     const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit, 10)));
     const safeOffset = (safePage - 1) * safeLimit;
 
     // Filters
     const { status, booking_ref, container_id } = req.query;
-    let whereClause = 'WHERE 1=1';
+    let whereClause = "WHERE 1=1";
     let params = [];
 
     if (status) {
@@ -1685,63 +1889,86 @@ export async function getOrdersConsignments(req, res) {
     // Container filter (kept your safe logic – no change)
     if (container_id) {
       const containerIds = container_id
-        .split(',')
-        .map(id => id.trim())
+        .split(",")
+        .map((id) => id.trim())
         .filter(Boolean);
 
       if (containerIds.length === 0) {
         return res.json({
           success: true,
           data: [],
-          pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
+          pagination: {
+            page: safePage,
+            limit: safeLimit,
+            total: 0,
+            totalPages: 0,
+          },
         });
       }
 
-      const validIds = containerIds.filter(id => !isNaN(parseInt(id)));
+      const validIds = containerIds.filter((id) => !isNaN(parseInt(id)));
       if (validIds.length === 0) {
         return res.json({
           success: true,
           data: [],
-          pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
+          pagination: {
+            page: safePage,
+            limit: safeLimit,
+            total: 0,
+            totalPages: 0,
+          },
         });
       }
 
-      const idArray = validIds.map(id => parseInt(id));
+      const idArray = validIds.map((id) => parseInt(id));
       const containerQuery = {
-        text: 'SELECT container_number FROM container_master WHERE cid = ANY($1::int[])',
-        values: [idArray]
+        text: "SELECT container_number FROM container_master WHERE cid = ANY($1::int[])",
+        values: [idArray],
       };
       const containerResult = await client.query(containerQuery);
-      const containerNumbers = containerResult.rows.map(row => row.container_number).filter(Boolean);
+      const containerNumbers = containerResult.rows
+        .map((row) => row.container_number)
+        .filter(Boolean);
 
       if (containerNumbers.length === 0) {
         return res.json({
           success: true,
           data: [],
-          pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0 }
+          pagination: {
+            page: safePage,
+            limit: safeLimit,
+            total: 0,
+            totalPages: 0,
+          },
         });
       }
 
-      const otConditions = validIds.map((idStr, idx) => {
-        const paramIdx = params.length + 1;
-        params.push(parseInt(idStr));
-        return `ot.container_id = $${paramIdx}`;
-      }).join(' OR ');
+      const otConditions = validIds
+        .map((idStr, idx) => {
+          const paramIdx = params.length + 1;
+          params.push(parseInt(idStr));
+          return `ot.container_id = $${paramIdx}`;
+        })
+        .join(" OR ");
 
-      const cmConditions = containerNumbers.map((num, idx) => {
-        const paramIdx = params.length + 1;
-        params.push(`%${num}%`);
-        return `cm.container_number ILIKE $${paramIdx}`;
-      }).join(' OR ');
+      const cmConditions = containerNumbers
+        .map((num, idx) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `cm.container_number ILIKE $${paramIdx}`;
+        })
+        .join(" OR ");
 
-      const receiverExists = containerNumbers.map((num, idx) => {
-        const paramIdx = params.length + 1;
-        params.push(`%${num}%`);
-        return `EXISTS (
+      const receiverExists = containerNumbers
+        .map((num, idx) => {
+          const paramIdx = params.length + 1;
+          params.push(`%${num}%`);
+          return `EXISTS (
           SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
           WHERE cont ILIKE $${paramIdx}
         )`;
-      }).join(' OR ');
+        })
+        .join(" OR ");
 
       whereClause += ` AND (
         (${otConditions}) OR
@@ -1770,7 +1997,7 @@ export async function getOrdersConsignments(req, res) {
               'cid', (cd_obj->'container'->>'cid')::int,
               'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
             ),
-            'total_number', ${safeIntCast('(cd_obj->>\'total_number\')::int')},
+            'total_number', ${safeIntCast("(cd_obj->>'total_number')::int")},
             'assign_weight', COALESCE(cd_obj->>'assign_weight', '0')::text,
             'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
             'assign_total_box', COALESCE(cd_obj->>'assign_total_box', '0')::text
@@ -1800,14 +2027,14 @@ export async function getOrdersConsignments(req, res) {
           'type', COALESCE(oi.type, ''),
           'pickupLocation', COALESCE(oi.pickup_location, ''),
           'deliveryAddress', COALESCE(oi.delivery_address, ''),
-          'totalNumber', ${safeIntCast('oi.total_number')},
-          'weight', ${safeNumericCast('oi.weight')},
-          'totalWeight', ${safeNumericCast('oi.total_weight')},
+          'totalNumber', ${safeIntCast("oi.total_number")},
+          'weight', ${safeNumericCast("oi.weight")},
+          'totalWeight', ${safeNumericCast("oi.total_weight")},
           'itemRef', COALESCE(oi.item_ref, ''),
           'consignmentStatus', COALESCE(oi.consignment_status, ''),
           'shippingLine', COALESCE(oi.shipping_line, ''),
           'containerDetails', ${containerDetailsSub},
-          'remainingItems', ${safeIntCast('oi.total_number')} - COALESCE((
+          'remainingItems', ${safeIntCast("oi.total_number")} - COALESCE((
             SELECT SUM((cd_obj->>\'assign_total_box\')::int)
             FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
           ), 0)
@@ -1828,8 +2055,8 @@ export async function getOrdersConsignments(req, res) {
           r.receiver_address            AS receiverAddress,
           r.receiver_email              AS receiverEmail,
           r.receiver_marks_and_number   AS "marksAndNumber",
-          ${safeIntCast('r.total_number')}       AS totalNumber,
-          ${safeNumericCast('r.total_weight')}   AS totalWeight,
+          ${safeIntCast("r.total_number")}       AS totalNumber,
+          ${safeNumericCast("r.total_weight")}   AS totalWeight,
           r.receiver_ref                AS receiverRef,
           r.remarks,
           r.containers,
@@ -1842,9 +2069,9 @@ export async function getOrdersConsignments(req, res) {
           r.consignment_marks           AS consignmentMarks,
           r.consignment_voyage          AS consignmentVoyage,
           r.full_partial                AS fullPartial,
-          ${safeIntCast('r.qty_delivered')}      AS qtyDelivered,
+          ${safeIntCast("r.qty_delivered")}      AS qtyDelivered,
           ${shippingDetailsAgg}          AS shippingDetails,
-          ${shippingDetailsAgg.replace('shippingDetails', 'shippingdetails')} AS shippingdetails,
+          ${shippingDetailsAgg.replace("shippingDetails", "shippingdetails")} AS shippingdetails,
           COALESCE((
             SELECT json_agg(
               json_build_object(
@@ -1866,28 +2093,28 @@ export async function getOrdersConsignments(req, res) {
 
     // Main select fields (your original structure)
     let selectFields = [
-      'o.*',
-      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner',
-      't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',
-      't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
-      't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',
-      't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
-      't.gatepass',
-      'ot.status AS tracking_status, ot.created_time AS tracking_created_time',
-      'ot.container_id',
-      'cm.container_number',
-      'COALESCE((SELECT string_agg(DISTINCT elem, \', \') FROM (SELECT jsonb_array_elements_text(r3.containers) AS elem FROM receivers r3 WHERE r3.order_id = o.id AND r3.containers IS NOT NULL AND jsonb_typeof(r3.containers) = \'array\') AS unnested), \'\') AS receiver_containers_json',
-      receiversSub
-    ].join(', ');
+      "o.*",
+      "s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner",
+      "t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic",
+      "t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic",
+      "t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered",
+      "t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date",
+      "t.gatepass",
+      "ot.status AS tracking_status, ot.created_time AS tracking_created_time",
+      "ot.container_id",
+      "cm.container_number",
+      "COALESCE((SELECT string_agg(DISTINCT elem, ', ') FROM (SELECT jsonb_array_elements_text(r3.containers) AS elem FROM receivers r3 WHERE r3.order_id = o.id AND r3.containers IS NOT NULL AND jsonb_typeof(r3.containers) = 'array') AS unnested), '') AS receiver_containers_json",
+      receiversSub,
+    ].join(", ");
 
     let joinsArray = [
-      'LEFT JOIN senders s ON o.id = s.order_id',
-      'LEFT JOIN transport_details t ON o.id = t.order_id',
-      'LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true',
-      'LEFT JOIN container_master cm ON ot.container_id = cm.cid'
+      "LEFT JOIN senders s ON o.id = s.order_id",
+      "LEFT JOIN transport_details t ON o.id = t.order_id",
+      "LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true",
+      "LEFT JOIN container_master cm ON ot.container_id = cm.cid",
     ];
 
-    const joins = joinsArray.join('\n      ');
+    const joins = joinsArray.join("\n      ");
 
     const countQuery = `
       SELECT COUNT(DISTINCT o.id) as total_count
@@ -1909,15 +2136,15 @@ export async function getOrdersConsignments(req, res) {
 
     const [result, countResult] = await Promise.all([
       client.query(query, params),
-      client.query(countQuery, params.slice(0, -2))
+      client.query(countQuery, params.slice(0, -2)),
     ]);
 
     const total = parseInt(countResult.rows[0]?.total_count || 0);
 
     // Format response – same style as getOrderById
-    const formattedData = result.rows.map(row => {
+    const formattedData = result.rows.map((row) => {
       let receivers = row.receivers || [];
-      if (typeof receivers === 'string') {
+      if (typeof receivers === "string") {
         try {
           receivers = JSON.parse(receivers);
         } catch (e) {
@@ -1999,7 +2226,7 @@ export async function getOrdersConsignments(req, res) {
         dropoff_name: null,
         overall_status: row.status,
         assignmentHistory: [],
-        color: "#E0E0E0"
+        color: "#E0E0E0",
       };
     });
 
@@ -2010,18 +2237,17 @@ export async function getOrdersConsignments(req, res) {
         page: safePage,
         limit: safeLimit,
         total,
-        totalPages: total === 0 ? 0 : Math.ceil(total / safeLimit)
-      }
+        totalPages: total === 0 ? 0 : Math.ceil(total / safeLimit),
+      },
     });
-
   } catch (err) {
     console.error("Error fetching orders:", err);
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch orders',
+      error: "Failed to fetch orders",
       message: err.message,
       code: err.code,
-      position: err.position
+      position: err.position,
     });
   } finally {
     if (client) client.release();
@@ -2032,40 +2258,43 @@ export async function getOrderById(req, res) {
   try {
     const { id } = req.params;
 
-    console.log('[getOrderById] Raw ID received:', id);
+    console.log("[getOrderById] Raw ID received:", id);
 
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
       console.warn(`[getOrderById] Invalid ID format: "${id}"`);
       return res.status(400).json({
-        error: 'Invalid order ID',
-        details: 'Order ID must be a positive integer',
-        received: id
+        error: "Invalid order ID",
+        details: "Order ID must be a positive integer",
+        received: id,
       });
     }
 
     client = await pool.connect();
 
     const selectFields = [
-      'o.*',
-      's.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner',
-      't.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic',
-      't.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic',
-      't.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered',
-      't.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, t.delivery_date',
-      't.gatepass'
-    ].join(', ');
+      "o.*",
+      "s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner",
+      "t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic",
+      "t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic",
+      "t.drop_off_mobile, t.plate_no, t.drop_date, t.collection_method, t.collection_scope, t.qty_delivered",
+      "t.client_receiver_name, t.client_receiver_id, t.client_receiver_mobile, TO_CHAR(t.delivery_date, 'YYYY-MM-DD') AS delivery_date",
+      "t.gatepass",
+    ].join(", ");
 
-    const orderResult = await client.query(`
+    const orderResult = await client.query(
+      `
       SELECT ${selectFields}
       FROM orders o
       LEFT JOIN senders s ON o.id = s.order_id
       LEFT JOIN transport_details t ON o.id = t.order_id
       WHERE o.id = $1
-    `, [numericId]);
+    `,
+      [numericId],
+    );
 
     if (orderResult.rowCount === 0) {
-      return res.status(404).json({ error: 'Order not found' });
+      return res.status(404).json({ error: "Order not found" });
     }
 
     const orderRow = orderResult.rows[0];
@@ -2105,7 +2334,10 @@ export async function getOrderById(req, res) {
         COALESCE(r.total_number, 0)::int    AS total_number,
         COALESCE(r.total_weight, 0)::numeric AS total_weight,
         r.receiver_ref, r.remarks, r.containers,
-        r.status, r.eta, r.etd, r.shipping_line,
+        r.status,
+        TO_CHAR(r.eta, 'YYYY-MM-DD') AS eta,
+        TO_CHAR(r.etd, 'YYYY-MM-DD') AS etd,
+        r.shipping_line,
         r.consignment_vessel, r.consignment_number,
         r.consignment_marks, r.consignment_voyage,
         r.full_partial,
@@ -2148,67 +2380,83 @@ export async function getOrderById(req, res) {
 
     // Status normalization map (all lowercase keys)
     const STATUS_MAP = {
-      'under processing': 'Under Processing',
-      'ready for loading': 'Ready for Loading',
-      'loaded into container': 'Loaded Into Container',
-      'shipment processing': 'Shipment Processing',
-      'shipment in transit': 'Shipment In Transit',
-      'arrived at facility': 'Arrived at Facility',
-      'ready for delivery': 'Ready for Delivery',
-      'shipment delivered': 'Shipment Delivered',
-      'order created': 'Order Created',
-      'created': 'Order Created',
-      'occupied': '',
+      "under processing": "Under Processing",
+      "ready for loading": "Ready for Loading",
+      "loaded into container": "Loaded Into Container",
+      "shipment processing": "Shipment Processing",
+      "shipment in transit": "Shipment In Transit",
+      "arrived at facility": "Arrived at Facility",
+      "ready for delivery": "Ready for Delivery",
+      "shipment delivered": "Shipment Delivered",
+      "order created": "Order Created",
+      created: "Order Created",
+      occupied: "",
     };
 
-    let receivers = receiversResult.rows.map(row => {
-      console.log(`[getOrderById] Receiver ${row.id} - marksAndNumber from DB:`, row.marksAndNumber);
+    let receivers = receiversResult.rows.map((row) => {
+      console.log(
+        `[getOrderById] Receiver ${row.id} - marksAndNumber from DB:`,
+        row.marksAndNumber,
+      );
+      console.log("Receiver:", row.id);
+      console.log("ETA:", row.eta);
+      console.log("ETD:", row.etd);
 
-      const normalizedStatus = STATUS_MAP[row.status?.toLowerCase()?.trim()] ?? row.status ?? 'Order Created';
+      const normalizedStatus =
+        STATUS_MAP[row.status?.toLowerCase()?.trim()] ??
+        row.status ??
+        "Order Created";
 
       return {
         ...row,
         status: normalizedStatus,
-        marksAndNumber: row.marksAndNumber || '',
-        receiverMarksNumber: row.marksAndNumber || '',
+        marksAndNumber: row.marksAndNumber || "",
+        receiverMarksNumber: row.marksAndNumber || "",
         shippingDetails: row.shippingdetails || [],
         containers: (() => {
           try {
-            return typeof row.containers === 'string'
+            return typeof row.containers === "string"
               ? JSON.parse(row.containers)
-              : (row.containers || []);
+              : row.containers || [];
           } catch (e) {
-            console.warn(`[getOrderById] Invalid containers JSON for receiver ${row.id}:`, e.message);
+            console.warn(
+              `[getOrderById] Invalid containers JSON for receiver ${row.id}:`,
+              e.message,
+            );
             return [];
           }
         })(),
-        eta: row.eta ? String(row.eta).split('T')[0] : '',
-        etd: row.etd ? String(row.etd).split('T')[0] : '',
+        eta: row.eta ? new Date(row.eta).toISOString().split("T")[0] : "",
+
+        etd: row.etd ? new Date(row.etd).toISOString().split("T")[0] : "",
       };
     });
 
     // Enrich container numbers (optimized - only used ones)
-    const usedContainersRes = await client.query(`
+    const usedContainersRes = await client.query(
+      `
       SELECT DISTINCT cm.cid, cm.container_number
       FROM order_items oi
       CROSS JOIN jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) elem
       JOIN container_master cm ON cm.cid = (elem->'container'->>'cid')::int
       WHERE oi.order_id = $1
-    `, [numericId]);
-
-    const containersMap = new Map(
-      usedContainersRes.rows.map(c => [c.cid, c.container_number])
+    `,
+      [numericId],
     );
 
-    receivers.forEach(receiver => {
-      receiver.shippingDetails?.forEach(sd => {
+    const containersMap = new Map(
+      usedContainersRes.rows.map((c) => [c.cid, c.container_number]),
+    );
+
+    receivers.forEach((receiver) => {
+      receiver.shippingDetails?.forEach((sd) => {
         if (Array.isArray(sd.containerDetails)) {
-          sd.containerDetails.forEach(cd => {
+          sd.containerDetails.forEach((cd) => {
             const cid = cd.container?.cid;
-            if (typeof cid === 'number' && containersMap.has(cid)) {
+            if (typeof cid === "number" && containersMap.has(cid)) {
               cd.container = {
                 cid,
-                container_number: containersMap.get(cid) || ''
+                container_number: containersMap.get(cid) || "",
               };
             }
           });
@@ -2217,7 +2465,8 @@ export async function getOrderById(req, res) {
     });
 
     // Drop-off details per receiver
-    const dropOffResult = await client.query(`
+    const dropOffResult = await client.query(
+      `
       SELECT 
         receiver_id,
         json_agg(
@@ -2233,91 +2482,108 @@ export async function getOrderById(req, res) {
       FROM drop_off_details
       WHERE order_id = $1
       GROUP BY receiver_id
-    `, [numericId]);
-
-    const dropOffMap = new Map(
-      dropOffResult.rows.map(r => [r.receiver_id, r.drop_off_details || []])
+    `,
+      [numericId],
     );
 
-    receivers = receivers.map(r => ({
+    const dropOffMap = new Map(
+      dropOffResult.rows.map((r) => [r.receiver_id, r.drop_off_details || []]),
+    );
+
+    receivers = receivers.map((r) => ({
       ...r,
-      drop_off_details: dropOffMap.get(r.id) || []
+      drop_off_details: dropOffMap.get(r.id) || [],
     }));
 
     // Assignment history
-    const historyResult = await client.query(`
+    const historyResult = await client.query(
+      `
       SELECT h.*, cm.container_number
       FROM container_assignment_history h
       LEFT JOIN container_master cm ON h.cid = cm.cid
       WHERE h.order_id = $1
       ORDER BY h.id DESC
-    `, [numericId]);
+    `,
+      [numericId],
+    );
 
     // Parse JSONB fields safely
     let parsedAttachments = [];
     try {
-      parsedAttachments = typeof orderRow.attachments === 'string'
-        ? JSON.parse(orderRow.attachments)
-        : (orderRow.attachments || []);
+      parsedAttachments =
+        typeof orderRow.attachments === "string"
+          ? JSON.parse(orderRow.attachments)
+          : orderRow.attachments || [];
     } catch (e) {
-      console.warn('[getOrderById] Failed to parse attachments:', e);
+      console.warn("[getOrderById] Failed to parse attachments:", e);
     }
 
     let parsedGatepass = [];
     try {
-      parsedGatepass = typeof orderRow.gatepass === 'string'
-        ? JSON.parse(orderRow.gatepass)
-        : (orderRow.gatepass || []);
+      parsedGatepass =
+        typeof orderRow.gatepass === "string"
+          ? JSON.parse(orderRow.gatepass)
+          : orderRow.gatepass || [];
     } catch (e) {
-      console.warn('[getOrderById] Failed to parse gatepass:', e);
+      console.warn("[getOrderById] Failed to parse gatepass:", e);
     }
 
     // Normalize order-level dates
     const formattedOrderRow = {
       ...orderRow,
-      eta: orderRow.eta ? String(orderRow.eta).split('T')[0] : '',
-      etd: orderRow.etd ? String(orderRow.etd).split('T')[0] : '',
-      drop_date: orderRow.drop_date ? String(orderRow.drop_date).split('T')[0] : '',
-      delivery_date: orderRow.delivery_date ? String(orderRow.delivery_date).split('T')[0] : '',
+      eta: orderRow.eta ? String(orderRow.eta).split("T")[0] : "",
+      etd: orderRow.etd ? String(orderRow.etd).split("T")[0] : "",
+      drop_date: orderRow.drop_date
+        ? String(orderRow.drop_date).split("T")[0]
+        : "",
+      deliveryDate: orderRow.delivery_date
+        ? String(orderRow.delivery_date).split("T")[0]
+        : "",
     };
 
     // Overall status calculation
-    let overallStatus = 'Created';
+    let overallStatus = "Created";
     if (receivers.length > 0) {
-      const receiverStatuses = receivers.map(r => r.status || 'Created');
-      if (receiverStatuses.includes('Cancelled')) {
-        overallStatus = 'Cancelled';
+      const receiverStatuses = receivers.map((r) => r.status || "Created");
+      if (receiverStatuses.includes("Cancelled")) {
+        overallStatus = "Cancelled";
       } else {
         const statusOrder = {
-          'Created': 0,
-          'In Process': 1,
-          'Ready for Loading': 2,
-          'Loaded Into Container': 3,
-          'Delivered': 4
+          Created: 0,
+          "In Process": 1,
+          "Ready for Loading": 2,
+          "Loaded Into Container": 3,
+          Delivered: 4,
         };
-        const maxIdx = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
-        overallStatus = Object.keys(statusOrder).find(k => statusOrder[k] === maxIdx) || 'Created';
+        const maxIdx = Math.max(
+          ...receiverStatuses.map((s) => statusOrder[s] || 0),
+        );
+        overallStatus =
+          Object.keys(statusOrder).find((k) => statusOrder[k] === maxIdx) ||
+          "Created";
       }
     }
 
     // Overall earliest ETA (among receivers with containers)
     let overallEta = null;
-    const withContainers = receivers.filter(r =>
-      r.shippingDetails?.some(sd => sd.containerDetails?.length > 0)
+    const withContainers = receivers.filter((r) =>
+      r.shippingDetails?.some((sd) => sd.containerDetails?.length > 0),
     );
 
     if (withContainers.length > 0) {
       const etas = withContainers
-        .map(r => r.eta)
-        .filter(eta => eta && eta.trim() !== '')
-        .map(eta => {
-          const d = new Date(eta.includes('T') ? eta : `${eta}T00:00:00.000Z`);
+        .map((r) => r.eta)
+        .filter((eta) => eta && eta.trim() !== "")
+        .map((eta) => {
+          const d = new Date(eta.includes("T") ? eta : `${eta}T00:00:00.000Z`);
           return isNaN(d.getTime()) ? null : d.getTime();
         })
         .filter(Boolean)
         .sort((a, b) => a - b);
 
-      overallEta = etas.length ? new Date(etas[0]).toISOString().split('T')[0] : null;
+      overallEta = etas.length
+        ? new Date(etas[0]).toISOString().split("T")[0]
+        : null;
     }
 
     res.json({
@@ -2331,53 +2597,77 @@ export async function getOrderById(req, res) {
       qty_delivered: orderRow.qty_delivered,
       receivers,
       assignmentHistory: historyResult.rows,
-      color: getOrderStatusColor(overallStatus) // assuming this function exists
+      color: getOrderStatusColor(overallStatus), // assuming this function exists
     });
-
   } catch (err) {
-    console.error('Error in getOrderById:', err);
+    console.error("Error in getOrderById:", err);
     res.status(500).json({
-      error: 'Failed to fetch order',
+      error: "Failed to fetch order",
       details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   } finally {
     if (client) client.release();
   }
 }
-function computeDaysUntilEta(etaDateStr, today = new Date()) {  // Dynamic: Default to current date
+function computeDaysUntilEta(etaDateStr, today = new Date()) {
+  // Dynamic: Default to current date
   if (!etaDateStr) return null;
   const etaDate = new Date(etaDateStr);
-  if (isNaN(etaDate.getTime())) return null;  // Invalid date guard
+  if (isNaN(etaDate.getTime())) return null; // Invalid date guard
   const diffTime = etaDate - today;
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  return diffDays;  // Allow negative for past ETAs
+  return diffDays; // Allow negative for past ETAs
 }
 const CONSIGNMENT_TO_STATUS_MAP = {
   // Consignment Status          → Container Status          → Shipment (Receiver) Status      → ETA from DB
-  'Customs Cleared': { container: 'Shipment Processing', shipment: 'Shipment Processing' },           // 7 days
-  'Submitted On Vessel': { container: 'Shipment Processing', shipment: 'Shipment Processing' },           // 7 days
-  'Submitted': { container: 'Shipment Processing', shipment: 'Shipment Processing' },           // 7 days (if needed)
-  'In Transit': { container: 'In Transit', shipment: 'Shipment In Transit' },           // 4 days
-  'Ready for Delivery': { container: 'Ready for Delivery', shipment: 'Ready for Delivery' },            // 0 days
-  'Arrived at Destination': { container: 'Under Processing', shipment: 'Under Processing' },              // 2 days
-  'Loaded': { container: 'Loaded', shipment: 'Loaded Into Container' },         // 9 days
-  'Ready for loading': { container: 'Ready for Loading', shipment: 'Ready for Loading' },             // 12 days
-  'Created': { container: 'Created', shipment: 'Order Created' },                 // 15 days (or 'Created' → 15)
-  'Arrived': { container: 'Arrived at Facility', shipment: 'Arrived at Facility' },   // 1 day
-  'De-Linked': { container: 'Arrived at Sort Facility', shipment: 'Arrived at Sort Facility' },   // 1 day
-  'Delivered': { container: 'Delivered', shipment: 'Shipment Delivered' },            // 0 days
+  "Customs Cleared": {
+    container: "Shipment Processing",
+    shipment: "Shipment Processing",
+  }, // 7 days
+  "Submitted On Vessel": {
+    container: "Shipment Processing",
+    shipment: "Shipment Processing",
+  }, // 7 days
+  Submitted: {
+    container: "Shipment Processing",
+    shipment: "Shipment Processing",
+  }, // 7 days (if needed)
+  "In Transit": { container: "In Transit", shipment: "Shipment In Transit" }, // 4 days
+  "Ready for Delivery": {
+    container: "Ready for Delivery",
+    shipment: "Ready for Delivery",
+  }, // 0 days
+  "Arrived at Destination": {
+    container: "Under Processing",
+    shipment: "Under Processing",
+  }, // 2 days
+  Loaded: { container: "Loaded", shipment: "Loaded Into Container" }, // 9 days
+  "Ready for loading": {
+    container: "Ready for Loading",
+    shipment: "Ready for Loading",
+  }, // 12 days
+  Created: { container: "Created", shipment: "Order Created" }, // 15 days (or 'Created' → 15)
+  Arrived: {
+    container: "Arrived at Facility",
+    shipment: "Arrived at Facility",
+  }, // 1 day
+  "De-Linked": {
+    container: "Arrived at Sort Facility",
+    shipment: "Arrived at Sort Facility",
+  }, // 1 day
+  Delivered: { container: "Delivered", shipment: "Shipment Delivered" }, // 0 days
 };
 // Helper: Wrap in transaction
 async function withTransaction(operation) {
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    await client.query("BEGIN");
     const result = await operation(client);
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
@@ -2385,23 +2675,40 @@ async function withTransaction(operation) {
 }
 
 // Helper: Send notification (placeholder—integrate with your GAS/notifications module)
-async function sendNotification(consignmentData, event = 'created') {
+async function sendNotification(consignmentData, event = "created") {
   // e.g., await emailService.send({ to: consignmentData.consignee.email, subject: `Consignment ${consignmentData.consignment_number} ${event}` });
-  console.log(`Notification sent for consignment ${consignmentData.consignment_number}: ${event}`);
+  console.log(
+    `Notification sent for consignment ${consignmentData.consignment_number}: ${event}`,
+  );
 }
 
 // Unified logging function: Handles both 'logToTracking' and 'safeLogToTracking' calls
-async function logToTracking(client, consignmentId, eventType = 'unknown', logData = {}) {
+async function logToTracking(
+  client,
+  consignmentId,
+  eventType = "unknown",
+  logData = {},
+) {
   // Validate eventType (required, non-null)
-  if (!eventType || typeof eventType !== 'string' || eventType.trim() === '') {
-    console.error(`Invalid eventType '${eventType}' for consignment ${consignmentId} – defaulting to 'unknown_event'`);
-    eventType = 'unknown_event';  // Fallback to avoid NULL violation
+  if (!eventType || typeof eventType !== "string" || eventType.trim() === "") {
+    console.error(
+      `Invalid eventType '${eventType}' for consignment ${consignmentId} – defaulting to 'unknown_event'`,
+    );
+    eventType = "unknown_event"; // Fallback to avoid NULL violation
   }
 
   // Validate against schema CHECK (expand as needed)
-  const validEvents = ['status_advanced', 'status_updated', 'status_auto_updated', 'updated', 'order_synced'];
+  const validEvents = [
+    "status_advanced",
+    "status_updated",
+    "status_auto_updated",
+    "updated",
+    "order_synced",
+  ];
   if (!validEvents.includes(eventType)) {
-    console.warn(`Event '${eventType}' not in DB CHECK – add to constraint or use valid one`);
+    console.warn(
+      `Event '${eventType}' not in DB CHECK – add to constraint or use valid one`,
+    );
   }
 
   try {
@@ -2419,7 +2726,7 @@ async function logToTracking(client, consignmentId, eventType = 'unknown', logDa
       old_status: oldStatus,
       new_status: newStatus,
       reason,
-      action: logData.action || eventType  // Legacy: Store 'action' in details if passed
+      action: logData.action || eventType, // Legacy: Store 'action' in details if passed
     };
 
     const query = `
@@ -2431,15 +2738,17 @@ async function logToTracking(client, consignmentId, eventType = 'unknown', logDa
     `;
     const result = await client.query(query, [
       consignmentId,
-      eventType.trim(),  // Ensure non-null string
+      eventType.trim(), // Ensure non-null string
       oldStatus,
       newStatus,
       offsetDays,
-      details
+      details,
     ]);
 
     if (result.rowCount > 0) {
-      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      console.log(
+        `✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`,
+      );
       return { success: true, id: result.rows[0].id };
     } else {
       console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
@@ -2447,21 +2756,35 @@ async function logToTracking(client, consignmentId, eventType = 'unknown', logDa
     }
   } catch (error) {
     console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
-    if (error.code === '23502') {
-      console.error('NOT NULL violation on event_type – ensure non-null param');
-    } else if (error.code === '23514') {
-      console.error(`CHECK violation: '${eventType}' not allowed – update DB constraint`);
+    if (error.code === "23502") {
+      console.error("NOT NULL violation on event_type – ensure non-null param");
+    } else if (error.code === "23514") {
+      console.error(
+        `CHECK violation: '${eventType}' not allowed – update DB constraint`,
+      );
     }
     return { success: false, error: error.message };
     // No throw – keep tx alive
   }
 }
-async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
+async function safeLogToTracking(
+  client,
+  consignmentId,
+  eventType,
+  logData = {},
+) {
   // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
-  const validEvents = ['status_advanced', 'status_updated', 'order_synced', 'status_auto_updated'];  // Sync with DB
+  const validEvents = [
+    "status_advanced",
+    "status_updated",
+    "order_synced",
+    "status_auto_updated",
+  ]; // Sync with DB
   if (!validEvents.includes(eventType)) {
-    console.warn(`Invalid event_type '${eventType}' – add to DB CHECK constraint`);
-    return { success: false, reason: 'Invalid event' };
+    console.warn(
+      `Invalid event_type '${eventType}' – add to DB CHECK constraint`,
+    );
+    return { success: false, reason: "Invalid event" };
   }
   try {
     // Normalize: Use eventType as event_type; ignore/rename 'action' if present
@@ -2470,7 +2793,7 @@ async function safeLogToTracking(client, consignmentId, eventType, logData = {})
       to: newStatus = null,
       offsetDays = 0,
       reason = null,
-      action,  // Ignore if passed; use eventType
+      action, // Ignore if passed; use eventType
       ...extraDetails
     } = logData;
 
@@ -2479,7 +2802,7 @@ async function safeLogToTracking(client, consignmentId, eventType, logData = {})
       old_status: oldStatus,
       new_status: newStatus,
       reason,
-      action: action || eventType  // Legacy: Store in details if needed
+      action: action || eventType, // Legacy: Store in details if needed
     };
 
     const query = `
@@ -2491,15 +2814,17 @@ async function safeLogToTracking(client, consignmentId, eventType, logData = {})
     `;
     const result = await client.query(query, [
       consignmentId,
-      eventType,  // Use this for event_type (e.g., 'status_auto_updated')
+      eventType, // Use this for event_type (e.g., 'status_auto_updated')
       oldStatus,
       newStatus,
       offsetDays,
-      details
+      details,
     ]);
 
     if (result.rowCount > 0) {
-      console.log(`✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`);
+      console.log(
+        `✓ Logged '${eventType}' for ${consignmentId} (ID: ${result.rows[0].id})`,
+      );
       return { success: true, id: result.rows[0].id };
     } else {
       console.log(`⚠ Duplicate '${eventType}' skipped for ${consignmentId}`);
@@ -2507,8 +2832,10 @@ async function safeLogToTracking(client, consignmentId, eventType, logData = {})
     }
   } catch (error) {
     console.error(`Failed to log '${eventType}' for ${consignmentId}:`, error);
-    if (error.code === '42703') {
-      console.error('Schema mismatch – check INSERT columns vs. table (e.g., no "action" column)');
+    if (error.code === "42703") {
+      console.error(
+        'Schema mismatch – check INSERT columns vs. table (e.g., no "action" column)',
+      );
     }
     return { success: false, error: error.message };
     // No throw – non-critical
@@ -2521,29 +2848,29 @@ function extractOrderIds(orderData) {
   }
 
   const ids = orderData
-    .map(item => {
+    .map((item) => {
       let id = null;
-      if (typeof item === 'number') {
+      if (typeof item === "number") {
         id = item;
-      } else if (typeof item === 'object' && item !== null) {
-        if ('id' in item && item.id !== null && item.id !== undefined) {
+      } else if (typeof item === "object" && item !== null) {
+        if ("id" in item && item.id !== null && item.id !== undefined) {
           id = parseInt(item.id, 10);
-        } else if ('value' in item || 'key' in item) {
+        } else if ("value" in item || "key" in item) {
           const val = item.value || item.key;
           id = parseInt(val, 10);
         }
-      } else if (typeof item === 'string') {
+      } else if (typeof item === "string") {
         id = parseInt(item, 10);
       }
       return id;
     })
-    .filter(id => Number.isInteger(id) && id > 0);  // Strict: integer and positive
+    .filter((id) => Number.isInteger(id) && id > 0); // Strict: integer and positive
 
   return ids;
 }
 
 // export async function advanceStatus(req, res) {
-//   console.log("Advance Status Request Params:", req.params);    
+//   console.log("Advance Status Request Params:", req.params);
 //   try {
 //     const { id } = req.params;
 //     const numericId = parseInt(id, 10);
@@ -2627,7 +2954,7 @@ function extractOrderIds(orderData) {
 
 //             // Update ALL receivers: correct shipment status
 //             await client.query(
-//               `UPDATE receivers 
+//               `UPDATE receivers
 //                SET status = $1, updated_at = CURRENT_TIMESTAMP
 //                WHERE order_id = ANY($2::int[])`,
 //               [mapping.shipment, syncOrderIds]
@@ -2637,7 +2964,7 @@ function extractOrderIds(orderData) {
 //             const etaResult = await calculateETA(client, mapping.shipment);
 
 //             await client.query(
-//               `UPDATE receivers 
+//               `UPDATE receivers
 //                SET eta = $1, updated_at = CURRENT_TIMESTAMP
 //                WHERE order_id = ANY($2::int[])`,
 //               [etaResult.eta, syncOrderIds]
@@ -2677,7 +3004,7 @@ function extractOrderIds(orderData) {
 //       return res.status(409).json({ error: `Status '${nextStatus}' not in DB enum.` });
 //     }
 
-//     res.json({ 
+//     res.json({
 //       message: `Status advanced to ${nextStatus}`,
 //       data: { newStatus: nextStatus, previousStatus: currentStatus }
 //     });
@@ -2688,101 +3015,107 @@ function extractOrderIds(orderData) {
 //   }
 // }
 // Enhanced calculateETA (returns { eta, daysUntil }; uses exact status match from eta_config table)
-async function calculateETA(client, status, baseDate = new Date()) {  // Dynamic: Use current date as base
+async function calculateETA(client, status, baseDate = new Date()) {
+  // Dynamic: Use current date as base
   try {
-    const configQuery = `SELECT days_offset FROM eta_config WHERE status = $1`;  // Exact match
+    const configQuery = `SELECT days_offset FROM eta_config WHERE status = $1`; // Exact match
     const configResult = await client.query(configQuery, [status]);
     if (configResult.rowCount === 0) {
-      console.log(`No ETA config for status: ${status}; using baseDate (0 days)`);
-      const eta = baseDate.toISOString().split('T')[0];
+      console.log(
+        `No ETA config for status: ${status}; using baseDate (0 days)`,
+      );
+      const eta = baseDate.toISOString().split("T")[0];
       return { eta, daysUntil: 0 };
     }
     const days = configResult.rows[0].days_offset;
-    if (status.toLowerCase().includes('delivered')) {  // Simplified check
-      const eta = baseDate.toISOString().split('T')[0];
+    if (status.toLowerCase().includes("delivered")) {
+      // Simplified check
+      const eta = baseDate.toISOString().split("T")[0];
       return { eta, daysUntil: 0 };
     }
     const etaDate = new Date(baseDate.getTime() + days * 86400000);
-    const eta = etaDate.toISOString().split('T')[0];
+    const eta = etaDate.toISOString().split("T")[0];
     const daysUntil = computeDaysUntilEta(eta, baseDate);
-    console.log(`[calculateETA] For status "${status}": offset=${days} days → ETA=${eta} (days until: ${daysUntil})`);
+    console.log(
+      `[calculateETA] For status "${status}": offset=${days} days → ETA=${eta} (days until: ${daysUntil})`,
+    );
     return { eta, daysUntil };
   } catch (err) {
-    console.error('ETA calc error:', err);
-    const eta = new Date().toISOString().split('T')[0];
+    console.error("ETA calc error:", err);
+    const eta = new Date().toISOString().split("T")[0];
     return { eta, daysUntil: 0 };
   }
 }
 // === Status Color Mapping (Used for consignment, order, receiver, container cards) ===
 export function getStatusColor(status) {
-  if (!status || typeof status !== 'string') return '#E0E0E0'; // Fallback for null/undefined/empty
+  if (!status || typeof status !== "string") return "#E0E0E0"; // Fallback for null/undefined/empty
 
   const normalized = status.trim(); // Protect against accidental whitespace
 
   const colors = {
     // ── Initial / Draft ───────────────────────────────────────────────
-    'Draft': '#E0E0E0',
-    'Drafts Cleared': '#E0E0E0',
-    'Order Created': '#E0E0E0',
-    'Created': '#E0E0E0',
+    Draft: "#E0E0E0",
+    "Drafts Cleared": "#E0E0E0",
+    "Order Created": "#E0E0E0",
+    Created: "#E0E0E0",
 
     // ── Submission & Vessel Milestones ─────────────────────────────────
-    'Submitted': '#FFEB3B',                // Yellow – awaiting action
-    'Submitted On Vessel': '#9C27B0',      // Purple – important milestone
-    'Customs Cleared': '#4CAF50',          // Green – cleared hurdle
+    Submitted: "#FFEB3B", // Yellow – awaiting action
+    "Submitted On Vessel": "#9C27B0", // Purple – important milestone
+    "Customs Cleared": "#4CAF50", // Green – cleared hurdle
 
     // ── In Transit / Movement ──────────────────────────────────────────
-    'In Transit': '#4CAF50',
-    'Shipment In Transit': '#4CAF50',
-    'In Transit On Vessel': '#4CAF50',
+    "In Transit": "#4CAF50",
+    "Shipment In Transit": "#4CAF50",
+    "In Transit On Vessel": "#4CAF50",
 
     // ── Processing / Active Use ────────────────────────────────────────
-    'Under Shipment Processing': '#FF9800', // Orange – active work
-    'Shipment Processing': '#FF9800',
-    'Under Processing': '#FF9800',
+    "Under Shipment Processing": "#FF9800", // Orange – active work
+    "Shipment Processing": "#FF9800",
+    "Under Processing": "#FF9800",
 
     // ── Arrival & Facility ─────────────────────────────────────────────
-    'Arrived at Facility': '#795548',       // Brown – at location
-    'Arrived at Facility': '#795548',
-    'Arrived': '#795548',                   // Container-specific
+    "Arrived at Facility": "#795548", // Brown – at location
+    "Arrived at Facility": "#795548",
+    Arrived: "#795548", // Container-specific
 
     // ── Ready / Pending Final Steps ────────────────────────────────────
-    'Ready for Loading': '#FFEB3B',
-    'Ready for Delivery': '#FFEB3B',
-    'Cleared for Delivery': '#FFEB3B',
-    'Arrived at Destination': '#FFEB3B',
+    "Ready for Loading": "#FFEB3B",
+    "Ready for Delivery": "#FFEB3B",
+    "Cleared for Delivery": "#FFEB3B",
+    "Arrived at Destination": "#FFEB3B",
 
     // ── Completion ─────────────────────────────────────────────────────
-    'Delivered': '#2196F3',                 // Blue – success
-    'Shipment Delivered': '#2196F3',
-    'Partially Delivered': '#FF9800',       // Orange – incomplete but close
+    Delivered: "#2196F3", // Blue – success
+    "Shipment Delivered": "#2196F3",
+    "Partially Delivered": "#FF9800", // Orange – incomplete but close
 
     // ── Container-Specific (from availability CHECK) ───────────────────
-    'Available': '#E0E0E0',
-    'Assigned to Job': '#FFEB3B',
-    'Assigned to Consignment': '#FFEB3B',
-    'Loaded': '#2196F3',                    // Matches 'Loaded Into Container'
-    'Occupied': '#4CAF50',
-    'Hired': '#9C27B0',                     // Matches vessel/submitted tone
-    'In Transit': '#4CAF50',                // Already covered
-    'Arrived': '#795548',
-    'De-Linked': '#F44336',                 // Red – detached/problem
-    'De-linked': '#F44336',
-    'Under Repair': '#FF9800',
-    'Returned': '#795548',
-    'Cleared': '#4CAF50',
-    'Quarantined': '#F44336',               // Red – hold/issue
+    Available: "#E0E0E0",
+    "Assigned to Job": "#FFEB3B",
+    "Assigned to Consignment": "#FFEB3B",
+    Loaded: "#2196F3", // Matches 'Loaded Into Container'
+    Occupied: "#4CAF50",
+    Hired: "#9C27B0", // Matches vessel/submitted tone
+    "In Transit": "#4CAF50", // Already covered
+    Arrived: "#795548",
+    "De-Linked": "#F44336", // Red – detached/problem
+    "De-linked": "#F44336",
+    "Under Repair": "#FF9800",
+    Returned: "#795548",
+    Cleared: "#4CAF50",
+    Quarantined: "#F44336", // Red – hold/issue
 
     // ── Issues / Holds / Cancelled ─────────────────────────────────────
-    'HOLD': '#FF9800',
-    'HOLD for Delivery': '#FF9800',
-    'Cancelled': '#F44336',
+    HOLD: "#FF9800",
+    "HOLD for Delivery": "#FF9800",
+    Cancelled: "#F44336",
 
     // ── Loading States ─────────────────────────────────────────────────
-    'Loaded Into Container': '#2196F3',
+    "Loaded Into Container": "#2196F3",
   };
 
-  return colors[normalized] || '#9E9E9E'; // Medium gray for unknown/unhandled
+  return colors[normalized] || "#9E9E9E"; // Medium gray for unknown/unhandled
 }
 // Helper for status color mapping (extended to match eta_config statuses)
 // function getStatusColor(status) {
@@ -2809,14 +3142,14 @@ export async function updateContainer(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { cid } = req.params;
     const updates = req.body;
-    const created_by = updates.created_by || req.user?.id || 'system';
+    const created_by = updates.created_by || req.user?.id || "system";
     const today = new Date();
 
-    console.log('Updating container:', { cid, updates, created_by });
+    console.log("Updating container:", { cid, updates, created_by });
 
     // 1. Fetch current container + latest status + linked receivers
     const currentQuery = `
@@ -2856,48 +3189,74 @@ export async function updateContainer(req, res) {
 
     const currentResult = await client.query(currentQuery, [cid]);
     if (currentResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Container not found' });
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Container not found" });
     }
 
     const current = currentResult.rows[0];
-    const currentAvailability = current.current_availability || 'Available';
+    const currentAvailability = current.current_availability || "Available";
     const currentLocation = current.current_location;
     const linkedReceivers = current.linked_receivers || [];
 
     // 2. Prevent invalid owner_type change
     if (updates.owner_type && updates.owner_type !== current.owner_type) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Cannot change owner_type manually' });
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ error: "Cannot change owner_type manually" });
     }
 
     // 3. Determine new values
-    const newAvailability = updates.availability || updates.derived_status || currentAvailability;
+    const newAvailability =
+      updates.availability || updates.derived_status || currentAvailability;
     const newLocation = updates.location || currentLocation;
 
     // 4. Validate new availability
     const validStatuses = [
-      'Available', 'In Transit', 'Loaded', 'Assigned to Job', 'Arrived',
-      'De-Linked', 'Under Repair', 'Returned', 'Cleared', 'Occupied',
-      'Hired', 'Quarantined', 'Order Created', 'Ready for Loading',
-      'Loaded Into Container', 'Shipment Processing', 'Shipment In Transit',
-      'Under Processing', 'Arrived at Facility', 'Ready for Delivery',
-      'Shipment Delivered'
+      "Available",
+      "In Transit",
+      "Loaded",
+      "Assigned to Job",
+      "Arrived",
+      "De-Linked",
+      "Under Repair",
+      "Returned",
+      "Cleared",
+      "Occupied",
+      "Hired",
+      "Quarantined",
+      "Order Created",
+      "Ready for Loading",
+      "Loaded Into Container",
+      "Shipment Processing",
+      "Shipment In Transit",
+      "Under Processing",
+      "Arrived at Facility",
+      "Ready for Delivery",
+      "Shipment Delivered",
     ];
 
     if (updates.availability && !validStatuses.includes(newAvailability)) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
       return res.status(400).json({
-        error: `Invalid availability status. Allowed: ${validStatuses.join(', ')}`
+        error: `Invalid availability status. Allowed: ${validStatuses.join(", ")}`,
       });
     }
 
     // Optional: location validation (normalized)
     if (updates.location) {
-      const normalized = updates.location.trim().toLowerCase().replace(/\s+/g, '_');
-      const validLocations = ['karachi_port', 'dubai_port', 'port_qasim', 'gwadar_port'];
+      const normalized = updates.location
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "_");
+      const validLocations = [
+        "karachi_port",
+        "dubai_port",
+        "port_qasim",
+        "gwadar_port",
+      ];
       if (!validLocations.includes(normalized)) {
-        await client.query('ROLLBACK');
+        await client.query("ROLLBACK");
         return res.status(400).json({ error: `Invalid location` });
       }
       updates.location = normalized;
@@ -2905,9 +3264,10 @@ export async function updateContainer(req, res) {
 
     // 5. Upsert current status record (fixed to match your schema)
     if (updates.availability || updates.derived_status || updates.location) {
-      const statusNotes = `Updated to ${newAvailability} at ${newLocation || '—'} by ${created_by} on ${today.toISOString()}`;
+      const statusNotes = `Updated to ${newAvailability} at ${newLocation || "—"} by ${created_by} on ${today.toISOString()}`;
 
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO container_status (
           cid,
           availability,
@@ -2922,54 +3282,56 @@ export async function updateContainer(req, res) {
           location       = EXCLUDED.location,
           status_notes   = EXCLUDED.status_notes,
           created_by     = EXCLUDED.created_by
-      `, [
-        cid,
-        newAvailability,
-        newLocation,
-        statusNotes,
-        created_by
-      ]);
+      `,
+        [cid, newAvailability, newLocation, statusNotes, created_by],
+      );
 
-      console.log(`Container status upserted for cid=${cid}: ${newAvailability} at ${newLocation}`);
+      console.log(
+        `Container status upserted for cid=${cid}: ${newAvailability} at ${newLocation}`,
+      );
     }
 
     // 6. Cascade to linked receivers / orders / items
     // (your existing cascade logic remains unchanged)
-    if (linkedReceivers.length > 0 && (updates.availability || updates.derived_status || updates.location)) {
+    if (
+      linkedReceivers.length > 0 &&
+      (updates.availability || updates.derived_status || updates.location)
+    ) {
       // ... your status mapping, receiver updates, order updates, order_items updates ...
       // (keep as-is)
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
-      message: 'Container updated successfully',
+      message: "Container updated successfully",
       affected_receivers: linkedReceivers.length,
       new_status: newAvailability,
-      new_location: newLocation
+      new_location: newLocation,
     });
-
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('Container update failed:', err);
+    if (client) await client.query("ROLLBACK");
+    console.error("Container update failed:", err);
 
-    if (err.code === '42703') {
+    if (err.code === "42703") {
       return res.status(500).json({
-        error: 'Database column issue – likely missing column in query',
-        details: err.message
+        error: "Database column issue – likely missing column in query",
+        details: err.message,
       });
     }
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'Duplicate key violation' });
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "Duplicate key violation" });
     }
-    if (err.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value (constraint violation)' });
+    if (err.code === "23514") {
+      return res
+        .status(400)
+        .json({ error: "Invalid value (constraint violation)" });
     }
 
     return res.status(500).json({
-      error: 'Failed to update container',
-      details: err.message
+      error: "Failed to update container",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
@@ -2977,54 +3339,62 @@ export async function updateContainer(req, res) {
 }
 // Helper for order-specific status color (if separate; harmonized with above)
 function getOrderStatusColor(status) {
-  return getStatusColor(status);  // Reuse for consistency
+  return getStatusColor(status); // Reuse for consistency
 }
 
 // NEW: Reverse mapping for container status to receiver status (for cascades)
 function mapContainerStatusToReceiverStatus(containerStatus) {
   const mapping = {
-    'Available': 'Ready for Loading',
-    'Loaded': 'Loaded Into Container',
-    'In Transit': 'Shipment In Transit',
-    'Arrived': 'Arrived at Sort Facility',
-    'De-Linked': 'Ready for Delivery',
-    'Returned': 'Shipment Delivered',
-    'Under Repair': 'Under Processing',
-    'Hired': 'Loaded Into Container',
-    'Occupied': 'Loaded Into Container',
-    'Cleared': 'Shipment Delivered'
+    Available: "Ready for Loading",
+    Loaded: "Loaded Into Container",
+    "In Transit": "Shipment In Transit",
+    Arrived: "Arrived at Sort Facility",
+    "De-Linked": "Ready for Delivery",
+    Returned: "Shipment Delivered",
+    "Under Repair": "Under Processing",
+    Hired: "Loaded Into Container",
+    Occupied: "Loaded Into Container",
+    Cleared: "Shipment Delivered",
   };
-  return mapping[containerStatus] || null;  // Null if no direct map
+  return mapping[containerStatus] || null; // Null if no direct map
 }
 // Helper function – returns a friendly, human-readable message for each shipment status
 // Used in email notifications and possibly UI updates
 function getStatusMessage(status) {
   // Normalize input (in case status comes in different cases or with extra spaces)
-  const normalized = (status || '').trim().toLowerCase();
+  const normalized = (status || "").trim().toLowerCase();
 
   const messages = {
-    'ready for loading': 'Your shipment is being prepared for loading.',
-    'loaded into container': 'Your items have been loaded into the container.',
-    'shipment processing': 'Your shipment is currently being processed.',
-    'shipment in transit': 'Your shipment is on its way to the destination.',
-    'under processing': 'Your shipment is under processing at the destination facility.',
-    'arrived at sort facility': 'Your shipment has arrived at our sorting facility.',
-    'ready for delivery': 'Your shipment is ready for final delivery.',
-    'shipment delivered': 'Your shipment has been successfully delivered.'
+    "ready for loading": "Your shipment is being prepared for loading.",
+    "loaded into container": "Your items have been loaded into the container.",
+    "shipment processing": "Your shipment is currently being processed.",
+    "shipment in transit": "Your shipment is on its way to the destination.",
+    "under processing":
+      "Your shipment is under processing at the destination facility.",
+    "arrived at sort facility":
+      "Your shipment has arrived at our sorting facility.",
+    "ready for delivery": "Your shipment is ready for final delivery.",
+    "shipment delivered": "Your shipment has been successfully delivered.",
   };
 
   // Return the matching message or a safe generic fallback
-  return messages[normalized] || 'The status of your shipment has been updated. We’ll keep you informed as it progresses.';
+  return (
+    messages[normalized] ||
+    "The status of your shipment has been updated. We’ll keep you informed as it progresses."
+  );
 }
 // Assuming getNotificationSettings is defined (from earlier)
 export async function getNotificationSettings(typeCode) {
-  console.log(`[getNotificationSettings] Starting for type_code: "${typeCode}"`);
+  console.log(
+    `[getNotificationSettings] Starting for type_code: "${typeCode}"`,
+  );
 
   try {
     const client = await pool.connect();
     console.log("[DB] Client connected");
 
-    const result = await client.query(`
+    const result = await client.query(
+      `
       SELECT 
         nt.type_code,
         nt.name,
@@ -3036,12 +3406,16 @@ export async function getNotificationSettings(typeCode) {
       FROM notification_types nt
       LEFT JOIN notification_settings ns ON ns.type_id = nt.id
       WHERE nt.type_code = $1
-    `, [typeCode]);
+    `,
+      [typeCode],
+    );
 
     console.log(`[DB] Rows returned: ${result.rows.length}`);
 
     if (result.rows.length === 0) {
-      console.log(`[getNotificationSettings] No matching type_code "${typeCode}" found in notification_types`);
+      console.log(
+        `[getNotificationSettings] No matching type_code "${typeCode}" found in notification_types`,
+      );
       client.release();
       return null;
     }
@@ -3057,59 +3431,83 @@ export async function getNotificationSettings(typeCode) {
     const settings = {
       ...row,
       trigger_statuses: row.trigger_statuses
-        ? row.trigger_statuses.split(',').map(s => s.trim().toLowerCase())
+        ? row.trigger_statuses.split(",").map((s) => s.trim().toLowerCase())
         : [],
     };
 
     client.release();
     return settings;
-
   } catch (err) {
-    console.error(`[getNotificationSettings] DB error for "${typeCode}":`, err.message);
+    console.error(
+      `[getNotificationSettings] DB error for "${typeCode}":`,
+      err.message,
+    );
     return null;
   }
 }
-
 
 export async function updateReceiverStatus(req, res) {
   let client;
   try {
     const orderId = req.params.orderId;
     const receiverId = req.params.id;
-    const { status, notifyClient = true, notifyParties = false, forceRecalcEta = false } = req.body || {};
-    const created_by = req.user?.id || 'system';
-    console.log('Received request to update receiver status:', { orderId, receiverId }, { status, notifyClient, notifyParties, forceRecalcEta });
+    const {
+      status,
+      notifyClient = true,
+      notifyParties = false,
+      forceRecalcEta = false,
+    } = req.body || {};
+    const created_by = req.user?.id || "system";
+    console.log(
+      "Received request to update receiver status:",
+      { orderId, receiverId },
+      { status, notifyClient, notifyParties, forceRecalcEta },
+    );
     const validStatuses = [
-      'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-      'Shipment In Transit', 'Under Processing', 'Arrived at Facility',
-      'Ready for Delivery', 'Shipment Delivered'
+      "Ready for Loading",
+      "Loaded Into Container",
+      "Shipment Processing",
+      "Shipment In Transit",
+      "Under Processing",
+      "Arrived at Facility",
+      "Ready for Delivery",
+      "Shipment Delivered",
     ];
     // Enhanced validation with logging and case-insensitivity
     if (!orderId || isNaN(parseInt(orderId))) {
-      return res.status(400).json({ error: 'Valid order ID is required' });
+      return res.status(400).json({ error: "Valid order ID is required" });
     }
     if (!receiverId || isNaN(parseInt(receiverId))) {
-      return res.status(400).json({ error: 'Valid receiver ID is required' });
+      return res.status(400).json({ error: "Valid receiver ID is required" });
     }
-    const trimmedStatus = (status || '').trim();
+    const trimmedStatus = (status || "").trim();
     if (!trimmedStatus || !isValidReceiverStatus(trimmedStatus)) {
-      console.log('Invalid status provided:', trimmedStatus);  // Debug log
+      console.log("Invalid status provided:", trimmedStatus); // Debug log
       const validStatuses = [
-        'Ready for Loading', 'Loaded Into Container', 'Shipment Processing',
-        'Shipment In Transit', 'Under Processing', 'Arrived at Facility',
-        'Ready for Delivery', 'Shipment Delivered'
+        "Ready for Loading",
+        "Loaded Into Container",
+        "Shipment Processing",
+        "Shipment In Transit",
+        "Under Processing",
+        "Arrived at Facility",
+        "Ready for Delivery",
+        "Shipment Delivered",
       ];
       return res.status(400).json({
-        error: 'Valid status is required',
+        error: "Valid status is required",
         validStatuses,
-        details: trimmedStatus ? `Received: "${trimmedStatus}" (case-insensitive match failed)` : 'No status provided'
+        details: trimmedStatus
+          ? `Received: "${trimmedStatus}" (case-insensitive match failed)`
+          : "No status provided",
       });
     }
     // Normalize to exact casing
-    const normalizedStatus = validStatuses.find(valid => valid.toLowerCase() === trimmedStatus.toLowerCase());
+    const normalizedStatus = validStatuses.find(
+      (valid) => valid.toLowerCase() === trimmedStatus.toLowerCase(),
+    );
 
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // Fetch order, receiver, and ALL receivers (unchanged)
     const detailsQuery = `
@@ -3120,16 +3518,21 @@ export async function updateReceiverStatus(req, res) {
       LEFT JOIN receivers r ON o.id = r.order_id AND r.id = $2
       WHERE o.id = $1
     `;
-    const detailsResult = await client.query(detailsQuery, [parseInt(orderId), parseInt(receiverId)]);
+    const detailsResult = await client.query(detailsQuery, [
+      parseInt(orderId),
+      parseInt(receiverId),
+    ]);
     if (detailsResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order or Receiver not found' });
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Order or Receiver not found" });
     }
     const order = detailsResult.rows[0];
     const oldStatus = order.receiver_status;
 
     const allReceiversQuery = `SELECT id, status, eta FROM receivers WHERE order_id = $1`;
-    const allRecResult = await client.query(allReceiversQuery, [parseInt(orderId)]);
+    const allRecResult = await client.query(allReceiversQuery, [
+      parseInt(orderId),
+    ]);
     let allReceivers = allRecResult.rows;
 
     // Update receiver status (use normalized)
@@ -3139,33 +3542,57 @@ export async function updateReceiverStatus(req, res) {
       WHERE id = $2 AND order_id = $3
       RETURNING id, status, eta, containers
     `;
-    const updateResult = await client.query(updateQuery, [normalizedStatus, parseInt(receiverId), parseInt(orderId)]);
+    const updateResult = await client.query(updateQuery, [
+      normalizedStatus,
+      parseInt(receiverId),
+      parseInt(orderId),
+    ]);
     if (updateResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(500).json({ error: 'Failed to update receiver status' });
+      await client.query("ROLLBACK");
+      return res
+        .status(500)
+        .json({ error: "Failed to update receiver status" });
     }
     let updatedReceiver = updateResult.rows[0];
     let daysUntilEta = computeDaysUntilEta(updatedReceiver.eta);
     let finalStatus = normalizedStatus;
 
     // Auto-upgrade if past ETA (unchanged)
-    if (daysUntilEta !== null && daysUntilEta <= 0 && finalStatus !== 'Shipment Delivered') {
-      finalStatus = 'Shipment Delivered';
-      await client.query(`UPDATE receivers SET status = $1 WHERE id = $2`, [finalStatus, parseInt(receiverId)]);
-      console.log(`Auto-upgraded receiver ${receiverId} to ${finalStatus} (past ETA: ${daysUntilEta} days)`);
-      const refetchResult = await client.query(`SELECT id, status, eta, containers FROM receivers WHERE id = $1`, [parseInt(receiverId)]);
+    if (
+      daysUntilEta !== null &&
+      daysUntilEta <= 0 &&
+      finalStatus !== "Shipment Delivered"
+    ) {
+      finalStatus = "Shipment Delivered";
+      await client.query(`UPDATE receivers SET status = $1 WHERE id = $2`, [
+        finalStatus,
+        parseInt(receiverId),
+      ]);
+      console.log(
+        `Auto-upgraded receiver ${receiverId} to ${finalStatus} (past ETA: ${daysUntilEta} days)`,
+      );
+      const refetchResult = await client.query(
+        `SELECT id, status, eta, containers FROM receivers WHERE id = $1`,
+        [parseInt(receiverId)],
+      );
       updatedReceiver = refetchResult.rows[0];
       daysUntilEta = computeDaysUntilEta(updatedReceiver.eta);
     }
 
     // Dynamically fetch offsets (unchanged)
     const oldOffsetQuery = `SELECT days_offset FROM eta_config WHERE status = $1 LIMIT 1`;
-    const oldOffsetResult = await client.query(oldOffsetQuery, [oldStatus || 'In Process']);
-    const oldOffset = oldOffsetResult.rowCount > 0 ? oldOffsetResult.rows[0].days_offset : Infinity;
+    const oldOffsetResult = await client.query(oldOffsetQuery, [
+      oldStatus || "In Process",
+    ]);
+    const oldOffset =
+      oldOffsetResult.rowCount > 0
+        ? oldOffsetResult.rows[0].days_offset
+        : Infinity;
 
     const newOffsetQuery = `SELECT days_offset FROM eta_config WHERE status = $1 LIMIT 1`;
     const newOffsetResult = await client.query(newOffsetQuery, [finalStatus]);
-    const newOffset = newOffsetResult.rowCount > 0 ? newOffsetResult.rows[0].days_offset : 0;
+    const newOffset =
+      newOffsetResult.rowCount > 0 ? newOffsetResult.rows[0].days_offset : 0;
 
     const statusAdvanced = newOffset < oldOffset;
 
@@ -3175,50 +3602,85 @@ export async function updateReceiverStatus(req, res) {
       const etaResult = await calculateETA(client, finalStatus);
       newEta = etaResult.eta;
       if (newEta !== updatedReceiver.eta) {
-        await client.query(`UPDATE receivers SET eta = $1 WHERE id = $2`, [newEta, parseInt(receiverId)]);
-        console.log(`Recalculated ETA for receiver ${receiverId} (status: ${finalStatus}): ${newEta} (days until: ${etaResult.daysUntil})`);
-        const refetchResult = await client.query(`SELECT id, status, eta, containers FROM receivers WHERE id = $1`, [parseInt(receiverId)]);
+        await client.query(`UPDATE receivers SET eta = $1 WHERE id = $2`, [
+          newEta,
+          parseInt(receiverId),
+        ]);
+        console.log(
+          `Recalculated ETA for receiver ${receiverId} (status: ${finalStatus}): ${newEta} (days until: ${etaResult.daysUntil})`,
+        );
+        const refetchResult = await client.query(
+          `SELECT id, status, eta, containers FROM receivers WHERE id = $1`,
+          [parseInt(receiverId)],
+        );
         updatedReceiver = refetchResult.rows[0];
         daysUntilEta = etaResult.daysUntil;
       }
     }
 
     // Update allReceivers
-    allReceivers = allReceivers.map(r =>
+    allReceivers = allReceivers.map((r) =>
       r.id === parseInt(receiverId)
         ? { ...r, status: finalStatus, eta: newEta }
-        : r
+        : r,
     );
 
     // Cascade to linked containers (bidirectional)
-    await updateLinkedContainersStatus(client, parseInt(receiverId), finalStatus, created_by);
+    await updateLinkedContainersStatus(
+      client,
+      parseInt(receiverId),
+      finalStatus,
+      created_by,
+    );
 
     // Cascade: Update order_items
-    await client.query(`
+    await client.query(
+      `
       UPDATE order_items
       SET consignment_status = $1, updated_at = CURRENT_TIMESTAMP
       WHERE receiver_id = $2
-    `, [finalStatus, parseInt(receiverId)]);
+    `,
+      [finalStatus, parseInt(receiverId)],
+    );
 
     // Cascade: Update overall order status
-    await updateOrderOverallStatus(client, parseInt(orderId), finalStatus, allReceivers);
+    await updateOrderOverallStatus(
+      client,
+      parseInt(orderId),
+      finalStatus,
+      allReceivers,
+    );
 
     // Recalc and update order-level ETA
     const minEtaQuery = `SELECT MIN(eta) as min_eta FROM receivers WHERE order_id = $1`;
     const minEtaResult = await client.query(minEtaQuery, [parseInt(orderId)]);
     const orderNewEta = minEtaResult.rows[0].min_eta;
     if (orderNewEta && orderNewEta !== order.eta) {
-      await client.query(`UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [orderNewEta, parseInt(orderId)]);
-      console.log(`Updated order ${orderId} ETA to earliest receiver: ${orderNewEta}`);
+      await client.query(
+        `UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [orderNewEta, parseInt(orderId)],
+      );
+      console.log(
+        `Updated order ${orderId} ETA to earliest receiver: ${orderNewEta}`,
+      );
     }
 
     // Log to order_tracking
-    await client.query(`
+    await client.query(
+      `
       INSERT INTO order_tracking (order_id, receiver_id, status, old_status, created_by, created_time)
       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-    `, [parseInt(orderId), parseInt(receiverId), finalStatus, oldStatus, created_by]);
+    `,
+      [
+        parseInt(orderId),
+        parseInt(receiverId),
+        finalStatus,
+        oldStatus,
+        created_by,
+      ],
+    );
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.status(200).json({
       success: true,
@@ -3228,71 +3690,79 @@ export async function updateReceiverStatus(req, res) {
         status: finalStatus,
         eta: newEta,
         days_until_eta: daysUntilEta,
-        containers: updatedReceiver.containers
-      }
+        containers: updatedReceiver.containers,
+      },
     });
   } catch (error) {
-    console.error('Error updating receiver status:', error);
+    console.error("Error updating receiver status:", error);
     if (client) {
       try {
-        await client.query('ROLLBACK');
+        await client.query("ROLLBACK");
       } catch (rollbackErr) {
-        console.error('Rollback failed:', rollbackErr);
+        console.error("Rollback failed:", rollbackErr);
       }
     }
-    return res.status(500).json({ error: 'Internal server error', details: error.message });
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
   } finally {
     if (client) client.release();
   }
 }
 
-
 function mapReceiverStatusToContainerStatus(receiverStatus) {
   const map = {
     // Pre-shipment / ready stages
-    'Order Created': 'Available',
-    'Ready for Loading': 'Available',
-    'Created': 'Available',
+    "Order Created": "Available",
+    "Ready for Loading": "Available",
+    Created: "Available",
 
     // Loading / loaded
-    'Loaded Into Container': 'Loaded',
-    'Loaded': 'Loaded',
+    "Loaded Into Container": "Loaded",
+    Loaded: "Loaded",
 
     // In shipment / transit
-    'Shipment Processing': 'Occupied',
-    'Under Shipment Processing': 'Occupied',
-    'Shipment In Transit': 'In Transit',
-    'Under Processing': 'Occupied',
-    'Submitted On Vessel': 'In Transit',
-    'In Transit': 'In Transit',
+    "Shipment Processing": "Occupied",
+    "Under Shipment Processing": "Occupied",
+    "Shipment In Transit": "In Transit",
+    "Under Processing": "Occupied",
+    "Submitted On Vessel": "In Transit",
+    "In Transit": "In Transit",
 
     // Arrival / destination
-    'Arrived at Facility': 'Arrived',
+    "Arrived at Facility": "Arrived",
     // 'Arrived at Facility'   : 'Arrived',
-    'Arrived at Destination': 'Arrived',
-    'Ready for Delivery': 'Arrived',
-    'Customs Cleared': 'Cleared',
+    "Arrived at Destination": "Arrived",
+    "Ready for Delivery": "Arrived",
+    "Customs Cleared": "Cleared",
 
     // Completed / returned
-    'Delivered': 'Returned',
-    'Shipment Delivered': 'Returned',
+    Delivered: "Returned",
+    "Shipment Delivered": "Returned",
 
     // Other / fallback
-    'default': 'Available'
+    default: "Available",
   };
 
-  const result = map[receiverStatus] || map['default'];
+  const result = map[receiverStatus] || map["default"];
 
   // Log unmapped statuses for future improvements
   if (!map[receiverStatus]) {
-    console.warn(`[Mapping] Unhandled receiver status "${receiverStatus}" → fallback to "${result}"`);
+    console.warn(
+      `[Mapping] Unhandled receiver status "${receiverStatus}" → fallback to "${result}"`,
+    );
   }
 
   return result;
 }
 
 // Helper to update container status based on receiver status (UPSERT version)
-async function updateLinkedContainersStatus(client, receiverId, newReceiverStatus, created_by = 'system') {
+async function updateLinkedContainersStatus(
+  client,
+  receiverId,
+  newReceiverStatus,
+  created_by = "system",
+) {
   try {
     // 1. Fetch receiver containers
     const receiverQuery = `SELECT containers FROM receivers WHERE id = $1`;
@@ -3307,7 +3777,7 @@ async function updateLinkedContainersStatus(client, receiverId, newReceiverStatu
     const rawContainers = recResult.rows[0].containers;
 
     // Flexible parsing of containers (string, JSON, comma-separated, etc.)
-    if (typeof rawContainers === 'string') {
+    if (typeof rawContainers === "string") {
       let cleaned = rawContainers.trim();
 
       // Try JSON first
@@ -3319,12 +3789,15 @@ async function updateLinkedContainersStatus(client, receiverId, newReceiverStatu
       } catch {
         // Fallback: comma-separated or single value
         cleaned = cleaned
-          .replace(/^["'\[]+|["'\]]+$/g, '')     // remove wrapping quotes/brackets
-          .replace(/["']/g, '')                  // remove internal quotes
-          .replace(/\s+/g, ' ');                 // normalize spaces
+          .replace(/^["'\[]+|["'\]]+$/g, "") // remove wrapping quotes/brackets
+          .replace(/["']/g, "") // remove internal quotes
+          .replace(/\s+/g, " "); // normalize spaces
 
-        if (cleaned.includes(',')) {
-          containers = cleaned.split(',').map(s => s.trim()).filter(Boolean);
+        if (cleaned.includes(",")) {
+          containers = cleaned
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
         } else if (cleaned) {
           containers = [cleaned];
         }
@@ -3341,24 +3814,40 @@ async function updateLinkedContainersStatus(client, receiverId, newReceiverStatu
     // 2. Get real cids from container_master
     const cidQuery = `SELECT cid FROM container_master WHERE container_number = ANY($1)`;
     const cidResult = await client.query(cidQuery, [containers]);
-    const cids = cidResult.rows.map(row => row.cid).filter(cid => !isNaN(cid));
+    const cids = cidResult.rows
+      .map((row) => row.cid)
+      .filter((cid) => !isNaN(cid));
 
     if (cids.length === 0) {
-      console.warn(`No matching cids found for containers of receiver ${receiverId}`);
+      console.warn(
+        `No matching cids found for containers of receiver ${receiverId}`,
+      );
       return;
     }
 
     // 3. Map receiver status to container availability using your function
-    const newContainerStatus = mapReceiverStatusToContainerStatus(newReceiverStatus);
+    const newContainerStatus =
+      mapReceiverStatusToContainerStatus(newReceiverStatus);
 
     // 4. Define location safely
-    const location = `Receiver ${receiverId} (Status: ${newReceiverStatus || 'unknown'})`;
+    const location = `Receiver ${receiverId} (Status: ${newReceiverStatus || "unknown"})`;
 
-    console.log(`[Container Sync] Receiver ${receiverId} | receiverStatus: "${newReceiverStatus}" → containerStatus: "${newContainerStatus}" | location: "${location}" | cids: ${cids.join(', ')}`);
+    console.log(
+      `[Container Sync] Receiver ${receiverId} | receiverStatus: "${newReceiverStatus}" → containerStatus: "${newContainerStatus}" | location: "${location}" | cids: ${cids.join(", ")}`,
+    );
 
     // 5. Bulk UPSERT – insert or update
-    const valuesClause = cids.map((cid, idx) => `($${idx * 4 + 1}, $${idx * 4 + 2}, $${idx * 4 + 3}, NOW())`).join(', ');
-    const flatParams = cids.flatMap(cid => [cid, newContainerStatus, location]);
+    const valuesClause = cids
+      .map(
+        (cid, idx) =>
+          `($${idx * 4 + 1}, $${idx * 4 + 2}, $${idx * 4 + 3}, NOW())`,
+      )
+      .join(", ");
+    const flatParams = cids.flatMap((cid) => [
+      cid,
+      newContainerStatus,
+      location,
+    ]);
 
     const upsertQuery = `
       INSERT INTO container_status (cid, availability, location, created_time)
@@ -3373,19 +3862,31 @@ async function updateLinkedContainersStatus(client, receiverId, newReceiverStatu
 
     const upsertRes = await client.query(upsertQuery, flatParams);
 
-    console.log(`[Container Sync] Successfully updated ${upsertRes.rowCount} containers to "${newContainerStatus}"`);
+    console.log(
+      `[Container Sync] Successfully updated ${upsertRes.rowCount} containers to "${newContainerStatus}"`,
+    );
 
     // Optional: Log each one for detailed audit
-    upsertRes.rows.forEach(row => {
-      console.log(`  → CID ${row.cid} updated to "${row.availability}" at "${row.location}"`);
+    upsertRes.rows.forEach((row) => {
+      console.log(
+        `  → CID ${row.cid} updated to "${row.availability}" at "${row.location}"`,
+      );
     });
-
   } catch (err) {
-    console.error(`Error updating linked containers for receiver ${receiverId}:`, err.message);
+    console.error(
+      `Error updating linked containers for receiver ${receiverId}:`,
+      err.message,
+    );
     // Do NOT throw — let transaction continue for other receivers
   }
 }
-async function updateOrderOverallStatus(client, orderId, newReceiverStatus, receivers) {  // Pass receivers for efficiency
+async function updateOrderOverallStatus(
+  client,
+  orderId,
+  newReceiverStatus,
+  receivers,
+) {
+  // Pass receivers for efficiency
   try {
     // Dynamically fetch status order from eta_config (sorted by days_offset DESC: early stages first, late last)
     const configQuery = `
@@ -3405,51 +3906,72 @@ async function updateOrderOverallStatus(client, orderId, newReceiverStatus, rece
 
     // Fallback for missing statuses
     const fallbackStatuses = [
-      'Created', 'Order Created', 'In Process', 'Submitted', 'In Transit'
+      "Created",
+      "Order Created",
+      "In Process",
+      "Submitted",
+      "In Transit",
     ];
     fallbackStatuses.forEach((status, index) => {
       if (!(status in statusOrder)) {
-        statusOrder[status] = fallbackStatuses.length + index;  // Ensure fallbacks come after DB statuses
+        statusOrder[status] = fallbackStatuses.length + index; // Ensure fallbacks come after DB statuses
       }
     });
 
-    const receiverStatuses = receivers.map(r => r.status);
-    const maxIndex = Math.max(...receiverStatuses.map(s => statusOrder[s] || 0));
-    let overallStatus = Object.keys(statusOrder).find(key => statusOrder[key] === maxIndex) || 'In Process';
+    const receiverStatuses = receivers.map((r) => r.status);
+    const maxIndex = Math.max(
+      ...receiverStatuses.map((s) => statusOrder[s] || 0),
+    );
+    let overallStatus =
+      Object.keys(statusOrder).find((key) => statusOrder[key] === maxIndex) ||
+      "In Process";
 
     // Enhanced: Eta-based auto-upgrade (all past eta → 'Shipment Delivered' if not cancelled)
-    const today = new Date();  // Dynamic: Use current date
-    const allPastEta = receivers.every(r => {
-      if (['Shipment Delivered', 'Cancelled'].includes(r.status)) return false;
+    const today = new Date(); // Dynamic: Use current date
+    const allPastEta = receivers.every((r) => {
+      if (["Shipment Delivered", "Cancelled"].includes(r.status)) return false;
       const days = computeDaysUntilEta(r.eta, today);
       return days !== null && days <= 0;
     });
-    if (allPastEta && !receiverStatuses.includes('Cancelled')) {
-      overallStatus = 'Shipment Delivered';
+    if (allPastEta && !receiverStatuses.includes("Cancelled")) {
+      overallStatus = "Shipment Delivered";
     }
 
     // Weighted: e.g., >50% delivered → 'Shipment In Transit' (extend as needed)
-    const deliveredPct = (receiverStatuses.filter(s => s === 'Shipment Delivered').length / receivers.length) * 100;
-    if (deliveredPct > 50 && overallStatus !== 'Shipment Delivered') {
-      overallStatus = 'Shipment In Transit';
+    const deliveredPct =
+      (receiverStatuses.filter((s) => s === "Shipment Delivered").length /
+        receivers.length) *
+      100;
+    if (deliveredPct > 50 && overallStatus !== "Shipment Delivered") {
+      overallStatus = "Shipment In Transit";
     }
 
     const orderUpdateQuery = `
       UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, status
     `;
-    const orderResult = await client.query(orderUpdateQuery, [overallStatus, orderId]);
+    const orderResult = await client.query(orderUpdateQuery, [
+      overallStatus,
+      orderId,
+    ]);
     if (orderResult.rowCount > 0) {
-      console.log(`Cascaded order status to: ${overallStatus} for order ${orderId} (delivered %: ${deliveredPct.toFixed(0)})`);
+      console.log(
+        `Cascaded order status to: ${overallStatus} for order ${orderId} (delivered %: ${deliveredPct.toFixed(0)})`,
+      );
     }
   } catch (err) {
-    console.error('Error updating overall order status:', err);
-    throw err;  // Re-throw to handle in caller if needed
+    console.error("Error updating overall order status:", err);
+    throw err; // Re-throw to handle in caller if needed
   }
 }
 // Stub functions (define these if missing)
 async function calculateETAAll(client, status) {
   // Placeholder: Return { eta: '2025-12-23', daysUntil: 8 }
-  return { eta: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], daysUntil: 8 };
+  return {
+    eta: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0],
+    daysUntil: 8,
+  };
 }
 function computeDaysUntilEtaAll(etaStr) {
   const eta = new Date(etaStr);
@@ -3457,16 +3979,20 @@ function computeDaysUntilEtaAll(etaStr) {
   return Math.max(0, Math.ceil((eta - now) / (24 * 60 * 60 * 1000)));
 }
 
-
 function safeParseJsonArrayForMultiple(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
+  if (typeof value === "string" && value.trim()) {
     try {
       const parsed = JSON.parse(value);
       return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
-      console.error(`Invalid JSON in container_details:`, value.substring(0, 200) + '...', '→ error:', err.message);
+      console.error(
+        `Invalid JSON in container_details:`,
+        value.substring(0, 200) + "...",
+        "→ error:",
+        err.message,
+      );
       return [];
     }
   }
@@ -3478,15 +4004,15 @@ export async function assignContainersBatch(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('DISCARD PLANS');
-    await client.query('BEGIN');
+    await client.query("DISCARD PLANS");
+    await client.query("BEGIN");
 
     const { assignments = [] } = req.body;
 
     if (!Array.isArray(assignments) || assignments.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'assignments must be a non-empty array'
+        message: "assignments must be a non-empty array",
       });
     }
 
@@ -3496,28 +4022,37 @@ export async function assignContainersBatch(req, res) {
     const updatedOrders = new Set();
 
     // Get current user email for auditing (only used in history insert)
-    const currentUserEmail = req.user?.email || 'unknown-user';
+    const currentUserEmail = req.user?.email || "unknown-user";
 
     for (const ass of assignments) {
       const orderIdNum = Number(ass.orderId);
       const receiverIdNum = Number(ass.receiverId);
-      const detailIdxNum = Number(ass.detailIndex ?? '0');
+      const detailIdxNum = Number(ass.detailIndex ?? "0");
       const containerIdNum = Number(ass.containerId);
       const qtyNum = Number(ass.qty);
 
       if (
-        isNaN(orderIdNum) || orderIdNum <= 0 ||
-        isNaN(receiverIdNum) || receiverIdNum <= 0 ||
-        isNaN(containerIdNum) || containerIdNum <= 0 ||
-        isNaN(qtyNum) || qtyNum <= 0 ||
-        isNaN(detailIdxNum) || detailIdxNum < 0
+        isNaN(orderIdNum) ||
+        orderIdNum <= 0 ||
+        isNaN(receiverIdNum) ||
+        receiverIdNum <= 0 ||
+        isNaN(containerIdNum) ||
+        containerIdNum <= 0 ||
+        isNaN(qtyNum) ||
+        qtyNum <= 0 ||
+        isNaN(detailIdxNum) ||
+        detailIdxNum < 0
       ) {
-        skipped.push({ ...ass, reason: 'Invalid numeric values in IDs or qty' });
+        skipped.push({
+          ...ass,
+          reason: "Invalid numeric values in IDs or qty",
+        });
         continue;
       }
 
       // 1. Container lookup
-      const contRes = await client.query(`
+      const contRes = await client.query(
+        `
         SELECT 
           cm.cid, 
           cm.container_number,
@@ -3537,16 +4072,23 @@ export async function assignContainersBatch(req, res) {
         ) cs ON true
         WHERE cm.cid = $1 
            OR cm.container_number = $2
-      `, [containerIdNum, String(ass.containerId)]);
+      `,
+        [containerIdNum, String(ass.containerId)],
+      );
 
       if (contRes.rowCount === 0) {
-        skipped.push({ ...ass, reason: 'container not found' });
+        skipped.push({ ...ass, reason: "container not found" });
         continue;
       }
 
       const container = contRes.rows[0];
-      if (!['Available', 'Assigned to Job'].includes(container.derived_status)) {
-        skipped.push({ ...ass, reason: `container not available (status: ${container.derived_status})` });
+      if (
+        !["Available", "Assigned to Job"].includes(container.derived_status)
+      ) {
+        skipped.push({
+          ...ass,
+          reason: `container not available (status: ${container.derived_status})`,
+        });
         continue;
       }
 
@@ -3554,7 +4096,8 @@ export async function assignContainersBatch(req, res) {
       const contNumber = container.container_number;
 
       // 2. Receiver
-      const receiverRes = await client.query(`
+      const receiverRes = await client.query(
+        `
         SELECT 
           id, 
           receiver_name, 
@@ -3564,24 +4107,28 @@ export async function assignContainersBatch(req, res) {
         FROM receivers
         WHERE id = $1 AND order_id = $2
         FOR UPDATE
-      `, [receiverIdNum, orderIdNum]);
+      `,
+        [receiverIdNum, orderIdNum],
+      );
 
       if (receiverRes.rowCount === 0) {
-        skipped.push({ ...ass, reason: 'receiver not found in this order' });
+        skipped.push({ ...ass, reason: "receiver not found in this order" });
         continue;
       }
 
       const receiver = receiverRes.rows[0];
 
-      const remainingReceiverQty = Number(receiver.total_number) - Number(receiver.qty_delivered || 0);
+      const remainingReceiverQty =
+        Number(receiver.total_number) - Number(receiver.qty_delivered || 0);
 
       if (remainingReceiverQty <= 0) {
-        skipped.push({ ...ass, reason: 'receiver already fully delivered' });
+        skipped.push({ ...ass, reason: "receiver already fully delivered" });
         continue;
       }
 
       // 3. Get target item (for validation and history)
-      const itemsRes = await client.query(`
+      const itemsRes = await client.query(
+        `
         SELECT id, total_number, total_weight, assigned_boxes, assigned_weight_kg, container_details, weight
         FROM order_items
         WHERE receiver_id = $1
@@ -3589,10 +4136,15 @@ export async function assignContainersBatch(req, res) {
         ORDER BY id
         LIMIT 1 OFFSET $2
         FOR UPDATE
-      `, [receiverIdNum, detailIdxNum]);
+      `,
+        [receiverIdNum, detailIdxNum],
+      );
 
       if (itemsRes.rowCount === 0) {
-        skipped.push({ ...ass, reason: 'no remaining items found for this detail index' });
+        skipped.push({
+          ...ass,
+          reason: "no remaining items found for this detail index",
+        });
         continue;
       }
 
@@ -3600,10 +4152,11 @@ export async function assignContainersBatch(req, res) {
       const targetItemId = targetItem.id;
 
       const currentAssignedBoxes = Number(targetItem.assigned_boxes || 0);
-      const remainingBoxes = Number(targetItem.total_number) - currentAssignedBoxes;
+      const remainingBoxes =
+        Number(targetItem.total_number) - currentAssignedBoxes;
 
       if (remainingBoxes <= 0) {
-        skipped.push({ ...ass, reason: 'target item already fully assigned' });
+        skipped.push({ ...ass, reason: "target item already fully assigned" });
         continue;
       }
 
@@ -3614,18 +4167,19 @@ export async function assignContainersBatch(req, res) {
       if (ass.assignedWeightKg != null) {
         assignWeight = Number(ass.assignedWeightKg);
         if (isNaN(assignWeight) || assignWeight < 0) {
-          skipped.push({ ...ass, reason: 'Invalid custom assignedWeightKg' });
+          skipped.push({ ...ass, reason: "Invalid custom assignedWeightKg" });
           continue;
         }
       } else {
         let totalW = Number(targetItem.total_weight || 0);
-        if (totalW <= 0) totalW = receiver ? Number(receiver.total_weight || 0) : 0;
+        if (totalW <= 0)
+          totalW = receiver ? Number(receiver.total_weight || 0) : 0;
         const fraction = assignBoxes / Number(targetItem.total_number || 1);
         assignWeight = Number((fraction * totalW).toFixed(2));
       }
 
       if (assignBoxes <= 0) {
-        skipped.push({ ...ass, reason: 'no boxes remaining to assign' });
+        skipped.push({ ...ass, reason: "no boxes remaining to assign" });
         continue;
       }
 
@@ -3634,7 +4188,8 @@ export async function assignContainersBatch(req, res) {
       }
 
       // 4. Get ALL items in the order
-      const allItemsRes = await client.query(`
+      const allItemsRes = await client.query(
+        `
         SELECT 
           id,
           total_number,
@@ -3646,10 +4201,12 @@ export async function assignContainersBatch(req, res) {
         FROM order_items
         WHERE order_id = $1
         FOR UPDATE
-      `, [orderIdNum]);
+      `,
+        [orderIdNum],
+      );
 
       if (allItemsRes.rowCount === 0) {
-        skipped.push({ ...ass, reason: 'no items found in order' });
+        skipped.push({ ...ass, reason: "no items found in order" });
         continue;
       }
 
@@ -3662,17 +4219,18 @@ export async function assignContainersBatch(req, res) {
 
         const itemWeight = Number(it.weight || 0);
 
-        let details = safeParseJsonArrayForMultiple(it.container_details || '[]') || [];
+        let details =
+          safeParseJsonArrayForMultiple(it.container_details || "[]") || [];
 
-        let e = details.find(en => en?.container?.cid === cid);
+        let e = details.find((en) => en?.container?.cid === cid);
         if (!e) {
           e = {
-            status: 'Ready for Loading',
+            status: "Ready for Loading",
             container: { cid, container_number: contNumber },
             total_number: String(it.total_number || 0),
-            assign_weight: '0.00',
+            assign_weight: "0.00",
             remaining_items: String(it.total_number || 0),
-            assign_total_box: '0'
+            assign_total_box: "0",
           };
           details.push(e);
         }
@@ -3680,7 +4238,7 @@ export async function assignContainersBatch(req, res) {
         // Assign full remaining items as assigned boxes
         e.assign_total_box = String(remItems);
         e.assign_weight = itemWeight.toFixed(2);
-        e.remaining_items = '0';
+        e.remaining_items = "0";
 
         const itemJson = JSON.stringify(details);
 
@@ -3688,7 +4246,8 @@ export async function assignContainersBatch(req, res) {
         const newB = Number(it.total_number || 0);
         const newW = itemWeight;
 
-        await client.query(`
+        await client.query(
+          `
           UPDATE order_items
           SET
             assigned_boxes     = $1,
@@ -3697,12 +4256,9 @@ export async function assignContainersBatch(req, res) {
             assigned_at        = NOW(),
             updated_at         = NOW()
           WHERE id = $4
-        `, [
-          Number(newB),
-          Number(newW),
-          itemJson,
-          itId
-        ]);
+        `,
+          [Number(newB), Number(newW), itemJson, itId],
+        );
 
         // Track only the target assignment
         if (itId === targetItemId) {
@@ -3714,76 +4270,88 @@ export async function assignContainersBatch(req, res) {
             assignedQty: assignBoxes,
             assignedWeightKg: assignWeight,
             usedCustomWeight: ass.assignedWeightKg != null,
-            note: 'Full remaining items assigned to all order items'
+            note: "Full remaining items assigned to all order items",
           });
         }
       }
 
       // 6. History log (target item only) – now uses current user email
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO container_assignment_history (
           cid, container_number, order_id, receiver_id, detail_id,
           assigned_qty, assigned_weight_kg, status, previous_status,
           action_type, created_by, updated_by, changed_by, notes, created_at
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
-      `, [
-        cid,
-        contNumber,
-        orderIdNum,
-        receiverIdNum,
-        targetItemId,
-        assignBoxes,
-        assignWeight,
-        'Ready for Loading',
-        'Available',
-        'ASSIGN',
-        currentUserEmail,   // created_by = current user email
-        currentUserEmail,   // updated_by = current user email
-        currentUserEmail,   // changed_by = current user email
-        `Assigned ${assignBoxes} boxes (${assignWeight} kg) via batch`
-      ]);
+      `,
+        [
+          cid,
+          contNumber,
+          orderIdNum,
+          receiverIdNum,
+          targetItemId,
+          assignBoxes,
+          assignWeight,
+          "Ready for Loading",
+          "Available",
+          "ASSIGN",
+          currentUserEmail, // created_by = current user email
+          currentUserEmail, // updated_by = current user email
+          currentUserEmail, // changed_by = current user email
+          `Assigned ${assignBoxes} boxes (${assignWeight} kg) via batch`,
+        ],
+      );
 
       // 7. Set all receivers in the order to Ready for Loading
-      await client.query(`
+      await client.query(
+        `
         UPDATE receivers
         SET
           status = 'Ready for Loading',
           updated_at = NOW()
         WHERE order_id = $1
-      `, [orderIdNum]);
+      `,
+        [orderIdNum],
+      );
 
       updatedOrders.add(orderIdNum);
 
-      const recsInOrder = await client.query('SELECT id FROM receivers WHERE order_id = $1', [orderIdNum]);
-      recsInOrder.rows.forEach(r => updatedReceivers.add(r.id));
+      const recsInOrder = await client.query(
+        "SELECT id FROM receivers WHERE order_id = $1",
+        [orderIdNum],
+      );
+      recsInOrder.rows.forEach((r) => updatedReceivers.add(r.id));
     }
 
     if (results.length === 0) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
-        message: 'No valid assignments could be processed',
-        skipped
+        message: "No valid assignments could be processed",
+        skipped,
       });
     }
 
     // Update orders total_assigned_qty (sum from target items only)
     for (const ordId of updatedOrders) {
       const orderTotal = results
-        .filter(r => r.orderId === ordId)
+        .filter((r) => r.orderId === ordId)
         .reduce((sum, r) => sum + r.assignedQty, 0);
 
       if (orderTotal > 0) {
-        await client.query(`
+        await client.query(
+          `
           UPDATE orders
           SET total_assigned_qty = total_assigned_qty + $1,
               updated_at = NOW()
           WHERE id = $2
-        `, [orderTotal, ordId]);
+        `,
+          [orderTotal, ordId],
+        );
       }
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.json({
       success: true,
@@ -3791,16 +4359,15 @@ export async function assignContainersBatch(req, res) {
       updatedReceivers: updatedReceivers.size,
       updatedOrders: updatedOrders.size,
       assigned: results,
-      skipped: skipped.length > 0 ? skipped : undefined
+      skipped: skipped.length > 0 ? skipped : undefined,
     });
-
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('Batch assign error:', err.stack || err);
+    if (client) await client.query("ROLLBACK");
+    console.error("Batch assign error:", err.stack || err);
     res.status(500).json({
       success: false,
-      message: 'Server error during batch assignment',
-      details: err.message
+      message: "Server error during batch assignment",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
@@ -3811,27 +4378,28 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const {
-      orderId,                    // required
-      containerId,                // required (cid or container_number)
-      receiverIds = [],           // optional: specific receivers
-      totalQtyToAssign = null     // optional: max total boxes to assign across all
+      orderId, // required
+      containerId, // required (cid or container_number)
+      receiverIds = [], // optional: specific receivers
+      totalQtyToAssign = null, // optional: max total boxes to assign across all
     } = req.body;
 
-    const created_by = req.user?.id || 'system';
+    const created_by = req.user?.id || "system";
 
     if (!orderId || isNaN(Number(orderId))) {
-      throw new Error('Valid orderId is required');
+      throw new Error("Valid orderId is required");
     }
 
     if (!containerId) {
-      throw new Error('containerId (cid or container_number) is required');
+      throw new Error("containerId (cid or container_number) is required");
     }
 
     // 1. Validate container
-    const contRes = await client.query(`
+    const contRes = await client.query(
+      `
       SELECT cm.cid, cm.container_number,
              cs.availability,
              CASE 
@@ -3846,16 +4414,20 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
         FROM container_status ORDER BY cid, sid DESC NULLS LAST
       ) cs ON cm.cid = cs.cid
       WHERE (cm.cid = $1 OR cm.container_number = $1::text)
-    `, [containerId]);
+    `,
+      [containerId],
+    );
 
-    if (contRes.rowCount === 0) throw new Error('Container not found');
+    if (contRes.rowCount === 0) throw new Error("Container not found");
 
     const container = contRes.rows[0];
     const cid = container.cid;
     const contNumber = container.container_number;
 
-    if (!['Available', 'Assigned to Job'].includes(container.derived_status)) {
-      throw new Error(`Container is not available (status: ${container.derived_status})`);
+    if (!["Available", "Assigned to Job"].includes(container.derived_status)) {
+      throw new Error(
+        `Container is not available (status: ${container.derived_status})`,
+      );
     }
 
     // 2. Get receivers with remaining qty
@@ -3874,7 +4446,9 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
 
     const receiversRes = await client.query(receiversQuery, receiversParams);
     if (receiversRes.rowCount === 0) {
-      throw new Error('No receivers with remaining quantity found in this order');
+      throw new Error(
+        "No receivers with remaining quantity found in this order",
+      );
     }
 
     const receivers = receiversRes.rows;
@@ -3882,21 +4456,27 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
 
     let totalAssigned = 0;
     let totalWeightAssigned = 0;
-    let remainingCap = totalQtyToAssign !== null ? Number(totalQtyToAssign) : Infinity;
+    let remainingCap =
+      totalQtyToAssign !== null ? Number(totalQtyToAssign) : Infinity;
 
     for (const receiver of receivers) {
       if (remainingCap <= 0) break;
 
       const recId = receiver.id;
-      let receiverContainers = safeParseJsonArrayForMultiple(receiver.containers);
+      let receiverContainers = safeParseJsonArrayForMultiple(
+        receiver.containers,
+      );
 
-      const itemsRes = await client.query(`
+      const itemsRes = await client.query(
+        `
         SELECT id, total_number, weight, assigned_boxes, assigned_weight_kg, container_details
         FROM order_items
         WHERE receiver_id = $1
           AND total_number > COALESCE(assigned_boxes, 0)
         ORDER BY id
-      `, [recId]);
+      `,
+        [recId],
+      );
 
       if (itemsRes.rowCount === 0) continue;
 
@@ -3911,53 +4491,76 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
         const remainingBoxes = item.total_number - (item.assigned_boxes || 0);
         if (remainingBoxes <= 0) continue;
 
-        const remainingWeight = item.weight * (remainingBoxes / item.total_number);
+        const remainingWeight =
+          item.weight * (remainingBoxes / item.total_number);
 
         // Respect cap
         const assignBoxes = Math.min(remainingBoxes, Math.floor(remainingCap));
-        const assignWeight = Number((item.weight * (assignBoxes / item.total_number)).toFixed(2));
+        const assignWeight = Number(
+          (item.weight * (assignBoxes / item.total_number)).toFixed(2),
+        );
 
         if (assignBoxes <= 0) continue;
 
         // Update container_details
-        let containerDetails = safeParseJsonArrayForMultiple(item.container_details);
-        let entry = containerDetails.find(e => e?.container?.cid === cid);
+        let containerDetails = safeParseJsonArrayForMultiple(
+          item.container_details,
+        );
+        let entry = containerDetails.find((e) => e?.container?.cid === cid);
 
         if (!entry) {
           entry = {
-            status: 'Ready for Loading',
+            status: "Ready for Loading",
             container: { cid, container_number: contNumber },
             total_number: String(item.total_number || 0),
-            assign_weight: '0',
+            assign_weight: "0",
             remaining_items: String(item.total_number || 0),
-            assign_total_box: '0'
+            assign_total_box: "0",
           };
           containerDetails.push(entry);
         }
 
-        entry.assign_total_box = String(Number(entry.assign_total_box || 0) + assignBoxes);
-        entry.assign_weight = (Number(entry.assign_weight || 0) + assignWeight).toFixed(2);
-        entry.remaining_items = String(item.total_number - (item.assigned_boxes || 0) - assignBoxes);
+        entry.assign_total_box = String(
+          Number(entry.assign_total_box || 0) + assignBoxes,
+        );
+        entry.assign_weight = (
+          Number(entry.assign_weight || 0) + assignWeight
+        ).toFixed(2);
+        entry.remaining_items = String(
+          item.total_number - (item.assigned_boxes || 0) - assignBoxes,
+        );
 
         // History log
-        await client.query(`
+        await client.query(
+          `
           INSERT INTO container_assignment_history (
             cid, container_number, order_id, receiver_id, detail_id,
             assigned_qty, assigned_weight_kg, status, previous_status,
             action_type, changed_by, notes, created_at
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-        `, [
-          cid, contNumber, orderId, recId, itemId,
-          assignBoxes, assignWeight, 'Ready for Loading', 'Available',
-          'ASSIGN', created_by,
-          `Assigned ${assignBoxes} boxes (${assignWeight.toFixed(2)} kg) to shared container ${contNumber}`
-        ]);
+        `,
+          [
+            cid,
+            contNumber,
+            orderId,
+            recId,
+            itemId,
+            assignBoxes,
+            assignWeight,
+            "Ready for Loading",
+            "Available",
+            "ASSIGN",
+            created_by,
+            `Assigned ${assignBoxes} boxes (${assignWeight.toFixed(2)} kg) to shared container ${contNumber}`,
+          ],
+        );
 
         // Update order_item
         const newBoxes = (item.assigned_boxes || 0) + assignBoxes;
         const newKg = (item.assigned_weight_kg || 0) + assignWeight;
 
-        await client.query(`
+        await client.query(
+          `
           UPDATE order_items
           SET
             assigned_boxes     = $1,
@@ -3966,7 +4569,9 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
             assigned_at        = NOW(),
             updated_at         = NOW()
           WHERE id = $4
-        `, [newBoxes, newKg, JSON.stringify(containerDetails), itemId]);
+        `,
+          [newBoxes, newKg, JSON.stringify(containerDetails), itemId],
+        );
 
         recAssignedQty += assignBoxes;
         recAssignedWeight += assignWeight;
@@ -3979,7 +4584,8 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
 
         const newDelivered = (receiver.qty_delivered || 0) + recAssignedQty;
 
-        await client.query(`
+        await client.query(
+          `
           UPDATE receivers
           SET
             qty_delivered = $1,
@@ -3990,14 +4596,16 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
             END,
             updated_at    = NOW()
           WHERE id = $3
-        `, [newDelivered, JSON.stringify(updatedContainers), recId]);
+        `,
+          [newDelivered, JSON.stringify(updatedContainers), recId],
+        );
 
         trackingData.push({
           receiverId: recId,
           receiverName: receiver.receiver_name,
           assignedQty: recAssignedQty,
           assignedWeightKg: recAssignedWeight.toFixed(2),
-          containers: [contNumber]
+          containers: [contNumber],
         });
 
         totalAssigned += recAssignedQty;
@@ -4006,18 +4614,21 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
     }
 
     if (totalAssigned === 0) {
-      throw new Error('No remaining quantity could be assigned');
+      throw new Error("No remaining quantity could be assigned");
     }
 
     // Update order
-    await client.query(`
+    await client.query(
+      `
       UPDATE orders
       SET total_assigned_qty = total_assigned_qty + $1,
           updated_at = NOW()
       WHERE id = $2
-    `, [totalAssigned, orderId]);
+    `,
+      [totalAssigned, orderId],
+    );
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.json({
       success: true,
@@ -4025,15 +4636,14 @@ export async function assignOneContainerToMultipleReceivers(req, res) {
       totalAssignedQty: totalAssigned,
       totalAssignedWeightKg: totalWeightAssigned.toFixed(2),
       tracking: trackingData,
-      capReached: remainingCap <= 0 && totalQtyToAssign !== null
+      capReached: remainingCap <= 0 && totalQtyToAssign !== null,
     });
-
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('Assign one container error:', err.stack || err);
+    if (client) await client.query("ROLLBACK");
+    console.error("Assign one container error:", err.stack || err);
     res.status(400).json({
-      error: 'Failed to assign container',
-      details: err.message
+      error: "Failed to assign container",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
@@ -4047,15 +4657,15 @@ function safeParseContainers(val) {
   if (Array.isArray(val)) return val;
 
   // Try JSON parse
-  if (typeof val === 'string') {
+  if (typeof val === "string") {
     try {
       const parsed = JSON.parse(val);
       if (Array.isArray(parsed)) return parsed;
     } catch {
       // Fallback: treat as comma-separated or single container
       return val
-        .split(',')
-        .map(v => v.trim())
+        .split(",")
+        .map((v) => v.trim())
         .filter(Boolean);
     }
   }
@@ -4070,13 +4680,13 @@ function safeParseJsonArray(val) {
     const parsed = JSON.parse(val);
     if (Array.isArray(parsed)) return parsed;
     // If parsed value is a string, wrap in array
-    if (typeof parsed === 'string') return [parsed];
+    if (typeof parsed === "string") return [parsed];
   } catch {
     // Fallback: treat as comma-separated string or single value
     return val
       .toString()
-      .split(',')
-      .map(v => v.trim())
+      .split(",")
+      .map((v) => v.trim())
       .filter(Boolean);
   }
 
@@ -4084,9 +4694,14 @@ function safeParseJsonArray(val) {
 }
 function bulkSanitizeContainerDetails(details) {
   if (!Array.isArray(details)) return [];
-  return details.map(d => {
-    if (!d || typeof d !== 'object') return d;
-    ['total_number', 'assign_weight', 'remaining_items', 'assign_total_box'].forEach(f => {
+  return details.map((d) => {
+    if (!d || typeof d !== "object") return d;
+    [
+      "total_number",
+      "assign_weight",
+      "remaining_items",
+      "assign_total_box",
+    ].forEach((f) => {
       const val = d[f];
       d[f] = (val != null ? parseFloat(val) : 0).toString();
     });
@@ -4094,23 +4709,29 @@ function bulkSanitizeContainerDetails(details) {
   });
 }
 
-
 export async function assignContainersToOrders(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { assignments } = req.body;
 
     // Get real user email for auditing
-    const changedBy = req.user?.id || req.user?.email || 'system-fallback';
-    if (!assignments || typeof assignments !== 'object' || !Object.keys(assignments).length) {
-      return res.status(400).json({ error: 'Valid non-empty assignments object required' });
+    const changedBy = req.user?.id || req.user?.email || "system-fallback";
+    if (
+      !assignments ||
+      typeof assignments !== "object" ||
+      !Object.keys(assignments).length
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Valid non-empty assignments object required" });
     }
 
     const orderIds = Object.keys(assignments).map(Number).filter(Boolean);
-    if (!orderIds.length) return res.status(400).json({ error: 'No valid order IDs' });
+    if (!orderIds.length)
+      return res.status(400).json({ error: "No valid order IDs" });
 
     const trackingData = [];
 
@@ -4123,12 +4744,15 @@ export async function assignContainersToOrders(req, res) {
         const recAssign = orderAssign[recIdStr];
 
         // Always fetch & lock receiver first
-        const receiverRes = await client.query(`
+        const receiverRes = await client.query(
+          `
           SELECT id, qty_delivered, containers, total_number
           FROM receivers
           WHERE id = $1 AND order_id = $2
           FOR UPDATE
-        `, [recId, orderId]);
+        `,
+          [recId, orderId],
+        );
 
         if (!receiverRes.rowCount) {
           console.warn(`Receiver ${recId} not found in order ${orderId}`);
@@ -4150,12 +4774,15 @@ export async function assignContainersToOrders(req, res) {
 
           if (!itemId || qty <= 0) continue;
           let removeWeight = parseFloat(assign.totalAssignedWeight || 0);
-          const itemRes = await client.query(`
+          const itemRes = await client.query(
+            `
             SELECT id, assigned_boxes, assigned_weight_kg, container_details, total_number
             FROM order_items
             WHERE id = $1 AND receiver_id = $2
             FOR UPDATE
-          `, [itemId, recId]);
+          `,
+            [itemId, recId],
+          );
 
           if (!itemRes.rowCount) continue;
           const item = itemRes.rows[0];
@@ -4164,8 +4791,10 @@ export async function assignContainersToOrders(req, res) {
           const currentBoxes = Number(item.assigned_boxes || 0);
           const currentKg = Number(item.assigned_weight_kg || 0);
 
-          if (qty > (item.total_number - currentBoxes)) {
-            throw new Error(`Cannot assign more than remaining on item ${itemId}`);
+          if (qty > item.total_number - currentBoxes) {
+            throw new Error(
+              `Cannot assign more than remaining on item ${itemId}`,
+            );
           }
 
           const cids = (assign.containers || []).map(Number).filter(Boolean);
@@ -4181,35 +4810,44 @@ export async function assignContainersToOrders(req, res) {
             const cid = cids[i];
             const isLast = i === cids.length - 1;
 
-            const thisQty = isLast ? (qty - assignedThisItemQty) : qtyPer;
-            const thisWeight = isLast ? (userWeight - assignedThisItemKg) : weightPer;
+            const thisQty = isLast ? qty - assignedThisItemQty : qtyPer;
+            const thisWeight = isLast
+              ? userWeight - assignedThisItemKg
+              : weightPer;
 
             if (thisQty <= 0) continue;
 
-            let entry = containerDetails.find(e => e?.container?.cid === cid);
+            let entry = containerDetails.find((e) => e?.container?.cid === cid);
             if (!entry) {
               const contRes = await client.query(
                 `SELECT container_number FROM container_master WHERE cid = $1`,
-                [cid]
+                [cid],
               );
-              const contNumber = contRes.rows[0]?.container_number || 'UNKNOWN';
+              const contNumber = contRes.rows[0]?.container_number || "UNKNOWN";
 
               entry = {
-                status: 'Ready for Loading',
+                status: "Ready for Loading",
                 container: { cid, container_number: contNumber },
                 total_number: String(item.total_number || 0),
-                assign_weight: '0',
+                assign_weight: "0",
                 remaining_items: String(item.total_number || 0),
-                assign_total_box: '0'
+                assign_total_box: "0",
               };
               containerDetails.push(entry);
             }
 
-            entry.assign_total_box = String(Number(entry.assign_total_box || 0) + thisQty);
-            entry.assign_weight = (Number(entry.assign_weight || 0) + thisWeight).toFixed(2);
+            entry.assign_total_box = String(
+              Number(entry.assign_total_box || 0) + thisQty,
+            );
+            entry.assign_weight = (
+              Number(entry.assign_weight || 0) + thisWeight
+            ).toFixed(2);
 
-            const newTotalAssigned = currentBoxes + assignedThisItemQty + thisQty;
-            entry.remaining_items = String(item.total_number - newTotalAssigned);
+            const newTotalAssigned =
+              currentBoxes + assignedThisItemQty + thisQty;
+            entry.remaining_items = String(
+              item.total_number - newTotalAssigned,
+            );
 
             assignedThisItemQty += thisQty;
             assignedThisItemKg += thisWeight;
@@ -4218,31 +4856,34 @@ export async function assignContainersToOrders(req, res) {
             // History insert – now uses real user email in created_by & updated_by
             // ────────────────────────────────────────────────
             // At the top of your function (after client connect)
-            const currentUserEmail = req.user?.email || 'system-fallback';
+            const currentUserEmail = req.user?.email || "system-fallback";
 
             // Then inside the loop:
-            await client.query(`
+            await client.query(
+              `
   INSERT INTO container_assignment_history (
     cid, container_number, order_id, receiver_id, detail_id,
     assigned_qty, assigned_weight_kg, status, previous_status,
     action_type, created_by, updated_by, changed_by, notes, created_at
   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
-`, [
-              cid,
-              entry.container.container_number,
-              orderId,
-              recId,
-              item.id,
-              thisQty,
-              thisWeight,
-              entry.status,
-              'Created',
-              'ASSIGN',
-              currentUserEmail,   // created_by
-              currentUserEmail,   // updated_by
-              currentUserEmail,   // changed_by → now shows email!
-              `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`
-            ]);
+`,
+              [
+                cid,
+                entry.container.container_number,
+                orderId,
+                recId,
+                item.id,
+                thisQty,
+                thisWeight,
+                entry.status,
+                "Created",
+                "ASSIGN",
+                currentUserEmail, // created_by
+                currentUserEmail, // updated_by
+                currentUserEmail, // changed_by → now shows email!
+                `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`,
+              ],
+            );
 
             newContainers.add(entry.container.container_number);
           }
@@ -4250,7 +4891,8 @@ export async function assignContainersToOrders(req, res) {
           const newBoxes = currentBoxes + assignedThisItemQty;
           const newKg = currentKg + assignedThisItemKg;
 
-          await client.query(`
+          await client.query(
+            `
             UPDATE order_items
             SET
               assigned_boxes     = $1,
@@ -4259,16 +4901,21 @@ export async function assignContainersToOrders(req, res) {
               assigned_at        = NOW(),
               updated_at         = NOW()
             WHERE id = $4
-          `, [newBoxes, newKg, JSON.stringify(containerDetails), item.id]);
+          `,
+            [newBoxes, newKg, JSON.stringify(containerDetails), item.id],
+          );
 
           receiverAssignedQty += assignedThisItemQty;
           receiverAssignedKg += assignedThisItemKg;
         }
 
         if (receiverAssignedQty > 0) {
-          const updatedContainers = [...new Set([...receiverContainers, ...newContainers])];
+          const updatedContainers = [
+            ...new Set([...receiverContainers, ...newContainers]),
+          ];
 
-          await client.query(`
+          await client.query(
+            `
             UPDATE receivers
             SET
               qty_delivered = qty_delivered + $1,
@@ -4279,13 +4926,15 @@ export async function assignContainersToOrders(req, res) {
               END,
               updated_at    = NOW()
             WHERE id = $3
-          `, [receiverAssignedQty, JSON.stringify(updatedContainers), recId]);
+          `,
+            [receiverAssignedQty, JSON.stringify(updatedContainers), recId],
+          );
 
           trackingData.push({
             receiverId: recId,
             assignedQty: receiverAssignedQty,
             assignedWeightKg: receiverAssignedKg.toFixed(2),
-            containers: [...newContainers]
+            containers: [...newContainers],
           });
 
           orderAssignedQty += receiverAssignedQty;
@@ -4293,28 +4942,31 @@ export async function assignContainersToOrders(req, res) {
       }
 
       if (orderAssignedQty > 0) {
-        await client.query(`
+        await client.query(
+          `
           UPDATE orders
           SET total_assigned_qty = total_assigned_qty + $1,
               updated_at = NOW()
           WHERE id = $2
-        `, [orderAssignedQty, orderId]);
+        `,
+          [orderAssignedQty, orderId],
+        );
       }
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.json({
       success: true,
-      message: 'Containers assigned successfully',
-      tracking: trackingData
+      message: "Containers assigned successfully",
+      tracking: trackingData,
     });
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('Assign containers error:', err.stack || err);
+    if (client) await client.query("ROLLBACK");
+    console.error("Assign containers error:", err.stack || err);
     res.status(400).json({
-      error: 'Failed to assign containers',
-      details: err.message
+      error: "Failed to assign containers",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
@@ -4325,17 +4977,24 @@ export async function removeContainerAssignments(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { assignments } = req.body;
-    const created_by = req.user?.id || 'system';
+    const created_by = req.user?.id || "system";
 
-    if (!assignments || typeof assignments !== 'object' || !Object.keys(assignments).length) {
-      return res.status(400).json({ error: 'Valid non-empty assignments object required' });
+    if (
+      !assignments ||
+      typeof assignments !== "object" ||
+      !Object.keys(assignments).length
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Valid non-empty assignments object required" });
     }
 
     const orderIds = Object.keys(assignments).map(Number).filter(Boolean);
-    if (!orderIds.length) return res.status(400).json({ error: 'No valid order IDs' });
+    if (!orderIds.length)
+      return res.status(400).json({ error: "No valid order IDs" });
 
     const trackingData = [];
 
@@ -4348,12 +5007,15 @@ export async function removeContainerAssignments(req, res) {
         const recRemove = orderRemove[recIdStr];
 
         // Always fetch and lock receiver first
-        const receiverRes = await client.query(`
+        const receiverRes = await client.query(
+          `
           SELECT id, qty_delivered, containers, total_number
           FROM receivers
           WHERE id = $1 AND order_id = $2
           FOR UPDATE
-        `, [recId, orderId]);
+        `,
+          [recId, orderId],
+        );
 
         if (!receiverRes.rowCount) continue;
 
@@ -4368,12 +5030,15 @@ export async function removeContainerAssignments(req, res) {
 
         if (isFullRemoval) {
           // ─── FULL RECEIVER REMOVAL ───
-          const itemsRes = await client.query(`
+          const itemsRes = await client.query(
+            `
             SELECT id, assigned_boxes, assigned_weight_kg, container_details
             FROM order_items
             WHERE receiver_id = $1 AND order_id = $2
             FOR UPDATE
-          `, [recId, orderId]);
+          `,
+            [recId, orderId],
+          );
 
           for (const item of itemsRes.rows) {
             const assignedBoxes = Number(item.assigned_boxes || 0);
@@ -4391,36 +5056,41 @@ export async function removeContainerAssignments(req, res) {
 
               const contRes = await client.query(
                 `SELECT container_number FROM container_master WHERE cid = $1`,
-                [cid]
+                [cid],
               );
-              const containerNumber = contRes.rows[0]?.container_number || 'UNKNOWN';
+              const containerNumber =
+                contRes.rows[0]?.container_number || "UNKNOWN";
 
-              await client.query(`
+              await client.query(
+                `
                 INSERT INTO container_assignment_history (
                   cid, container_number, order_id, receiver_id, detail_id,
                   assigned_qty, assigned_weight_kg, status, previous_status,
                   action_type, changed_by, notes, created_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-              `, [
-                cid,
-                containerNumber,
-                orderId,
-                recId,
-                item.id,
-                -Number(cd.assign_total_box || 0),
-                -Number(cd.assign_weight || 0),
-                'Unassigned',
-                'Ready for Loading',
-                'UNASSIGN',
-                created_by,
-                `Bulk removal: ${cd.assign_total_box || 0} boxes, ${cd.assign_weight || 0} kg removed`
-              ]);
+              `,
+                [
+                  cid,
+                  containerNumber,
+                  orderId,
+                  recId,
+                  item.id,
+                  -Number(cd.assign_total_box || 0),
+                  -Number(cd.assign_weight || 0),
+                  "Unassigned",
+                  "Ready for Loading",
+                  "UNASSIGN",
+                  created_by,
+                  `Bulk removal: ${cd.assign_total_box || 0} boxes, ${cd.assign_weight || 0} kg removed`,
+                ],
+              );
 
               removedContainers.add(containerNumber);
             }
 
             // Clear item completely
-            await client.query(`
+            await client.query(
+              `
                   UPDATE order_items
           SET
             assigned_boxes = 0,
@@ -4429,9 +5099,12 @@ export async function removeContainerAssignments(req, res) {
             assigned_at = NULL,
             updated_at = NOW()
           WHERE id = $1 AND order_id = $2
-        `, [itemId, orderId]);
+        `,
+              [itemId, orderId],
+            );
 
-            await client.query(`
+            await client.query(
+              `
           UPDATE receivers r
           SET
             containers = '[]'::jsonb,
@@ -4441,7 +5114,9 @@ export async function removeContainerAssignments(req, res) {
           WHERE r.id = (
             SELECT receiver_id FROM order_items WHERE id = $1 AND order_id = $2
           )
-        `, [itemId, orderId]);
+        `,
+              [itemId, orderId],
+            );
 
             orderRemovedQty += receiverRemovedQty;
           }
@@ -4455,12 +5130,15 @@ export async function removeContainerAssignments(req, res) {
 
             if (!itemId || removeQty <= 0) continue;
 
-            const itemRes = await client.query(`
+            const itemRes = await client.query(
+              `
               SELECT *
               FROM order_items
               WHERE id = $1 AND receiver_id = $2
               FOR UPDATE
-            `, [itemId, recId]);
+            `,
+              [itemId, recId],
+            );
 
             if (!itemRes.rowCount) continue;
             const item = itemRes.rows[0];
@@ -4472,25 +5150,38 @@ export async function removeContainerAssignments(req, res) {
             }
 
             if (removeQty > currentBoxes || removeWeight > currentKg + 0.01) {
-              throw new Error(`Cannot remove more than assigned: ${removeQty} > ${currentBoxes} boxes or ${removeWeight} > ${currentKg} kg`);
+              throw new Error(
+                `Cannot remove more than assigned: ${removeQty} > ${currentBoxes} boxes or ${removeWeight} > ${currentKg} kg`,
+              );
             }
 
             let containerDetails = safeParseJsonArray(item.container_details);
 
             // Sanitize before modification
             const sanitizedDetails = containerDetails
-              .map(entry => {
-                if (!entry || typeof entry !== 'object') return null;
+              .map((entry) => {
+                if (!entry || typeof entry !== "object") return null;
                 return {
-                  status: String(entry.status || 'Created'),
-                  container: entry.container && entry.container.cid ? {
-                    cid: Number(entry.container.cid),
-                    container_number: String(entry.container.container_number || '')
-                  } : null,
-                  total_number: Number(entry.total_number ?? entry.totalNumber ?? 0),
-                  assign_weight: Number(entry.assign_weight ?? entry.assignWeight ?? 0).toFixed(2),
+                  status: String(entry.status || "Created"),
+                  container:
+                    entry.container && entry.container.cid
+                      ? {
+                          cid: Number(entry.container.cid),
+                          container_number: String(
+                            entry.container.container_number || "",
+                          ),
+                        }
+                      : null,
+                  total_number: Number(
+                    entry.total_number ?? entry.totalNumber ?? 0,
+                  ),
+                  assign_weight: Number(
+                    entry.assign_weight ?? entry.assignWeight ?? 0,
+                  ).toFixed(2),
                   remaining_items: String(Number(entry.remaining_items ?? 0)),
-                  assign_total_box: String(Number(entry.assign_total_box ?? entry.assignTotalBox ?? 0))
+                  assign_total_box: String(
+                    Number(entry.assign_total_box ?? entry.assignTotalBox ?? 0),
+                  ),
                 };
               })
               .filter(Boolean);
@@ -4498,10 +5189,14 @@ export async function removeContainerAssignments(req, res) {
             let removedThisItemQty = 0;
             let removedThisItemKg = 0;
 
-            const cidsToRemove = (removeInfo.containers || []).map(Number).filter(Boolean);
+            const cidsToRemove = (removeInfo.containers || [])
+              .map(Number)
+              .filter(Boolean);
 
             for (const cid of cidsToRemove) {
-              const entryIdx = sanitizedDetails.findIndex(e => e?.container?.cid === cid);
+              const entryIdx = sanitizedDetails.findIndex(
+                (e) => e?.container?.cid === cid,
+              );
               if (entryIdx === -1) continue;
 
               const entry = sanitizedDetails[entryIdx];
@@ -4518,30 +5213,34 @@ export async function removeContainerAssignments(req, res) {
 
               const contRes = await client.query(
                 `SELECT container_number FROM container_master WHERE cid = $1`,
-                [cid]
+                [cid],
               );
-              const containerNumber = contRes.rows[0]?.container_number || 'UNKNOWN';
+              const containerNumber =
+                contRes.rows[0]?.container_number || "UNKNOWN";
 
-              await client.query(`
+              await client.query(
+                `
                 INSERT INTO container_assignment_history (
                   cid, container_number, order_id, receiver_id, detail_id,
                   assigned_qty, assigned_weight_kg, status, previous_status,
                   action_type, changed_by, notes, created_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-              `, [
-                cid,
-                containerNumber,
-                orderId,
-                recId,
-                item.id,
-                -takeBox,
-                -takeKg,
-                'Unassigned',
-                'Ready for Loading',
-                'UNASSIGN',
-                created_by,
-                `Removed container ${containerNumber}: ${takeBox} boxes, ${takeKg.toFixed(2)} kg`
-              ]);
+              `,
+                [
+                  cid,
+                  containerNumber,
+                  orderId,
+                  recId,
+                  item.id,
+                  -takeBox,
+                  -takeKg,
+                  "Unassigned",
+                  "Ready for Loading",
+                  "UNASSIGN",
+                  created_by,
+                  `Removed container ${containerNumber}: ${takeBox} boxes, ${takeKg.toFixed(2)} kg`,
+                ],
+              );
 
               removedContainers.add(containerNumber);
 
@@ -4553,16 +5252,22 @@ export async function removeContainerAssignments(req, res) {
             const newKg = Math.max(0, currentKg - removedThisItemKg);
 
             // Update remaining_items on remaining entries
-            sanitizedDetails.forEach(cd => {
+            sanitizedDetails.forEach((cd) => {
               cd.remaining_items = String(item.total_number - newBoxes);
             });
 
             // Final safe JSON
-            const finalJson = JSON.stringify(sanitizedDetails.length ? sanitizedDetails : []);
+            const finalJson = JSON.stringify(
+              sanitizedDetails.length ? sanitizedDetails : [],
+            );
 
-            console.debug(`[REMOVE] Updating item ${item.id}: new boxes=${newBoxes}, kg=${newKg}, container_details=`, finalJson);
+            console.debug(
+              `[REMOVE] Updating item ${item.id}: new boxes=${newBoxes}, kg=${newKg}, container_details=`,
+              finalJson,
+            );
 
-            await client.query(`
+            await client.query(
+              `
               UPDATE order_items
               SET
                 assigned_boxes     = $1,
@@ -4571,7 +5276,9 @@ export async function removeContainerAssignments(req, res) {
                 assigned_at        = CASE WHEN $1 > 0 THEN assigned_at ELSE NULL END,
                 updated_at         = NOW()
               WHERE id = $4
-            `, [newBoxes, newKg, finalJson, item.id]);
+            `,
+              [newBoxes, newKg, finalJson, item.id],
+            );
 
             receiverRemovedQty += removedThisItemQty;
             receiverRemovedKg += removedThisItemKg;
@@ -4580,11 +5287,17 @@ export async function removeContainerAssignments(req, res) {
 
         // Final receiver update (always run if something was removed)
         if (receiverRemovedQty > 0 || receiverRemovedKg > 0) {
-          receiverContainers = receiverContainers.filter(c => !removedContainers.has(c));
+          receiverContainers = receiverContainers.filter(
+            (c) => !removedContainers.has(c),
+          );
 
-          const newDelivered = Math.max(0, Number(receiver.qty_delivered || 0) - receiverRemovedQty);
+          const newDelivered = Math.max(
+            0,
+            Number(receiver.qty_delivered || 0) - receiverRemovedQty,
+          );
 
-          await client.query(`
+          await client.query(
+            `
             UPDATE receivers
             SET
               qty_delivered = $1,
@@ -4596,14 +5309,16 @@ export async function removeContainerAssignments(req, res) {
               END,
               updated_at    = NOW()
             WHERE id = $3
-          `, [newDelivered, JSON.stringify(receiverContainers), recId]);
+          `,
+            [newDelivered, JSON.stringify(receiverContainers), recId],
+          );
 
           trackingData.push({
             receiverId: recId,
             removedQty: receiverRemovedQty,
             removedWeightKg: receiverRemovedKg.toFixed(2),
             removedContainers: [...removedContainers],
-            isBulk: isFullRemoval
+            isBulk: isFullRemoval,
           });
 
           orderRemovedQty += receiverRemovedQty;
@@ -4611,28 +5326,31 @@ export async function removeContainerAssignments(req, res) {
       }
 
       if (orderRemovedQty > 0) {
-        await client.query(`
+        await client.query(
+          `
           UPDATE orders
           SET total_assigned_qty = GREATEST(0, total_assigned_qty - $1),
               updated_at = NOW()
           WHERE id = $2
-        `, [orderRemovedQty, orderId]);
+        `,
+          [orderRemovedQty, orderId],
+        );
       }
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     res.json({
       success: true,
-      message: 'Assignments removed successfully',
-      tracking: trackingData
+      message: "Assignments removed successfully",
+      tracking: trackingData,
     });
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('Remove assignment error:', err.stack || err);
+    if (client) await client.query("ROLLBACK");
+    console.error("Remove assignment error:", err.stack || err);
     res.status(400).json({
-      error: 'Failed to remove container assignments',
-      details: err.message
+      error: "Failed to remove container assignments",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
@@ -4640,7 +5358,9 @@ export async function removeContainerAssignments(req, res) {
 }
 
 async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
-  console.log(`Preparing to send update to subscribers for order ${orderId}: ${oldStatus} -> ${newStatus}`);
+  console.log(
+    `Preparing to send update to subscribers for order ${orderId}: ${oldStatus} -> ${newStatus}`,
+  );
   try {
     // Fetch order details (adapted for your schema; assumes 'reference_id' in receivers or orders)
     const orderQuery = `
@@ -4656,15 +5376,19 @@ async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
     }
 
     const order = orderResult.rows[0];
-    const tz = 'Asia/Dubai'; // RGSL timezone
-    const now = new Date().toLocaleString('en-US', { timeZone: tz });
-    const etaFormatted = order.eta ? new Date(order.eta).toLocaleDateString('en-GB') : '—'; // dd/MM/yyyy
-    const route = `${order.sender_name || ''} to ${order.receiver_name || ''}`; // Full route from sender/receiver
+    const tz = "Asia/Dubai"; // RGSL timezone
+    const now = new Date().toLocaleString("en-US", { timeZone: tz });
+    const etaFormatted = order.eta
+      ? new Date(order.eta).toLocaleDateString("en-GB")
+      : "—"; // dd/MM/yyyy
+    const route = `${order.sender_name || ""} to ${order.receiver_name || ""}`; // Full route from sender/receiver
 
     // Fetch subscribers from notifications table (assuming it has order_id, reference_id, email)
     const subQuery = `SELECT email FROM notifications WHERE order_id = $1 AND reference_id = $2`;
     const subResult = await pool.query(subQuery, [orderId, order.reference_id]);
-    const subscribers = subResult.rows.map(row => row.email).filter(email => email && email.includes('@'));
+    const subscribers = subResult.rows
+      .map((row) => row.email)
+      .filter((email) => email && email.includes("@"));
     console.log(`Found ${orderId} subscribers for order ${orderId}:`, order);
     // if (subscribers.length === 0) {
     //   console.log(`No subscribers for order ${orderId}`);
@@ -4676,23 +5400,26 @@ async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
 
     // Template data for shipment update
     const shipmentData = {
-      statusLabel: '' || `Status: ${newStatus}`,
-      statusMsg: 'phase.msg' || `Updated from "${oldStatus}" to "${newStatus}".`,
-      refId: order.reference_id || order.booking_ref || '—',
-      orderId: order.booking_ref || '—',
+      statusLabel: "" || `Status: ${newStatus}`,
+      statusMsg:
+        "phase.msg" || `Updated from "${oldStatus}" to "${newStatus}".`,
+      refId: order.reference_id || order.booking_ref || "—",
+      orderId: order.booking_ref || "—",
       route: route,
       etaFormatted,
       lastUpdated: now,
-      trackLink: `https://ordertracking.royalgulfshipping.com/?ref=${encodeURIComponent(order.reference_id || order.booking_ref)}`
+      trackLink: `https://ordertracking.royalgulfshipping.com/?ref=${encodeURIComponent(order.reference_id || order.booking_ref)}`,
     };
-    const email = 'support2@royalgulfshipping.com'; // For testing, send to fixed email
+    const email = "support2@royalgulfshipping.com"; // For testing, send to fixed email
     // Send to each subscriber (uses updated sendShipmentEmail)
     // for (const email of subscribers) {
-    // await sendShipmentEmail(email, shipmentData); 
-    console.log(`Update email sent to ${email} for order ${orderId}: ${newStatus}`);
+    // await sendShipmentEmail(email, shipmentData);
+    console.log(
+      `Update email sent to ${email} for order ${orderId}: ${newStatus}`,
+    );
     // }
   } catch (err) {
-    console.error('Subscriber email error:', err);
+    console.error("Subscriber email error:", err);
   }
 }
 
@@ -4700,7 +5427,7 @@ async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
 // Collects containers from all relevant receivers for the order
 // Add/update this in your order.controller.js
 async function cascadeToContainers(client, orderId, status, receiverId) {
-  const CONTAINER_TABLE = 'container_master';  // Your table (singular)
+  const CONTAINER_TABLE = "container_master"; // Your table (singular)
 
   try {
     // Step 1: Fetch containers from receivers table for the order (specific receiver or all)
@@ -4715,27 +5442,32 @@ async function cascadeToContainers(client, orderId, status, receiverId) {
     const fetchResult = await client.query(fetchQuery, fetchParams);
 
     if (fetchResult.rowCount === 0) {
-      console.log(`No receivers found for order ${orderId}, receiver ${receiverId || 'all'}`);
+      console.log(
+        `No receivers found for order ${orderId}, receiver ${receiverId || "all"}`,
+      );
       return;
     }
 
-    const allContainerNumbers = new Set();  // Dedupe across receivers
+    const allContainerNumbers = new Set(); // Dedupe across receivers
 
-    fetchResult.rows.forEach(row => {
+    fetchResult.rows.forEach((row) => {
       // Parse receiver's containers array (assumes JSON array like ["SLUO1234521"])
       if (row.containers) {
         let containersArray;
-        if (typeof row.containers === 'string') {
+        if (typeof row.containers === "string") {
           // Fallback: If stored as CSV string, split it
-          containersArray = row.containers.split(',');
+          containersArray = row.containers.split(",");
         } else if (Array.isArray(row.containers)) {
           containersArray = row.containers;
         } else {
-          console.warn(`Unexpected containers format for receiver ${row.id}:`, typeof row.containers);
+          console.warn(
+            `Unexpected containers format for receiver ${row.id}:`,
+            typeof row.containers,
+          );
           return;
         }
-        containersArray.forEach(cn => {
-          const trimmed = (cn || '').toString().trim();
+        containersArray.forEach((cn) => {
+          const trimmed = (cn || "").toString().trim();
           if (trimmed) allContainerNumbers.add(trimmed);
         });
       }
@@ -4743,17 +5475,21 @@ async function cascadeToContainers(client, orderId, status, receiverId) {
 
     const containerNumbers = Array.from(allContainerNumbers);
     if (containerNumbers.length === 0) {
-      console.log(`No valid container numbers found for order ${orderId}, receiver ${receiverId || 'all'}`);
+      console.log(
+        `No valid container numbers found for order ${orderId}, receiver ${receiverId || "all"}`,
+      );
       return;
     }
 
-    console.log(`Found containers to cascade from receivers table: [${containerNumbers.join(', ')}]`);
+    console.log(
+      `Found containers to cascade from receivers table: [${containerNumbers.join(", ")}]`,
+    );
 
     // Step 2: Derive status (direct map; customize if needed)
     let derivedStatus = status;
 
     // Step 3: Dynamic UPDATE on container_master
-    const placeholders = containerNumbers.map((_, i) => `$${i + 2}`).join(', ');  // Starts after $1
+    const placeholders = containerNumbers.map((_, i) => `$${i + 2}`).join(", "); // Starts after $1
     const updateQuery = `
       UPDATE ${CONTAINER_TABLE}
       SET 
@@ -4765,25 +5501,31 @@ async function cascadeToContainers(client, orderId, status, receiverId) {
 
     const updateResult = await client.query(updateQuery, updateParams);
 
-    console.log(`✅ Cascaded "${derivedStatus}" to ${updateResult.rowCount} containers in ${CONTAINER_TABLE} for order ${orderId}, receiver ${receiverId || 'all'}.`);
-
+    console.log(
+      `✅ Cascaded "${derivedStatus}" to ${updateResult.rowCount} containers in ${CONTAINER_TABLE} for order ${orderId}, receiver ${receiverId || "all"}.`,
+    );
   } catch (err) {
     console.error(`❌ Cascade to ${CONTAINER_TABLE} failed:`, err.message);
-    if (err.code === '42703') {  // Column does not exist
-      console.error(`Column error - Verify: 'containers' column exists in 'receivers' table.`);
-      console.error(`Sample query for debug: SELECT id, containers FROM receivers WHERE order_id = ${orderId};`);
-    } else if (err.code === '42P01') {
+    if (err.code === "42703") {
+      // Column does not exist
+      console.error(
+        `Column error - Verify: 'containers' column exists in 'receivers' table.`,
+      );
+      console.error(
+        `Sample query for debug: SELECT id, containers FROM receivers WHERE order_id = ${orderId};`,
+      );
+    } else if (err.code === "42P01") {
       console.error(`Table ${CONTAINER_TABLE} or 'receivers' missing.`);
     }
-    throw err;  // Isolate in main tx
+    throw err; // Isolate in main tx
   }
 }
 // Optional: Define route mapping here (or move to a shared config file)
 const ROUTE_CITY_MAP = {
-  '1': 'Shenzhen',
-  '2': 'Karachi',
-  '3': 'London',
-  '5': 'Dubai',
+  1: "Shenzhen",
+  2: "Karachi",
+  3: "London",
+  5: "Dubai",
   // Add more codes as your system grows
   // Default fallback: keep the code if not mapped
 };
@@ -4804,40 +5546,51 @@ const ROUTE_CITY_MAP = {
  * @param {string} [notificationType='order-status-update'] - Type code for settings lookup
  * @returns {Promise<{success: boolean, messageId?: string, error?: string, skipped?: boolean}>}
  */
-export async function sendShipmentEmail(email, shipmentData, notificationType = 'order-status-update') {
-  if (!email || typeof email !== 'string' || !email.trim().includes('@')) {
+export async function sendShipmentEmail(
+  email,
+  shipmentData,
+  notificationType = "order-status-update",
+) {
+  if (!email || typeof email !== "string" || !email.trim().includes("@")) {
     console.warn(`Invalid or missing email: ${email}`);
-    return { success: false, error: 'Invalid email address' };
+    return { success: false, error: "Invalid email address" };
   }
 
   console.log(`Preparing ${notificationType} email to: ${email}`);
 
   // Clean receiver name
-  const receiverName = String(shipmentData.receiverName || 'Valued Customer')
-    .trim()
-    .replace(/\|.*$/, '')
-    .replace(/\s+/g, ' ')
-    || 'Valued Customer';
+  const receiverName =
+    String(shipmentData.receiverName || "Valued Customer")
+      .trim()
+      .replace(/\|.*$/, "")
+      .replace(/\s+/g, " ") || "Valued Customer";
 
   // Safe defaults for all fields
   const safeData = {
-    statusLabel: String(shipmentData.statusLabel || 'Shipment Updated'),
-    statusMsg: String(shipmentData.statusMsg || 'We have an update on your shipment.'),
-    refId: String(shipmentData.refId || '—'),
-    orderId: String(shipmentData.orderId || '—'),
-    route: String(shipmentData.route || '—'),
-    etaFormatted: String(shipmentData.etaFormatted || 'To be confirmed'),
-    trackLink: String(shipmentData.trackLink || 'https://consolidatetracking.onrender.com/'),
+    statusLabel: String(shipmentData.statusLabel || "Shipment Updated"),
+    statusMsg: String(
+      shipmentData.statusMsg || "We have an update on your shipment.",
+    ),
+    refId: String(shipmentData.refId || "—"),
+    orderId: String(shipmentData.orderId || "—"),
+    route: String(shipmentData.route || "—"),
+    etaFormatted: String(shipmentData.etaFormatted || "To be confirmed"),
+    trackLink: String(
+      shipmentData.trackLink || "https://consolidatetracking.onrender.com/",
+    ),
     receiverName,
   };
 
   // Handle lastUpdated
-  let lastUpdatedStr = new Date().toLocaleString('en-GB');
+  let lastUpdatedStr = new Date().toLocaleString("en-GB");
   if (shipmentData.lastUpdated) {
     try {
       const date = new Date(shipmentData.lastUpdated);
       lastUpdatedStr = !isNaN(date.getTime())
-        ? date.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+        ? date.toLocaleString("en-GB", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })
         : String(shipmentData.lastUpdated);
     } catch {
       lastUpdatedStr = String(shipmentData.lastUpdated);
@@ -4847,10 +5600,12 @@ export async function sendShipmentEmail(email, shipmentData, notificationType = 
 
   // Build template data
   const templateData = {
-    type: 'shipment',
+    type: "shipment",
     ...safeData,
-    updatedItems: Array.isArray(shipmentData.updatedItems) ? shipmentData.updatedItems : [],
-    currentStatus: shipmentData.currentStatus || shipmentData.statusLabel || '',
+    updatedItems: Array.isArray(shipmentData.updatedItems)
+      ? shipmentData.updatedItems
+      : [],
+    currentStatus: shipmentData.currentStatus || shipmentData.statusLabel || "",
   };
 
   try {
@@ -4858,8 +5613,14 @@ export async function sendShipmentEmail(email, shipmentData, notificationType = 
     const settings = await getNotificationSettings(notificationType);
 
     if (!settings || settings.enabled === false) {
-      console.log(`Skipped ${notificationType} email to ${email}: disabled or not configured`);
-      return { success: false, skipped: true, message: `Notification ${notificationType} is disabled` };
+      console.log(
+        `Skipped ${notificationType} email to ${email}: disabled or not configured`,
+      );
+      return {
+        success: false,
+        skipped: true,
+        message: `Notification ${notificationType} is disabled`,
+      };
     }
 
     // ── IMPORTANT: Declare finalSubject EARLY ──────────────────────────────
@@ -4868,65 +5629,76 @@ export async function sendShipmentEmail(email, shipmentData, notificationType = 
     if (settings.subject) {
       finalSubject = settings.subject
         .replace(/{type_name}/gi, settings.name || notificationType)
-        .replace(/{ref_id}/gi, templateData.refId || '—')
-        .replace(/{order_number}/gi, templateData.orderId || '—')
-        .replace(/{status}/gi, templateData.statusLabel || '')
-        .replace(/{customer_name}/gi, templateData.receiverName || 'Valued Customer');
+        .replace(/{ref_id}/gi, templateData.refId || "—")
+        .replace(/{order_number}/gi, templateData.orderId || "—")
+        .replace(/{status}/gi, templateData.statusLabel || "")
+        .replace(
+          /{customer_name}/gi,
+          templateData.receiverName || "Valued Customer",
+        );
     }
 
     // 2. Normalize incoming status
-    let incomingStatus = String(templateData.currentStatus || templateData.statusLabel || '')
+    let incomingStatus = String(
+      templateData.currentStatus || templateData.statusLabel || "",
+    )
       .toLowerCase()
       .trim();
 
     const normalizedIncoming = incomingStatus
-      .replace(/\s+/g, '-')           // spaces → hyphen
-      .replace(/-+/g, '-')            // collapse multiple hyphens
-      .replace(/^shipment-?/i, '');   // remove "shipment" prefix if present
+      .replace(/\s+/g, "-") // spaces → hyphen
+      .replace(/-+/g, "-") // collapse multiple hyphens
+      .replace(/^shipment-?/i, ""); // remove "shipment" prefix if present
 
     console.log(`Normalized incoming status: "${normalizedIncoming}"`);
 
     // 3. Normalize allowed statuses from DB the same way
-    const allowedNormalized = (settings.trigger_statuses || []).map(s =>
+    const allowedNormalized = (settings.trigger_statuses || []).map((s) =>
       String(s)
         .trim()
         .toLowerCase()
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^shipment-?/i, '')
+        .replace(/\s+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^shipment-?/i, ""),
     );
 
-    console.log('Allowed statuses (normalized):', allowedNormalized);
+    console.log("Allowed statuses (normalized):", allowedNormalized);
 
     // 4. Check if allowed
-    const isAllowed = allowedNormalized.length === 0 ||
+    const isAllowed =
+      allowedNormalized.length === 0 ||
       allowedNormalized.includes(normalizedIncoming) ||
       allowedNormalized.includes(incomingStatus); // fallback for original format
 
     if (!isAllowed) {
       console.log(
         `Skipped: status "${incomingStatus}" (normalized "${normalizedIncoming}") ` +
-        `does not match any allowed value`,
-        { allowed: allowedNormalized }
+          `does not match any allowed value`,
+        { allowed: allowedNormalized },
       );
       return {
         success: false,
         skipped: true,
-        message: `Status "${incomingStatus}" not configured for notifications`
+        message: `Status "${incomingStatus}" not configured for notifications`,
       };
     }
 
-    console.log(`Status "${incomingStatus}" → normalized "${normalizedIncoming}" is allowed → proceeding to send`);
+    console.log(
+      `Status "${incomingStatus}" → normalized "${normalizedIncoming}" is allowed → proceeding to send`,
+    );
 
     // ── Safe to use finalSubject here ─────────────────────────────────────
-    console.log(`Sending ${notificationType} email to ${receiverName} (${email})`, {
-      subject: finalSubject,
-      status: templateData.statusLabel,
-      currentStatusNormalized: normalizedIncoming,
-      allowedStatuses: settings.trigger_statuses || 'all',
-    });
+    console.log(
+      `Sending ${notificationType} email to ${receiverName} (${email})`,
+      {
+        subject: finalSubject,
+        status: templateData.statusLabel,
+        currentStatusNormalized: normalizedIncoming,
+        allowedStatuses: settings.trigger_statuses || "all",
+      },
+    );
 
-    console.log('Email template data:', templateData);
+    console.log("Email template data:", templateData);
 
     // Optional: pass custom subject if sendOrderEmail wants to use it
     templateData.customSubject = finalSubject;
@@ -4935,21 +5707,30 @@ export async function sendShipmentEmail(email, shipmentData, notificationType = 
     const result = await sendOrderEmail(email, notificationType, templateData);
 
     if (result.success) {
-      console.log(`Shipment email sent successfully to ${receiverName} (${email}) → Msg ID: ${result.messageId || '—'}`);
+      console.log(
+        `Shipment email sent successfully to ${receiverName} (${email}) → Msg ID: ${result.messageId || "—"}`,
+      );
     } else {
-      console.error(`Failed sending shipment email to ${receiverName} (${email}): ${result.error || 'Unknown error'}`);
+      console.error(
+        `Failed sending shipment email to ${receiverName} (${email}): ${result.error || "Unknown error"}`,
+      );
     }
 
     return result;
-
   } catch (err) {
-    console.error(`Shipment email fatal error for ${email} (${receiverName}):`, {
-      message: err.message,
-      stack: err.stack?.substring(0, 500),
-      notificationType,
-      email,
-    });
-    return { success: false, error: err.message || 'Unexpected error during email preparation' };
+    console.error(
+      `Shipment email fatal error for ${email} (${receiverName}):`,
+      {
+        message: err.message,
+        stack: err.stack?.substring(0, 500),
+        notificationType,
+        email,
+      },
+    );
+    return {
+      success: false,
+      error: err.message || "Unexpected error during email preparation",
+    };
   }
 }
 
@@ -4962,46 +5743,51 @@ export async function advanceStatus(req, res) {
     const { id } = req.params;
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
-      return res.status(400).json({ error: 'Invalid consignment ID.' });
+      return res.status(400).json({ error: "Invalid consignment ID." });
     }
 
-    const { rows } = await pool.query('SELECT status FROM consignments WHERE id = $1', [numericId]);
+    const { rows } = await pool.query(
+      "SELECT status FROM consignments WHERE id = $1",
+      [numericId],
+    );
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Consignment not found' });
+      return res.status(404).json({ error: "Consignment not found" });
     }
 
     const currentStatus = rows[0].status;
 
     // Next status mapping
     const nextStatusMap = {
-      'Drafts Cleared': 'Submitted On Vessel',
-      'Submitted On Vessel': 'Customs Cleared',
-      'Customs Cleared': 'Submitted',
-      'Submitted': 'Under Shipment Processing',
-      'Under Shipment Processing': 'In Transit',
-      'In Transit': 'Arrived at Facility',
-      'Arrived at Facility': 'Ready for Delivery',
-      'Ready for Delivery': 'Arrived at Destination',
-      'Arrived at Destination': 'Delivered',
+      "Drafts Cleared": "Submitted On Vessel",
+      "Submitted On Vessel": "Customs Cleared",
+      "Customs Cleared": "Submitted",
+      Submitted: "Under Shipment Processing",
+      "Under Shipment Processing": "In Transit",
+      "In Transit": "Arrived at Facility",
+      "Arrived at Facility": "Ready for Delivery",
+      "Ready for Delivery": "Arrived at Destination",
+      "Arrived at Destination": "Delivered",
     };
 
     const nextStatus = nextStatusMap[currentStatus];
     if (!nextStatus) {
-      return res.status(400).json({ error: `No next status defined from "${currentStatus}"` });
+      return res
+        .status(400)
+        .json({ error: `No next status defined from "${currentStatus}"` });
     }
 
     // Sync mapping to orders/receivers/containers
     const statusSyncMap = {
-      'Drafts Cleared': 'Order Created',
-      'Submitted On Vessel': 'Ready for Loading',
-      'Customs Cleared': 'Loaded Into Container',
-      'Submitted': 'Shipment Processing',
-      'Under Shipment Processing': 'Shipment In Transit',
-      'In Transit': 'Under Processing',
-      'Arrived at Facility': 'Arrived at Facility',
-      'Ready for Delivery': 'Ready for Delivery',
-      'Arrived at Destination': 'Ready for Delivery',
-      'Delivered': 'Shipment Delivered'
+      "Drafts Cleared": "Order Created",
+      "Submitted On Vessel": "Ready for Loading",
+      "Customs Cleared": "Loaded Into Container",
+      Submitted: "Shipment Processing",
+      "Under Shipment Processing": "Shipment In Transit",
+      "In Transit": "Under Processing",
+      "Arrived at Facility": "Arrived at Facility",
+      "Ready for Delivery": "Ready for Delivery",
+      "Arrived at Destination": "Ready for Delivery",
+      Delivered: "Shipment Delivered",
     };
 
     const syncedStatus = statusSyncMap[nextStatus] || nextStatus;
@@ -5011,55 +5797,59 @@ export async function advanceStatus(req, res) {
     await withTransaction(async (client) => {
       try {
         // 1. Calculate ETA
-        if (nextStatus !== 'Delivered') {
+        if (nextStatus !== "Delivered") {
           const etaResult = await calculateETA(client, syncedStatus);
           consignmentEta = etaResult.eta;
         } else {
-          consignmentEta = new Date().toISOString().split('T')[0];
+          consignmentEta = new Date().toISOString().split("T")[0];
         }
 
         // 2. Update consignment
         await client.query(
-          'UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
-          [nextStatus, consignmentEta, numericId]
+          "UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3",
+          [nextStatus, consignmentEta, numericId],
         );
 
         // 3. Log to consignment_tracking
-        await client.query(`
+        await client.query(
+          `
           INSERT INTO consignment_tracking 
             (consignment_id, event_type, old_status, new_status, timestamp, details, created_at, source, action)
           VALUES 
             ($1, $2, $3, $4, NOW(), $5, NOW(), 'api', 'status_advanced')
-        `, [
-          numericId,
-          'status_advanced',
-          currentStatus,
-          nextStatus,
-          JSON.stringify({
-            reason: 'Manual advance',
-            newEta: consignmentEta,
-            syncedTo: syncedStatus,
-            user: req.user?.id || 'system'
-          })
-        ]);
+        `,
+          [
+            numericId,
+            "status_advanced",
+            currentStatus,
+            nextStatus,
+            JSON.stringify({
+              reason: "Manual advance",
+              newEta: consignmentEta,
+              syncedTo: syncedStatus,
+              user: req.user?.id || "system",
+            }),
+          ],
+        );
 
         // 4. Get linked orders
         const orderIdsRes = await client.query(
-          'SELECT orders FROM consignments WHERE id = $1',
-          [numericId]
+          "SELECT orders FROM consignments WHERE id = $1",
+          [numericId],
         );
         let rawOrders = orderIdsRes.rows[0]?.orders || [];
-        if (typeof rawOrders === 'string') rawOrders = JSON.parse(rawOrders || '[]');
+        if (typeof rawOrders === "string")
+          rawOrders = JSON.parse(rawOrders || "[]");
 
         syncOrderIds = rawOrders
-          .map(oid => parseInt(oid, 10))
-          .filter(oid => !isNaN(oid) && oid > 0);
+          .map((oid) => parseInt(oid, 10))
+          .filter((oid) => !isNaN(oid) && oid > 0);
 
         if (syncOrderIds.length > 0) {
           // Update orders status
           await client.query(
-            'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])',
-            [syncedStatus, syncOrderIds]
+            "UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])",
+            [syncedStatus, syncOrderIds],
           );
 
           // Update receivers status & eta
@@ -5067,13 +5857,13 @@ export async function advanceStatus(req, res) {
             `UPDATE receivers 
              SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP
              WHERE order_id = ANY($3::int[])`,
-            [syncedStatus, consignmentEta, syncOrderIds]
+            [syncedStatus, consignmentEta, syncOrderIds],
           );
 
           // Update container-level status in order_items.container_details and container_status
           const receiversRes = await client.query(
-            'SELECT id, receiver_name, receiver_email FROM receivers WHERE order_id = ANY($1::int[])',
-            [syncOrderIds]
+            "SELECT id, receiver_name, receiver_email FROM receivers WHERE order_id = ANY($1::int[])",
+            [syncOrderIds],
           );
 
           for (const recvRow of receiversRes.rows) {
@@ -5081,20 +5871,22 @@ export async function advanceStatus(req, res) {
 
             // Get all order_items for this receiver
             const itemsRes = await client.query(
-              'SELECT id, container_details FROM order_items WHERE receiver_id = $1',
-              [receiverId]
+              "SELECT id, container_details FROM order_items WHERE receiver_id = $1",
+              [receiverId],
             );
 
             for (const itemRow of itemsRes.rows) {
               const itemId = itemRow.id;
-              let containerDetails = safeParseJsonArray(itemRow.container_details);
+              let containerDetails = safeParseJsonArray(
+                itemRow.container_details,
+              );
 
               // Update status in every container entry
-              containerDetails = containerDetails.map(entry => {
+              containerDetails = containerDetails.map((entry) => {
                 if (entry?.container?.cid) {
                   return {
                     ...entry,
-                    status: syncedStatus
+                    status: syncedStatus,
                   };
                 }
                 return entry;
@@ -5104,31 +5896,42 @@ export async function advanceStatus(req, res) {
                 `UPDATE order_items 
                  SET container_details = $1::jsonb, updated_at = NOW()
                  WHERE id = $2`,
-                [JSON.stringify(containerDetails), itemId]
+                [JSON.stringify(containerDetails), itemId],
               );
 
               // Update container_status table
               const cids = containerDetails
-                .map(e => Number(e?.container?.cid))
-                .filter(cid => !isNaN(cid));
+                .map((e) => Number(e?.container?.cid))
+                .filter((cid) => !isNaN(cid));
 
               if (cids.length > 0) {
-                console.log(`[advanceStatus] Setting container_status.availability = "${syncedStatus}" for cids:`, cids);
+                console.log(
+                  `[advanceStatus] Setting container_status.availability = "${syncedStatus}" for cids:`,
+                  cids,
+                );
 
-                await client.query(`
+                await client.query(
+                  `
                   INSERT INTO container_status (cid, availability, created_time)
-                  VALUES ${cids.map((cid, idx) => `($${idx * 3 + 1}, $${idx * 3 + 2}, NOW())`).join(', ')}
+                  VALUES ${cids.map((cid, idx) => `($${idx * 3 + 1}, $${idx * 3 + 2}, NOW())`).join(", ")}
                   ON CONFLICT (cid) DO UPDATE 
                   SET 
                     availability = EXCLUDED.availability,
                     created_time = NOW()
                   RETURNING cid, availability
-                `, cids.flatMap(cid => [cid, syncedStatus]));
+                `,
+                  cids.flatMap((cid) => [cid, syncedStatus]),
+                );
               }
             }
 
             // Call your helper function if it does more work
-            await updateLinkedContainersStatus(client, receiverId, syncedStatus, 'system');
+            await updateLinkedContainersStatus(
+              client,
+              receiverId,
+              syncedStatus,
+              "system",
+            );
           }
         }
 
@@ -5145,8 +5948,8 @@ export async function advanceStatus(req, res) {
         //           refId: `Consignment #${numericId}`, // or fetch real booking_ref if available
         //           orderId: syncOrderIds[0] || '—',   // primary order or first one
         //           route: '—',                        // ← improve later if you have route data
-        //           etaFormatted: consignmentEta 
-        //             ? new Date(consignmentEta).toLocaleDateString('en-GB') 
+        //           etaFormatted: consignmentEta
+        //             ? new Date(consignmentEta).toLocaleDateString('en-GB')
         //             : 'TBD',
         //           lastUpdated: new Date().toLocaleString('en-GB'),
         //           trackLink: 'https://consolidatetracking.onrender.com/'
@@ -5193,10 +5996,8 @@ export async function advanceStatus(req, res) {
         //           );
         //         }
 
-
         //         // Fire and forget – emails send in background
         //         Promise.allSettled(emailPromises);
-
       } catch (innerErr) {
         throw innerErr;
       }
@@ -5210,13 +6011,14 @@ export async function advanceStatus(req, res) {
         newStatus: nextStatus,
         syncedStatus: syncedStatus,
         newEta: consignmentEta,
-        affectedOrders: syncOrderIds.length
-      }
+        affectedOrders: syncOrderIds.length,
+      },
     });
-
   } catch (err) {
     console.error("Error advancing status:", err.stack || err);
-    res.status(500).json({ error: 'Failed to advance status', details: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to advance status", details: err.message });
   }
 }
 
@@ -5225,7 +6027,7 @@ export async function removeOrderItem(req, res) {
 
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { orderId, itemId } = req.params;
 
@@ -5245,14 +6047,14 @@ export async function removeOrderItem(req, res) {
       WHERE oi.id = $1 AND oi.order_id = $2
       FOR UPDATE
       `,
-      [itemId, orderId]
+      [itemId, orderId],
     );
 
     if (itemRes.rowCount === 0) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
       return res.status(404).json({
         success: false,
-        error: 'Order item not found for this order'
+        error: "Order item not found for this order",
       });
     }
 
@@ -5276,16 +6078,16 @@ export async function removeOrderItem(req, res) {
     const removedWeight = Number(item.assigned_weight_kg || 0);
 
     const removedContainerNumbers = containerDetails
-      .map(cd => cd?.container?.container_number)
+      .map((cd) => cd?.container?.container_number)
       .filter(Boolean);
 
     const removedContainerIds = containerDetails
-      .map(cd => Number(cd?.container?.cid))
+      .map((cd) => Number(cd?.container?.cid))
       .filter(Boolean);
 
     for (const cd of containerDetails) {
       const cid = Number(cd?.container?.cid || 0);
-      const containerNumber = cd?.container?.container_number || '';
+      const containerNumber = cd?.container?.container_number || "";
 
       if (!cid) continue;
 
@@ -5316,31 +6118,35 @@ export async function removeOrderItem(req, res) {
           Number(itemId),
           -Number(cd.assign_total_box || 0),
           -Number(cd.assign_weight || 0),
-          'Unassigned',
-          'Ready for Loading',
-          'UNASSIGN',
-          req.user?.id || req.user?.email || 'system',
-          `Removed shipping item ${itemId}; container assignment cleared`
-        ]
+          "Unassigned",
+          "Ready for Loading",
+          "UNASSIGN",
+          req.user?.id || req.user?.email || "system",
+          `Removed shipping item ${itemId}; container assignment cleared`,
+        ],
       );
     }
 
     // Receiver summary containers clean
-    receiverContainers = receiverContainers.filter(c => {
+    receiverContainers = receiverContainers.filter((c) => {
       const num =
-        typeof c === 'string'
+        typeof c === "string"
           ? c
-          : c?.container_number || c?.container?.container_number || '';
+          : c?.container_number || c?.container?.container_number || "";
 
       const cid =
-        typeof c === 'object'
-          ? Number(c?.cid || c?.container?.cid || 0)
-          : 0;
+        typeof c === "object" ? Number(c?.cid || c?.container?.cid || 0) : 0;
 
-      return !removedContainerNumbers.includes(num) && !removedContainerIds.includes(cid);
+      return (
+        !removedContainerNumbers.includes(num) &&
+        !removedContainerIds.includes(cid)
+      );
     });
 
-    const newQtyDelivered = Math.max(0, Number(item.qty_delivered || 0) - removedQty);
+    const newQtyDelivered = Math.max(
+      0,
+      Number(item.qty_delivered || 0) - removedQty,
+    );
 
     await client.query(
       `
@@ -5355,7 +6161,7 @@ export async function removeOrderItem(req, res) {
         updated_at = NOW()
       WHERE id = $3
       `,
-      [newQtyDelivered, JSON.stringify(receiverContainers), item.receiver_id]
+      [newQtyDelivered, JSON.stringify(receiverContainers), item.receiver_id],
     );
 
     await client.query(
@@ -5366,34 +6172,34 @@ export async function removeOrderItem(req, res) {
         updated_at = NOW()
       WHERE id = $2
       `,
-      [removedQty, orderId]
+      [removedQty, orderId],
     );
 
     await client.query(
       `DELETE FROM order_items WHERE id = $1 AND order_id = $2`,
-      [itemId, orderId]
+      [itemId, orderId],
     );
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
-      message: 'Order item, assigned boxes, and container summary removed successfully',
+      message:
+        "Order item, assigned boxes, and container summary removed successfully",
       itemId: Number(itemId),
       removedQty,
       removedWeight,
-      removedContainers: removedContainerNumbers
+      removedContainers: removedContainerNumbers,
     });
-
   } catch (error) {
-    if (client) await client.query('ROLLBACK');
+    if (client) await client.query("ROLLBACK");
 
-    console.error('[removeOrderItem] Error:', error);
+    console.error("[removeOrderItem] Error:", error);
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to remove order item',
-      message: error.message
+      error: "Failed to remove order item",
+      message: error.message,
     });
   } finally {
     if (client) client.release();
@@ -5403,69 +6209,75 @@ export async function removeReceiver(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { orderId, receiverId } = req.params;
 
-    console.log(`[removeReceiver] Removing receiver ${receiverId} from order ${orderId}`);
+    console.log(
+      `[removeReceiver] Removing receiver ${receiverId} from order ${orderId}`,
+    );
 
     // ── 1. Verify receiver belongs to this order ──────────────────────────
     const receiverCheck = await client.query(
       `SELECT id FROM receivers WHERE id = $1 AND order_id = $2`,
-      [receiverId, orderId]
+      [receiverId, orderId],
     );
 
     if (receiverCheck.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Receiver not found for this order' });
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ error: "Receiver not found for this order" });
     }
 
     // ── 2. Delete child records first (FK constraints) ────────────────────
     const deletedItems = await client.query(
       `DELETE FROM order_items WHERE receiver_id = $1 RETURNING id`,
-      [receiverId]
+      [receiverId],
     );
-    console.log(`[removeReceiver] Deleted ${deletedItems.rowCount} order_items`);
+    console.log(
+      `[removeReceiver] Deleted ${deletedItems.rowCount} order_items`,
+    );
 
     const deletedDropOffs = await client.query(
       `DELETE FROM drop_off_details WHERE receiver_id = $1 RETURNING id`,
-      [receiverId]
+      [receiverId],
     );
-    console.log(`[removeReceiver] Deleted ${deletedDropOffs.rowCount} drop_off_details`);
+    console.log(
+      `[removeReceiver] Deleted ${deletedDropOffs.rowCount} drop_off_details`,
+    );
 
     // ── 3. Delete the receiver ────────────────────────────────────────────
     await client.query(`DELETE FROM receivers WHERE id = $1`, [receiverId]);
     console.log(`[removeReceiver] Receiver ${receiverId} deleted`);
 
     // ── 4. Update order updated_at ────────────────────────────────────────
-    await client.query(
-      `UPDATE orders SET updated_at = NOW() WHERE id = $1`,
-      [orderId]
-    );
+    await client.query(`UPDATE orders SET updated_at = NOW() WHERE id = $1`, [
+      orderId,
+    ]);
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // ── 5. Return updated receivers list ──────────────────────────────────
     const updatedReceivers = await client.query(
       `SELECT *, receiver_marks_and_number AS "marksAndNumber"
        FROM receivers WHERE order_id = $1 ORDER BY id`,
-      [orderId]
+      [orderId],
     );
 
     return res.status(200).json({
-      message: 'Receiver removed successfully',
-      receivers: updatedReceivers.rows.map(r => ({
+      message: "Receiver removed successfully",
+      receivers: updatedReceivers.rows.map((r) => ({
         ...r,
-        eta: r.eta ? String(r.eta).split('T')[0] : '',
-        etd: r.etd ? String(r.etd).split('T')[0] : '',
+        eta: r.eta ? String(r.eta).split("T")[0] : "",
+        etd: r.etd ? String(r.etd).split("T")[0] : "",
       })),
     });
-
   } catch (error) {
-    console.error('[removeReceiver] Error:', error);
-    if (client) await client.query('ROLLBACK');
+    console.error("[removeReceiver] Error:", error);
+    if (client) await client.query("ROLLBACK");
     return res.status(500).json({
-      error: 'Failed to remove receiver',
+      error: "Failed to remove receiver",
       message: error.message,
       code: error.code || null,
       detail: error.detail || null,
@@ -5485,45 +6297,53 @@ export async function changeConsignmentStatus(req, res) {
     const { id } = req.params;
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
-      return res.status(400).json({ error: 'Invalid consignment ID.' });
+      return res.status(400).json({ error: "Invalid consignment ID." });
     }
 
     const { newStatus, reason } = req.body;
 
-    if (!newStatus || typeof newStatus !== 'string' || newStatus.trim() === '') {
-      return res.status(400).json({ error: 'newStatus is required and must be a non-empty string' });
+    if (
+      !newStatus ||
+      typeof newStatus !== "string" ||
+      newStatus.trim() === ""
+    ) {
+      return res.status(400).json({
+        error: "newStatus is required and must be a non-empty string",
+      });
     }
 
     const trimmedStatus = newStatus.trim();
 
     // Fetch current status
     const { rows } = await pool.query(
-      'SELECT status FROM consignments WHERE id = $1',
-      [numericId]
+      "SELECT status FROM consignments WHERE id = $1",
+      [numericId],
     );
 
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Consignment not found' });
+      return res.status(404).json({ error: "Consignment not found" });
     }
 
     const currentStatus = rows[0].status;
 
     if (currentStatus === trimmedStatus) {
-      return res.status(400).json({ error: 'New status is the same as current status' });
+      return res
+        .status(400)
+        .json({ error: "New status is the same as current status" });
     }
 
     // Sync mapping
     const statusSyncMap = {
-      'Drafts Cleared': 'Order Created',
-      'Submitted On Vessel': 'Ready for Loading',
-      'Customs Cleared': 'Loaded Into Container',
-      'Submitted': 'Shipment Processing',
-      'Under Shipment Processing': 'Shipment In Transit',
-      'In Transit': 'Under Processing',
-      'Arrived at Facility': 'Arrived at Facility',
-      'Ready for Delivery': 'Ready for Delivery',
-      'Arrived at Destination': 'Ready for Delivery',
-      'Delivered': 'Shipment Delivered',
+      "Drafts Cleared": "Order Created",
+      "Submitted On Vessel": "Ready for Loading",
+      "Customs Cleared": "Loaded Into Container",
+      Submitted: "Shipment Processing",
+      "Under Shipment Processing": "Shipment In Transit",
+      "In Transit": "Under Processing",
+      "Arrived at Facility": "Arrived at Facility",
+      "Ready for Delivery": "Ready for Delivery",
+      "Arrived at Destination": "Ready for Delivery",
+      Delivered: "Shipment Delivered",
     };
 
     const syncedStatus = statusSyncMap[trimmedStatus] || trimmedStatus;
@@ -5532,84 +6352,90 @@ export async function changeConsignmentStatus(req, res) {
 
     await withTransaction(async (client) => {
       // 1. Calculate ETA
-      if (trimmedStatus !== 'Delivered') {
+      if (trimmedStatus !== "Delivered") {
         const etaResult = await calculateETA(client, syncedStatus);
         consignmentEta = etaResult.eta;
       } else {
-        consignmentEta = new Date().toISOString().split('T')[0];
+        consignmentEta = new Date().toISOString().split("T")[0];
       }
 
       // 2. Update consignment
       await client.query(
-        'UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3',
-        [trimmedStatus, consignmentEta, numericId]
+        "UPDATE consignments SET status = $1, eta = $2, updated_at = NOW() WHERE id = $3",
+        [trimmedStatus, consignmentEta, numericId],
       );
 
       // 3. Log change
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO consignment_tracking 
           (consignment_id, event_type, old_status, new_status, timestamp, details, created_at, source, action)
         VALUES 
           ($1, $2, COALESCE($3::varchar, 'Unknown'), $4, NOW(), $5::jsonb, NOW(), 'api', 'status_changed')
-      `, [
-        numericId,
-        'status_updated',
-        currentStatus,
-        trimmedStatus,
-        JSON.stringify({
-          reason: reason || 'Manual status change',
-          newEta: consignmentEta,
-          syncedTo: syncedStatus,
-          user: req.user?.id || 'system'
-        })
-      ]);
+      `,
+        [
+          numericId,
+          "status_updated",
+          currentStatus,
+          trimmedStatus,
+          JSON.stringify({
+            reason: reason || "Manual status change",
+            newEta: consignmentEta,
+            syncedTo: syncedStatus,
+            user: req.user?.id || "system",
+          }),
+        ],
+      );
 
       // 4. Get linked orders & sync
       const orderIdsRes = await client.query(
-        'SELECT orders FROM consignments WHERE id = $1',
-        [numericId]
+        "SELECT orders FROM consignments WHERE id = $1",
+        [numericId],
       );
       let rawOrders = orderIdsRes.rows[0]?.orders || [];
-      if (typeof rawOrders === 'string') rawOrders = JSON.parse(rawOrders || '[]');
+      if (typeof rawOrders === "string")
+        rawOrders = JSON.parse(rawOrders || "[]");
 
       syncOrderIds = rawOrders
-        .map(oid => parseInt(oid, 10))
-        .filter(oid => !isNaN(oid) && oid > 0);
+        .map((oid) => parseInt(oid, 10))
+        .filter((oid) => !isNaN(oid) && oid > 0);
 
       if (syncOrderIds.length > 0) {
         await client.query(
-          'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])',
-          [syncedStatus, syncOrderIds]
+          "UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($2::int[])",
+          [syncedStatus, syncOrderIds],
         );
 
         await client.query(
           `UPDATE receivers 
            SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP
            WHERE order_id = ANY($3::int[])`,
-          [syncedStatus, consignmentEta, syncOrderIds]
+          [syncedStatus, consignmentEta, syncOrderIds],
         );
 
         // Collect affected receiver IDs
         const receiversRes = await client.query(
-          'SELECT id FROM receivers WHERE order_id = ANY($1::int[])',
-          [syncOrderIds]
+          "SELECT id FROM receivers WHERE order_id = ANY($1::int[])",
+          [syncOrderIds],
         );
-        affectedReceiverIds = receiversRes.rows.map(r => r.id);
+        affectedReceiverIds = receiversRes.rows.map((r) => r.id);
 
         // Update containers
         for (const recvRow of receiversRes.rows) {
           const receiverId = recvRow.id;
 
           const itemsRes = await client.query(
-            'SELECT id, container_details FROM order_items WHERE receiver_id = $1',
-            [receiverId]
+            "SELECT id, container_details FROM order_items WHERE receiver_id = $1",
+            [receiverId],
           );
 
           for (const itemRow of itemsRes.rows) {
             const itemId = itemRow.id;
-            let containerDetails = safeParseJsonArray(itemRow.container_details);
+            let containerDetails = safeParseJsonArray(
+              itemRow.container_details,
+            );
 
-            containerDetails = containerDetails.map(entry => {
+            containerDetails = containerDetails.map((entry) => {
               if (entry?.container?.cid) {
                 return { ...entry, status: syncedStatus };
               }
@@ -5620,38 +6446,53 @@ export async function changeConsignmentStatus(req, res) {
               `UPDATE order_items 
                SET container_details = $1::jsonb, updated_at = NOW()
                WHERE id = $2`,
-              [JSON.stringify(containerDetails), itemId]
+              [JSON.stringify(containerDetails), itemId],
             );
 
             const cids = containerDetails
-              .map(e => Number(e?.container?.cid))
-              .filter(cid => !isNaN(cid));
+              .map((e) => Number(e?.container?.cid))
+              .filter((cid) => !isNaN(cid));
 
             if (cids.length > 0) {
-              await client.query(`
+              await client.query(
+                `
                 INSERT INTO container_status (cid, availability, created_time)
-                VALUES ${cids.map((cid, idx) => `($${idx * 3 + 1}, $${idx * 3 + 2}, NOW())`).join(', ')}
+                VALUES ${cids.map((cid, idx) => `($${idx * 3 + 1}, $${idx * 3 + 2}, NOW())`).join(", ")}
                 ON CONFLICT (cid) DO UPDATE 
                 SET availability = EXCLUDED.availability, created_time = NOW()
-              `, cids.flatMap(cid => [cid, syncedStatus]));
+              `,
+                cids.flatMap((cid) => [cid, syncedStatus]),
+              );
             }
           }
 
-          await updateLinkedContainersStatus(client, receiverId, syncedStatus, 'system');
+          await updateLinkedContainersStatus(
+            client,
+            receiverId,
+            syncedStatus,
+            "system",
+          );
         }
       }
 
       // Existing notification
       try {
-        const updated = await client.query('SELECT * FROM consignments WHERE id = $1', [numericId]);
-        await sendNotification(updated.rows[0], `status_changed_to_${trimmedStatus}`, {
-          reason: reason || 'Manual change',
-          syncedOrders: syncOrderIds.length,
-          syncedStatus,
-          previousStatus: currentStatus
-        });
+        const updated = await client.query(
+          "SELECT * FROM consignments WHERE id = $1",
+          [numericId],
+        );
+        await sendNotification(
+          updated.rows[0],
+          `status_changed_to_${trimmedStatus}`,
+          {
+            reason: reason || "Manual change",
+            syncedOrders: syncOrderIds.length,
+            syncedStatus,
+            previousStatus: currentStatus,
+          },
+        );
       } catch (notifErr) {
-        console.warn('Notification failed:', notifErr);
+        console.warn("Notification failed:", notifErr);
       }
     });
     // ───────────────────────────────────────────────────────
@@ -5677,8 +6518,8 @@ export async function changeConsignmentStatus(req, res) {
     //     JOIN receivers r ON oi.receiver_id = r.id
     //     JOIN orders o ON oi.order_id = o.id
     //     JOIN consignments c ON o.id = ANY(
-    //       SELECT jsonb_array_elements_text(c.orders)::int 
-    //       FROM consignments c 
+    //       SELECT jsonb_array_elements_text(c.orders)::int
+    //       FROM consignments c
     //       WHERE c.id = $1
     //     )
     //     WHERE r.receiver_email IS NOT NULL
@@ -5780,33 +6621,34 @@ export async function changeConsignmentStatus(req, res) {
         newStatus: trimmedStatus,
         syncedStatus,
         newEta: consignmentEta,
-        affectedOrders: syncOrderIds.length
-      }
+        affectedOrders: syncOrderIds.length,
+      },
     });
-
   } catch (err) {
     console.error("Error changing status:", err.stack || err);
-    return res.status(500).json({ error: 'Failed to change status', details: err.message });
+    return res
+      .status(500)
+      .json({ error: "Failed to change status", details: err.message });
   }
 }
-
-
 
 export async function updateSpecificItemsStatus(req, res) {
   const { orderId } = req.params;
   const {
     itemRefs,
-    receiverId,             // optional – extra safety filter
+    receiverId, // optional – extra safety filter
     status,
     notifyClient = true,
     notifyParties = true,
-    forceRecalcEta = false
+    forceRecalcEta = false,
   } = req.body || {};
 
-  const created_by = req.user?.id || 'system';
+  const created_by = req.user?.id || "system";
 
   if (!Array.isArray(itemRefs) || itemRefs.length === 0) {
-    return res.status(400).json({ error: "itemRefs must be a non-empty array" });
+    return res
+      .status(400)
+      .json({ error: "itemRefs must be a non-empty array" });
   }
 
   if (itemRefs.length > 20) {
@@ -5816,76 +6658,91 @@ export async function updateSpecificItemsStatus(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // 1. Validate & normalize status
-    const trimmedStatus = (status || '').trim().toLowerCase();
+    const trimmedStatus = (status || "").trim().toLowerCase();
     const validStatuses = [
-      'ready for loading',
-      'loaded into container',
-      'shipment processing',
-      'shipment in transit',
-      'under processing',
-      'arrived at facility',
-      'ready for delivery',
-      'shipment delivered'
+      "ready for loading",
+      "loaded into container",
+      "shipment processing",
+      "shipment in transit",
+      "under processing",
+      "arrived at facility",
+      "ready for delivery",
+      "shipment delivered",
     ];
 
     if (!trimmedStatus || !validStatuses.includes(trimmedStatus)) {
-      throw new Error(`Invalid status. Allowed: ${validStatuses.map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(', ')}`);
+      throw new Error(
+        `Invalid status. Allowed: ${validStatuses.map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(", ")}`,
+      );
     }
 
-    const normalizedStatus = validStatuses.find(s => s === trimmedStatus);
+    const normalizedStatus = validStatuses.find((s) => s === trimmedStatus);
 
     // 2. Update order_items
-    let extraWhere = '';
+    let extraWhere = "";
     const queryParams = [normalizedStatus, Number(orderId), itemRefs];
 
     if (receiverId) {
-      extraWhere = ' AND receiver_id = $4';
+      extraWhere = " AND receiver_id = $4";
       queryParams.push(Number(receiverId));
     }
 
-    const updateResult = await client.query(`
+    const updateResult = await client.query(
+      `
       UPDATE order_items
          SET consignment_status = $1,
              updated_at = CURRENT_TIMESTAMP
        WHERE order_id = $2
          AND item_ref = ANY($3::text[])${extraWhere}
    RETURNING id, receiver_id, item_ref, consignment_status
-    `, queryParams);
+    `,
+      queryParams,
+    );
 
     if (updateResult.rowCount === 0) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
       return res.status(404).json({
         error: "No matching items found",
-        hint: receiverId ? "Item(s) may not belong to this receiver" : "Check item references"
+        hint: receiverId
+          ? "Item(s) may not belong to this receiver"
+          : "Check item references",
       });
     }
 
     const updatedRows = updateResult.rows;
-    const affectedReceiverIds = [...new Set(updatedRows.map(r => r.receiver_id))];
+    const affectedReceiverIds = [
+      ...new Set(updatedRows.map((r) => r.receiver_id)),
+    ];
 
     // 3. Auto-upgrade receiver status if all items delivered
     for (const rid of affectedReceiverIds) {
-      const agg = await client.query(`
+      const agg = await client.query(
+        `
         SELECT 
           COUNT(*) AS total,
           COUNT(CASE WHEN consignment_status = 'Shipment Delivered' THEN 1 END) AS delivered
         FROM order_items
         WHERE receiver_id = $1
-      `, [rid]);
+      `,
+        [rid],
+      );
 
       const { total, delivered } = agg.rows[0];
 
       if (total > 0 && delivered === total) {
-        await client.query(`
+        await client.query(
+          `
           UPDATE receivers
              SET status = 'Shipment Delivered',
                  updated_at = CURRENT_TIMESTAMP
            WHERE id = $1
              AND status != 'Shipment Delivered'
-        `, [rid]);
+        `,
+          [rid],
+        );
       }
     }
 
@@ -5893,47 +6750,56 @@ export async function updateSpecificItemsStatus(req, res) {
     if (forceRecalcEta) {
       for (const rid of affectedReceiverIds) {
         // Replace with your real ETA logic when available
-        const etaResult = { eta: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) };
-        await client.query(`
+        const etaResult = {
+          eta: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        };
+        await client.query(
+          `
           UPDATE receivers 
              SET eta = $1, updated_at = CURRENT_TIMESTAMP 
            WHERE id = $2
-        `, [etaResult.eta, rid]);
+        `,
+          [etaResult.eta, rid],
+        );
       }
     }
 
     // 5. Update order-level min ETA
     const minEtaRes = await client.query(
       `SELECT MIN(eta) AS min_eta FROM receivers WHERE order_id = $1`,
-      [Number(orderId)]
+      [Number(orderId)],
     );
 
     if (minEtaRes.rows[0]?.min_eta) {
       await client.query(
         `UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-        [minEtaRes.rows[0].min_eta, Number(orderId)]
+        [minEtaRes.rows[0].min_eta, Number(orderId)],
       );
     }
 
     // 6. Log each change
     for (const row of updatedRows) {
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO order_tracking 
           (order_id, receiver_id, item_ref, status, created_by, created_time)
         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-      `, [
-        Number(orderId),
-        row.receiver_id,
-        row.item_ref,
-        normalizedStatus,
-        created_by
-      ]);
+      `,
+        [
+          Number(orderId),
+          row.receiver_id,
+          row.item_ref,
+          normalizedStatus,
+          created_by,
+        ],
+      );
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     // 7. Fetch order info (shared for all notifications)
-    const orderResult = await pool.query(`
+    const orderResult = await pool.query(
+      `
       SELECT 
         booking_ref,
         place_of_loading,
@@ -5943,28 +6809,33 @@ export async function updateSpecificItemsStatus(req, res) {
         sender_name
       FROM orders 
       WHERE id = $1
-    `, [Number(orderId)]);
+    `,
+      [Number(orderId)],
+    );
 
     const order = orderResult.rows[0] || {};
 
-    const routeDisplay = order.place_of_loading && order.place_of_delivery
-      ? `${order.place_of_loading} → ${order.place_of_delivery}`
-      : (order.place_of_delivery || order.place_of_loading || '—');
+    const routeDisplay =
+      order.place_of_loading && order.place_of_delivery
+        ? `${order.place_of_loading} → ${order.place_of_delivery}`
+        : order.place_of_delivery || order.place_of_loading || "—";
 
     const templateBase = {
-      statusLabel: normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
+      statusLabel:
+        normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
       statusMsg: getStatusMessage(normalizedStatus), // assume this exists
-      refId: order.booking_ref || '—',
+      refId: order.booking_ref || "—",
       orderId: orderId,
       route: routeDisplay,
-      etaFormatted: order.eta_formatted || '—',
+      etaFormatted: order.eta_formatted || "—",
       lastUpdated: new Date(),
-      trackLink: 'https://consolidatetracking.onrender.com/',
-      currentStatus: normalizedStatus  // used for trigger check
+      trackLink: "https://consolidatetracking.onrender.com/",
+      currentStatus: normalizedStatus, // used for trigger check
     };
 
     // 8. Fetch people to notify
-    const peopleRes = await pool.query(`
+    const peopleRes = await pool.query(
+      `
       -- Sender
       SELECT
         'sender' AS party,
@@ -5986,7 +6857,9 @@ export async function updateSpecificItemsStatus(req, res) {
       WHERE id = ANY($2::int[])
         AND receiver_email IS NOT NULL
         AND receiver_email != ''
-    `, [Number(orderId), affectedReceiverIds]);
+    `,
+      [Number(orderId), affectedReceiverIds],
+    );
 
     const people = peopleRes.rows;
 
@@ -5998,21 +6871,23 @@ export async function updateSpecificItemsStatus(req, res) {
     for (const person of people) {
       if (!person.email?.trim()) continue;
 
-      const isSender = person.party === 'sender';
+      const isSender = person.party === "sender";
 
       // Determine notification type
       const notificationType = isSender
-        ? 'order-status-update'   // or 'order-created' for new orders
-        : 'order-status-update';
+        ? "order-status-update" // or 'order-created' for new orders
+        : "order-status-update";
 
       const templateData = {
         ...templateBase,
         receiverName: isSender
-          ? 'Valued Customer'
-          : (person.name?.trim() || 'Receiver')
+          ? "Valued Customer"
+          : person.name?.trim() || "Receiver",
       };
 
-      console.log(`Preparing ${notificationType} email for ${person.party} (${person.email})`);
+      console.log(
+        `Preparing ${notificationType} email for ${person.party} (${person.email})`,
+      );
 
       //     emailPromises.push(
       // //  sendShipmentEmail(person.email, templateData, notificationType)
@@ -6035,47 +6910,113 @@ export async function updateSpecificItemsStatus(req, res) {
     return res.status(200).json({
       success: true,
       updatedCount: updateResult.rowCount,
-      updatedItems: updatedRows.map(r => ({
+      updatedItems: updatedRows.map((r) => ({
         itemRef: r.item_ref,
         receiverId: r.receiver_id,
-        status: r.consignment_status
+        status: r.consignment_status,
       })),
       notifiedCount: people.length,
-      message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`
+      message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`,
     });
-
   } catch (err) {
-    if (client) await client.query('ROLLBACK');
-    console.error('updateSpecificItemsStatus error:', err);
+    if (client) await client.query("ROLLBACK");
+    console.error("updateSpecificItemsStatus error:", err);
     return res.status(500).json({
-      error: 'Failed to update items',
-      details: err.message
+      error: "Failed to update items",
+      details: err.message,
     });
   } finally {
     if (client) client.release();
   }
 }
-async function triggerNotifications(order, status, notifyClient, notifyParties) {
-  const { booking_ref, sender_email, sender_contact, receiver_email, receiver_contact } = order;
-  const clientEmail = 'support2@royalgulfshipping.com'; // Assume from order or auth
+async function triggerNotifications(
+  order,
+  status,
+  notifyClient,
+  notifyParties,
+) {
+  const {
+    booking_ref,
+    sender_email,
+    sender_contact,
+    receiver_email,
+    receiver_contact,
+  } = order;
+  const clientEmail = "support2@royalgulfshipping.com"; // Assume from order or auth
 
   // Mapping: Which statuses trigger what
   const notificationRules = {
-    'Received for Shipment': { client: true, parties: false, message: 'Order received and in process.' },
-    'Waiting for Authentication': { client: true, parties: true, message: 'Please authenticate shipment. Click to verify.' },
-    'Shipper Authentication Confirmed': { client: true, parties: true, message: 'Shipper confirmed. Awaiting consignee.' },
-    'Waiting for Consignee Authentication': { client: true, parties: true, message: 'Receiver authentication needed.' },
-    'Waiting for Shipper Authentication (if applicable)': { client: true, parties: true, message: 'Shipper re-authentication required.' },
-    'Consignee Authentication Confirmed': { client: true, parties: true, message: 'Consignee confirmed. Proceeding.' },
-    'In Process': { client: true, parties: false, message: 'Shipment processing complete. Ready for next steps.' },
-    'Ready for Loading': { client: true, parties: false, message: 'Shipment ready for container loading.' },
-    'Loaded into Container': { client: true, parties: false, message: 'Loaded into container.' },
-    'Departed for Port': { client: true, parties: false, message: 'Vessel sailed from Karachi.' },
-    'Offloaded at Port': { client: true, parties: false, message: 'Arrived and offloaded at Dubai port.' },
-    'Clearance Completed': { client: true, parties: false, message: 'Customs cleared. Ready for collection.' },
-    'Hold': { client: true, parties: false, message: 'Shipment on hold. Contact support.' },
-    'Cancelled': { client: true, parties: true, message: 'Shipment cancelled.' },
-    'Delivered': { client: true, parties: true, message: 'Shipment delivered successfully!' }
+    "Received for Shipment": {
+      client: true,
+      parties: false,
+      message: "Order received and in process.",
+    },
+    "Waiting for Authentication": {
+      client: true,
+      parties: true,
+      message: "Please authenticate shipment. Click to verify.",
+    },
+    "Shipper Authentication Confirmed": {
+      client: true,
+      parties: true,
+      message: "Shipper confirmed. Awaiting consignee.",
+    },
+    "Waiting for Consignee Authentication": {
+      client: true,
+      parties: true,
+      message: "Receiver authentication needed.",
+    },
+    "Waiting for Shipper Authentication (if applicable)": {
+      client: true,
+      parties: true,
+      message: "Shipper re-authentication required.",
+    },
+    "Consignee Authentication Confirmed": {
+      client: true,
+      parties: true,
+      message: "Consignee confirmed. Proceeding.",
+    },
+    "In Process": {
+      client: true,
+      parties: false,
+      message: "Shipment processing complete. Ready for next steps.",
+    },
+    "Ready for Loading": {
+      client: true,
+      parties: false,
+      message: "Shipment ready for container loading.",
+    },
+    "Loaded into Container": {
+      client: true,
+      parties: false,
+      message: "Loaded into container.",
+    },
+    "Departed for Port": {
+      client: true,
+      parties: false,
+      message: "Vessel sailed from Karachi.",
+    },
+    "Offloaded at Port": {
+      client: true,
+      parties: false,
+      message: "Arrived and offloaded at Dubai port.",
+    },
+    "Clearance Completed": {
+      client: true,
+      parties: false,
+      message: "Customs cleared. Ready for collection.",
+    },
+    Hold: {
+      client: true,
+      parties: false,
+      message: "Shipment on hold. Contact support.",
+    },
+    Cancelled: { client: true, parties: true, message: "Shipment cancelled." },
+    Delivered: {
+      client: true,
+      parties: true,
+      message: "Shipment delivered successfully!",
+    },
     // 'Containers Returned (Internal only)': No notification
   };
 
@@ -6086,16 +7027,30 @@ async function triggerNotifications(order, status, notifyClient, notifyParties) 
   const authLink = `https://portal.royalgulf.com/auth/${order.id}`; // Dynamic link
 
   if (notifyClient && rule.client) {
-    await sendEmail(clientEmail, `Status Update: ${status}`, `${baseMessage} ${status.includes('Authentication') ? `Auth link: ${authLink}` : ''}`);
+    await sendEmail(
+      clientEmail,
+      `Status Update: ${status}`,
+      `${baseMessage} ${status.includes("Authentication") ? `Auth link: ${authLink}` : ""}`,
+    );
   }
 
   if (notifyParties && rule.parties) {
     // Sender
-    if (sender_email) await sendEmail(sender_email, `Action Required: ${status}`, `${baseMessage} ${authLink}`);
+    if (sender_email)
+      await sendEmail(
+        sender_email,
+        `Action Required: ${status}`,
+        `${baseMessage} ${authLink}`,
+      );
     if (sender_contact) await sendSMS(sender_contact, baseMessage); // Pseudo SMS
 
     // Receiver
-    if (receiver_email) await sendEmail(receiver_email, `Action Required: ${status}`, `${baseMessage} ${authLink}`);
+    if (receiver_email)
+      await sendEmail(
+        receiver_email,
+        `Action Required: ${status}`,
+        `${baseMessage} ${authLink}`,
+      );
     if (receiver_contact) await sendSMS(receiver_contact, baseMessage);
   }
 }
@@ -6127,18 +7082,20 @@ async function handleAutoTransitions(client, orderId, newStatus) {
 }
 
 export async function getOrderByItemRef(req, res) {
-  console.log('Received request for item ref:', req.params);
+  console.log("Received request for item ref:", req.params);
   const { ref } = req.params;
 
-  if (!ref || typeof ref !== 'string' || ref.trim() === '') {
+  if (!ref || typeof ref !== "string" || ref.trim() === "") {
     return res.status(400).json({
       success: false,
-      message: 'Item reference is required'
+      message: "Item reference is required",
     });
   }
 
   const pattern = `%${ref.trim().toUpperCase()}%`;
-  console.log(`[trackByItemRef] Searching for item ref pattern: "${pattern}" (original: ${ref})`);
+  console.log(
+    `[trackByItemRef] Searching for item ref pattern: "${pattern}" (original: ${ref})`,
+  );
 
   try {
     const query = `
@@ -6231,7 +7188,7 @@ export async function getOrderByItemRef(req, res) {
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: `No items found matching reference "${ref.trim()}"`
+        message: `No items found matching reference "${ref.trim()}"`,
       });
     }
 
@@ -6240,7 +7197,7 @@ export async function getOrderByItemRef(req, res) {
     // ────────────────────────────────────────────────
     const orderMap = {};
 
-    rows.forEach(row => {
+    rows.forEach((row) => {
       const orderId = row.order_id;
 
       if (!orderMap[orderId]) {
@@ -6255,47 +7212,50 @@ export async function getOrderByItemRef(req, res) {
           place_of_delivery: row.place_of_delivery || null,
           total_assigned_qty: row.total_assigned_qty || 0,
           sender: {
-            name: row.sender_name || '—',
-            contact: row.sender_contact || '—',
-            email: row.sender_email || '—'
+            name: row.sender_name || "—",
+            contact: row.sender_contact || "—",
+            email: row.sender_email || "—",
           },
           transport: {
-            type: row.transport_type || '—',
-            drop_method: row.drop_method || '—',
-            delivery_date: row.delivery_date || '—'
+            type: row.transport_type || "—",
+            drop_method: row.drop_method || "—",
+            delivery_date: row.delivery_date || "—",
           },
-          receivers: {}
+          receivers: {},
         };
       }
 
       const ord = orderMap[orderId];
-      const recvKey = row.receiver_id ? row.receiver_id : `no_receiver_${orderId}`;
+      const recvKey = row.receiver_id
+        ? row.receiver_id
+        : `no_receiver_${orderId}`;
 
       if (!ord.receivers[recvKey]) {
         const statusSequence = [
-          'Order Created',
-          'Ready for Loading',
-          'Loaded Into Container',
-          'Shipment Processing',
-          'Shipment In Transit',
-          'Under Processing',
-          'Arrived at Facility',
-          'Ready for Delivery',
-          'Shipment Delivered'
+          "Order Created",
+          "Ready for Loading",
+          "Loaded Into Container",
+          "Shipment Processing",
+          "Shipment In Transit",
+          "Under Processing",
+          "Arrived at Facility",
+          "Ready for Delivery",
+          "Shipment Delivered",
         ];
 
-        const receiverCurrent = row.receiver_base_status || 'Order Created';
+        const receiverCurrent = row.receiver_base_status || "Order Created";
         const currentIdx = statusSequence.indexOf(receiverCurrent);
-        const remaining = currentIdx === -1 || currentIdx >= statusSequence.length - 1
-          ? []
-          : statusSequence.slice(currentIdx + 1);
+        const remaining =
+          currentIdx === -1 || currentIdx >= statusSequence.length - 1
+            ? []
+            : statusSequence.slice(currentIdx + 1);
 
         ord.receivers[recvKey] = {
           receiver_id: row.receiver_id || null,
-          name: row.receiver_name || 'Unassigned',
-          contact: row.receiver_contact || '—',
-          email: row.receiver_email || '—',
-          address: row.receiver_address || '—',
+          name: row.receiver_name || "Unassigned",
+          contact: row.receiver_contact || "—",
+          email: row.receiver_email || "—",
+          address: row.receiver_address || "—",
           status: receiverCurrent,
           eta: row.receiver_eta || null,
           containers: row.receiver_containers || [],
@@ -6303,7 +7263,7 @@ export async function getOrderByItemRef(req, res) {
           items: {},
           current_status: receiverCurrent,
           status_history: [],
-          remaining_status_steps: remaining
+          remaining_status_steps: remaining,
         };
       }
 
@@ -6312,15 +7272,17 @@ export async function getOrderByItemRef(req, res) {
       // ── Add tracking history (deduplicated by ct.id) ──────────────────────
       if (row.ct_tracking_id) {
         const alreadyExists = recv.status_history.some(
-          h => h.tracking_id === row.ct_tracking_id
+          (h) => h.tracking_id === row.ct_tracking_id,
         );
 
         if (!alreadyExists) {
           const notes = [
-            row.reason ? `Reason: ${row.reason}` : '',
-            row.location ? `Location: ${row.location}` : '',
-            row.ct_details?.notes ? row.ct_details.notes : ''
-          ].filter(Boolean).join(' | ');
+            row.reason ? `Reason: ${row.reason}` : "",
+            row.location ? `Location: ${row.location}` : "",
+            row.ct_details?.notes ? row.ct_details.notes : "",
+          ]
+            .filter(Boolean)
+            .join(" | ");
 
           recv.status_history.push({
             tracking_id: row.ct_tracking_id,
@@ -6331,7 +7293,7 @@ export async function getOrderByItemRef(req, res) {
             details: row.ct_details || {},
             reason: row.reason || null,
             location: row.location || null,
-            notes: notes || null
+            notes: notes || null,
           });
         }
       }
@@ -6341,40 +7303,41 @@ export async function getOrderByItemRef(req, res) {
         if (!recv.items[row.item_id]) {
           const total = Number(row.total_number) || 0;
           const assigned = rows
-            .filter(r => r.item_id === row.item_id)
+            .filter((r) => r.item_id === row.item_id)
             .reduce((sum, r) => sum + (Number(r.assigned_qty) || 0), 0);
 
           recv.items[row.item_id] = {
             item_id: row.item_id,
-            item_ref: row.item_ref || '—',
-            category: row.category || '—',
-            subcategory: row.subcategory || '—',
-            type: row.type || '—',
+            item_ref: row.item_ref || "—",
+            category: row.category || "—",
+            subcategory: row.subcategory || "—",
+            type: row.type || "—",
             total_number: total,
             weight: Number(row.weight) || 0,
             assigned_qty: assigned,
             remaining_items: total - assigned,
-            progress_percent: total > 0 ? Math.round((assigned / total) * 100) : 0,
-            assignments: []
+            progress_percent:
+              total > 0 ? Math.round((assigned / total) * 100) : 0,
+            assignments: [],
           };
         }
 
         if (row.assignment_id) {
           recv.items[row.item_id].assignments.push({
             assignment_id: row.assignment_id,
-            container_number: row.container_number || '—',
+            container_number: row.container_number || "—",
             assigned_qty: Number(row.assigned_qty) || 0,
-            status: row.assign_status || '—',
+            status: row.assign_status || "—",
             created_at: row.assign_created_at,
-            notes: row.assign_notes || ''
+            notes: row.assign_notes || "",
           });
         }
       }
     });
 
     // ── Finalize & sort history per receiver ───────────────────────────────
-    const result = Object.values(orderMap).map(order => {
-      Object.values(order.receivers).forEach(recv => {
+    const result = Object.values(orderMap).map((order) => {
+      Object.values(order.receivers).forEach((recv) => {
         // Sort history descending (newest first)
         recv.status_history.sort((a, b) => new Date(b.time) - new Date(a.time));
 
@@ -6389,10 +7352,10 @@ export async function getOrderByItemRef(req, res) {
 
       return {
         ...order,
-        receivers: Object.values(order.receivers).map(r => ({
+        receivers: Object.values(order.receivers).map((r) => ({
           ...r,
-          items: Object.values(r.items)
-        }))
+          items: Object.values(r.items),
+        })),
       };
     });
 
@@ -6400,15 +7363,14 @@ export async function getOrderByItemRef(req, res) {
       success: true,
       data: result.length === 1 ? result[0] : result,
       count: result.length,
-      message: `Found ${result.length} order(s) containing item reference matching "${ref.trim()}"`
+      message: `Found ${result.length} order(s) containing item reference matching "${ref.trim()}"`,
     });
-
   } catch (err) {
-    console.error('getOrderByItemRef error:', err.stack || err);
+    console.error("getOrderByItemRef error:", err.stack || err);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch item tracking details',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      message: "Failed to fetch item tracking details",
+      error: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
 }
@@ -6417,14 +7379,17 @@ export async function getOrderByTrackingId(req, res) {
   const { id } = req.params;
 
   if (!id?.trim()) {
-    return res.status(400).json({ success: false, message: 'Consignment number required' });
+    return res
+      .status(400)
+      .json({ success: false, message: "Consignment number required" });
   }
 
   const consNumber = id.trim().toUpperCase();
 
   try {
     // 1. Fetch consignment core data
-    const consRes = await pool.query(`
+    const consRes = await pool.query(
+      `
       SELECT 
         c.id AS consignment_id,
         c.consignment_number,
@@ -6444,10 +7409,14 @@ export async function getOrderByTrackingId(req, res) {
         c.orders
       FROM consignments c
       WHERE c.consignment_number = $1
-    `, [consNumber]);
+    `,
+      [consNumber],
+    );
 
     if (consRes.rowCount === 0) {
-      return res.status(404).json({ success: false, message: 'Consignment not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Consignment not found" });
     }
 
     const cons = consRes.rows[0];
@@ -6455,18 +7424,26 @@ export async function getOrderByTrackingId(req, res) {
     // Parse containers safely
     let containers = [];
     try {
-      containers = typeof cons.containers === 'string' ? JSON.parse(cons.containers) : cons.containers || [];
+      containers =
+        typeof cons.containers === "string"
+          ? JSON.parse(cons.containers)
+          : cons.containers || [];
     } catch (e) {
-      console.warn('Invalid consignment containers JSON:', e);
+      console.warn("Invalid consignment containers JSON:", e);
     }
 
     // Parse order IDs safely
     let orderIds = [];
     try {
-      const rawOrders = typeof cons.orders === 'string' ? JSON.parse(cons.orders) : cons.orders || [];
-      orderIds = rawOrders.map(v => parseInt(v, 10)).filter(n => !isNaN(n) && n > 0);
+      const rawOrders =
+        typeof cons.orders === "string"
+          ? JSON.parse(cons.orders)
+          : cons.orders || [];
+      orderIds = rawOrders
+        .map((v) => parseInt(v, 10))
+        .filter((n) => !isNaN(n) && n > 0);
     } catch (e) {
-      console.warn('Invalid orders array in consignment:', e);
+      console.warn("Invalid orders array in consignment:", e);
     }
 
     let orders = [];
@@ -6476,7 +7453,7 @@ export async function getOrderByTrackingId(req, res) {
       total_items: 0,
       progress_percent: 0,
       active_containers: [],
-      latest_activity: null
+      latest_activity: null,
     };
 
     if (orderIds.length > 0) {
@@ -6525,8 +7502,8 @@ export async function getOrderByTrackingId(req, res) {
             'type',            COALESCE(oi.type, ''),
             'pickupLocation',  COALESCE(oi.pickup_location, ''),
             'deliveryAddress', COALESCE(oi.delivery_address, ''),
-            'totalNumber',     ${safeIntCast('oi.total_number')},
-            'weight',          ${safeNumericCast('oi.weight')},
+            'totalNumber',     ${safeIntCast("oi.total_number")},
+            'weight',          ${safeNumericCast("oi.weight")},
             'totalWeight',     0,
             'itemRef',         COALESCE(oi.item_ref, ''),
             'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
@@ -6545,7 +7522,8 @@ export async function getOrderByTrackingId(req, res) {
       `;
 
       // Fetch orders with rich receivers
-      const ordersRes = await pool.query(`
+      const ordersRes = await pool.query(
+        `
         SELECT 
           o.id AS order_id,
           o.booking_ref,
@@ -6570,8 +7548,8 @@ export async function getOrderByTrackingId(req, res) {
                r.receiver_contact            AS "receiverContact",
                r.receiver_address            AS "receiverAddress",
                r.receiver_email              AS "receiverEmail",
-               ${safeIntCast('r.total_number')}       AS "totalNumber",
-               ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+               ${safeIntCast("r.total_number")}       AS "totalNumber",
+               ${safeNumericCast("r.total_weight")}   AS "totalWeight",
                r.receiver_ref                AS "receiverRef",
                r.remarks,
                r.containers,
@@ -6584,7 +7562,7 @@ export async function getOrderByTrackingId(req, res) {
                r.consignment_marks           AS "consignmentMarks",
                r.consignment_voyage          AS "consignmentVoyage",
                r.full_partial                AS "fullPartial",
-               ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+               ${safeIntCast("r.qty_delivered")}      AS "qtyDelivered",
                ${shippingDetailsAgg}                  AS "shippingDetails",
                ${shippingDetailsAgg.replace('"shippingDetails"', '"shippingdetails"')} AS "shippingdetails",
                COALESCE((
@@ -6608,7 +7586,9 @@ export async function getOrderByTrackingId(req, res) {
         LEFT JOIN transport_details t ON t.order_id = o.id
         WHERE o.id = ANY($1::int[])
         ORDER BY o.created_at DESC
-      `, [orderIds]);
+      `,
+        [orderIds],
+      );
 
       // ────────────────────────────────────────────────
       // Post-process to build summary (like old function)
@@ -6616,10 +7596,14 @@ export async function getOrderByTrackingId(req, res) {
       const orderMap = {};
       const allContainers = new Set();
 
-      ordersRes.rows.forEach(row => {
-        let receivers = row.receivers || '[]';
-        if (typeof receivers === 'string') {
-          try { receivers = JSON.parse(receivers); } catch { receivers = []; }
+      ordersRes.rows.forEach((row) => {
+        let receivers = row.receivers || "[]";
+        if (typeof receivers === "string") {
+          try {
+            receivers = JSON.parse(receivers);
+          } catch {
+            receivers = [];
+          }
         }
 
         const order = {
@@ -6629,29 +7613,29 @@ export async function getOrderByTrackingId(req, res) {
           status: row.status,
           eta: row.eta,
           etd: row.etd,
-          collection_scope: row.collection_scope || '—',
+          collection_scope: row.collection_scope || "—",
           total_assigned_qty: row.total_assigned_qty || 0,
           sender: {
-            name: row.sender_name || '—',
-            contact: row.sender_contact || '—',
-            email: row.sender_email || '—'
+            name: row.sender_name || "—",
+            contact: row.sender_contact || "—",
+            email: row.sender_email || "—",
           },
           transport: {
-            type: row.transport_type || '—',
-            collection_scope: row.collection_scope || 'Partial'
+            type: row.transport_type || "—",
+            collection_scope: row.collection_scope || "Partial",
           },
           receivers,
           summary: {
             total_items: 0,
             total_weight: 0,
             total_assigned: 0,
-            active_containers: new Set()
-          }
+            active_containers: new Set(),
+          },
         };
 
         // Calculate per-order summary from shippingDetails
-        receivers.forEach(r => {
-          (r.shippingDetails || []).forEach(item => {
+        receivers.forEach((r) => {
+          (r.shippingDetails || []).forEach((item) => {
             const qty = Number(item.totalNumber || 0);
             const assigned = (item.containerDetails || []).reduce((sum, cd) => {
               return sum + Number(cd.assign_total_box || 0);
@@ -6661,9 +7645,9 @@ export async function getOrderByTrackingId(req, res) {
             order.summary.total_weight += Number(item.weight || 0);
             order.summary.total_assigned += assigned;
 
-            (item.containerDetails || []).forEach(cd => {
+            (item.containerDetails || []).forEach((cd) => {
               const cn = cd.container?.container_number;
-              if (cn && cn !== 'Unknown') {
+              if (cn && cn !== "Unknown") {
                 order.summary.active_containers.add(cn);
                 allContainers.add(cn);
               }
@@ -6680,10 +7664,13 @@ export async function getOrderByTrackingId(req, res) {
       let grandTotalItems = 0;
       let grandTotalAssigned = 0;
 
-      orders.forEach(o => {
+      orders.forEach((o) => {
         grandTotalItems += o.summary.total_items;
         grandTotalAssigned += o.summary.total_assigned;
-        if (!summary.latest_activity || o.created_at > summary.latest_activity) {
+        if (
+          !summary.latest_activity ||
+          o.created_at > summary.latest_activity
+        ) {
           summary.latest_activity = o.created_at;
         }
       });
@@ -6692,11 +7679,14 @@ export async function getOrderByTrackingId(req, res) {
         order_count: orders.length,
         total_assigned: grandTotalAssigned,
         total_items: grandTotalItems,
-        progress_percent: grandTotalItems > 0
-          ? Math.round((grandTotalAssigned / grandTotalItems) * 100)
-          : 0,
+        progress_percent:
+          grandTotalItems > 0
+            ? Math.round((grandTotalAssigned / grandTotalItems) * 100)
+            : 0,
         active_containers: Array.from(allContainers),
-        latest_activity: summary.latest_activity ? summary.latest_activity.toISOString() : null
+        latest_activity: summary.latest_activity
+          ? summary.latest_activity.toISOString()
+          : null,
       };
     }
 
@@ -6718,19 +7708,18 @@ export async function getOrderByTrackingId(req, res) {
           gross_weight: cons.gross_weight,
           value: cons.consignment_value,
           currency: cons.currency_code,
-          containers
+          containers,
         },
         orders,
-        summary
-      }
+        summary,
+      },
     });
-
   } catch (err) {
-    console.error('getOrderByTrackingId error:', err.stack || err);
+    console.error("getOrderByTrackingId error:", err.stack || err);
     res.status(500).json({
       success: false,
-      message: 'Server error while tracking consignment',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+      message: "Server error while tracking consignment",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
 }
@@ -6738,8 +7727,11 @@ export async function getOrderByTrackingId(req, res) {
 export async function getOrderByOrderId(req, res) {
   const { ref } = req.params;
 
-  if (!ref || typeof ref !== 'string' || ref.trim() === '') {
-    return res.status(400).json({ success: false, message: 'Order reference (ID or booking ref) is required' });
+  if (!ref || typeof ref !== "string" || ref.trim() === "") {
+    return res.status(400).json({
+      success: false,
+      message: "Order reference (ID or booking ref) is required",
+    });
   }
 
   const search = ref.trim();
@@ -6795,8 +7787,8 @@ export async function getOrderByOrderId(req, res) {
           'type',            COALESCE(oi.type, ''),
           'pickupLocation',  COALESCE(oi.pickup_location, ''),
           'deliveryAddress', COALESCE(oi.delivery_address, ''),
-          'totalNumber',     ${safeIntCast('oi.total_number')},
-          'weight',          ${safeNumericCast('oi.weight')},
+          'totalNumber',     ${safeIntCast("oi.total_number")},
+          'weight',          ${safeNumericCast("oi.weight")},
           'totalWeight',     0,
           'itemRef',         COALESCE(oi.item_ref, ''),
           'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
@@ -6854,8 +7846,8 @@ export async function getOrderByOrderId(req, res) {
              r.receiver_contact            AS "receiverContact",
              r.receiver_address            AS "receiverAddress",
              r.receiver_email              AS "receiverEmail",
-             ${safeIntCast('r.total_number')}       AS "totalNumber",
-             ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+             ${safeIntCast("r.total_number")}       AS "totalNumber",
+             ${safeNumericCast("r.total_weight")}   AS "totalWeight",
              r.receiver_ref                AS "receiverRef",
              r.remarks,
              r.containers,
@@ -6868,9 +7860,9 @@ export async function getOrderByOrderId(req, res) {
              r.consignment_marks           AS "consignmentMarks",
              r.consignment_voyage          AS "consignmentVoyage",
              r.full_partial                AS "fullPartial",
-             ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+             ${safeIntCast("r.qty_delivered")}      AS "qtyDelivered",
              ${shippingDetailsAgg}                  AS "shippingDetails",
-             ${shippingDetailsAgg.replace('shippingDetails', 'shippingdetails')} AS "shippingdetails",
+             ${shippingDetailsAgg.replace("shippingDetails", "shippingdetails")} AS "shippingdetails",
              COALESCE((
                SELECT jsonb_agg(
                  jsonb_build_object(
@@ -6890,7 +7882,7 @@ export async function getOrderByOrderId(req, res) {
       FROM orders o
       LEFT JOIN senders s ON s.order_id = o.id
       LEFT JOIN transport_details t ON t.order_id = o.id
-      WHERE ${isNumeric ? 'o.id = $1' : 'o.booking_ref ILIKE $1'}
+      WHERE ${isNumeric ? "o.id = $1" : "o.booking_ref ILIKE $1"}
          OR o.booking_ref ILIKE $2
       LIMIT 5  -- safety if ref is not unique
     `;
@@ -6904,15 +7896,19 @@ export async function getOrderByOrderId(req, res) {
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: `No order found for reference "${search}"`
+        message: `No order found for reference "${search}"`,
       });
     }
 
     // Format response – very similar to getOrders
-    const formatted = rows.map(row => {
-      let receivers = row.receivers || '[]';
-      if (typeof receivers === 'string') {
-        try { receivers = JSON.parse(receivers); } catch { receivers = []; }
+    const formatted = rows.map((row) => {
+      let receivers = row.receivers || "[]";
+      if (typeof receivers === "string") {
+        try {
+          receivers = JSON.parse(receivers);
+        } catch {
+          receivers = [];
+        }
       }
 
       return {
@@ -6943,7 +7939,7 @@ export async function getOrderByOrderId(req, res) {
         created_at: row.created_at?.toISOString(),
         updated_at: null, // add if you select it
         created_by: null, // add if needed
-        receivers,        // ← now matches getOrders shape exactly
+        receivers, // ← now matches getOrders shape exactly
         // defaults for frontend compatibility (same as getOrders)
         receiver_name: null,
         receiver_contact: null,
@@ -6959,17 +7955,16 @@ export async function getOrderByOrderId(req, res) {
     res.json({
       success: true,
       data,
-      message: `Found ${formatted.length} matching order(s)`
+      message: `Found ${formatted.length} matching order(s)`,
     });
-
   } catch (err) {
-    console.error('getOrderByOrderId error:', err.stack || err);
+    console.error("getOrderByOrderId error:", err.stack || err);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order details',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      message: "Failed to fetch order details",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
       code: err.code,
-      position: err.position
+      position: err.position,
     });
   }
 }
@@ -6979,14 +7974,17 @@ export async function getOrderByOrderId(req, res) {
  * Example: GET /api/orders/rgl/RGSL-17695-064
  */
 export async function getOrderByRglBookingNo(req, res) {
-
-  console.log('getOrderByRglBookingNo called with params:', req.params);
+  console.log("getOrderByRglBookingNo called with params:", req.params);
   const { rglBookingNo } = req.params;
 
-  if (!rglBookingNo || typeof rglBookingNo !== 'string' || rglBookingNo.trim() === '') {
+  if (
+    !rglBookingNo ||
+    typeof rglBookingNo !== "string" ||
+    rglBookingNo.trim() === ""
+  ) {
     return res.status(400).json({
       success: false,
-      message: 'RGL Booking Number is required'
+      message: "RGL Booking Number is required",
     });
   }
 
@@ -7042,8 +8040,8 @@ export async function getOrderByRglBookingNo(req, res) {
           'type',            COALESCE(oi.type, ''),
           'pickupLocation',  COALESCE(oi.pickup_location, ''),
           'deliveryAddress', COALESCE(oi.delivery_address, ''),
-          'totalNumber',     ${safeIntCast('oi.total_number')},
-          'weight',          ${safeNumericCast('oi.weight')},
+          'totalNumber',     ${safeIntCast("oi.total_number")},
+          'weight',          ${safeNumericCast("oi.weight")},
           'totalWeight',     0,
           'itemRef',         COALESCE(oi.item_ref, ''),
           'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
@@ -7101,8 +8099,8 @@ export async function getOrderByRglBookingNo(req, res) {
              r.receiver_contact            AS "receiverContact",
              r.receiver_address            AS "receiverAddress",
              r.receiver_email              AS "receiverEmail",
-             ${safeIntCast('r.total_number')}       AS "totalNumber",
-             ${safeNumericCast('r.total_weight')}   AS "totalWeight",
+             ${safeIntCast("r.total_number")}       AS "totalNumber",
+             ${safeNumericCast("r.total_weight")}   AS "totalWeight",
              r.receiver_ref                AS "receiverRef",
              r.remarks,
              r.containers,
@@ -7115,7 +8113,7 @@ export async function getOrderByRglBookingNo(req, res) {
              r.consignment_marks           AS "consignmentMarks",
              r.consignment_voyage          AS "consignmentVoyage",
              r.full_partial                AS "fullPartial",
-             ${safeIntCast('r.qty_delivered')}      AS "qtyDelivered",
+             ${safeIntCast("r.qty_delivered")}      AS "qtyDelivered",
              ${shippingDetailsAgg}                  AS "shippingDetails",
              ${shippingDetailsAgg.replace('"shippingDetails"', '"shippingdetails"')} AS "shippingdetails",
              COALESCE((
@@ -7146,14 +8144,14 @@ export async function getOrderByRglBookingNo(req, res) {
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: `No order found for RGL Booking Number "${search}"`
+        message: `No order found for RGL Booking Number "${search}"`,
       });
     }
 
     // Format response (same shape as getOrders / getOrderByOrderId)
-    const formatted = rows.map(row => {
-      let receivers = row.receivers || '[]';
-      if (typeof receivers === 'string') {
+    const formatted = rows.map((row) => {
+      let receivers = row.receivers || "[]";
+      if (typeof receivers === "string") {
         try {
           receivers = JSON.parse(receivers);
         } catch (e) {
@@ -7202,29 +8200,27 @@ export async function getOrderByRglBookingNo(req, res) {
     res.json({
       success: true,
       data,
-      message: `Found ${formatted.length} matching order(s) for RGL Booking Number`
+      message: `Found ${formatted.length} matching order(s) for RGL Booking Number`,
     });
-
   } catch (err) {
-    console.error('getOrderByRglBookingNo error:', err.stack || err);
+    console.error("getOrderByRglBookingNo error:", err.stack || err);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch order details',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      message: "Failed to fetch order details",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
       code: err.code,
-      position: err.position
+      position: err.position,
     });
   }
 }
 
-
 // getOrderStatuses: Updated to fetch from order_tracking (merged statuses); group by order_id for history
 export async function getOrderStatuses(req, res) {
   try {
-    const { order_id } = req.params || req.query;  // Support both
+    const { order_id } = req.params || req.query; // Support both
 
     if (!order_id) {
-      return res.status(400).json({ error: 'order_id is required' });
+      return res.status(400).json({ error: "order_id is required" });
     }
 
     const query = `
@@ -7244,7 +8240,9 @@ export async function getOrderStatuses(req, res) {
     res.json({ statuses });
   } catch (err) {
     console.error("Error fetching order statuses:", err.message);
-    res.status(500).json({ error: 'Failed to fetch order statuses', details: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch order statuses", details: err.message });
   }
 }
 
@@ -7254,7 +8252,7 @@ export async function getOrderUsageHistory(req, res) {
     const { order_id } = req.params || req.query;
 
     if (!order_id) {
-      return res.status(400).json({ error: 'order_id is required' });
+      return res.status(400).json({ error: "order_id is required" });
     }
 
     const query = `
@@ -7274,11 +8272,16 @@ export async function getOrderUsageHistory(req, res) {
     const result = await pool.query(query, [order_id]);
     const history = result.rows;
 
-    console.log(`Fetched ${history.length} usage history for order: ${order_id}`);
+    console.log(
+      `Fetched ${history.length} usage history for order: ${order_id}`,
+    );
     res.json({ history });
   } catch (err) {
     console.error("Error fetching order usage history:", err.message);
-    res.status(500).json({ error: 'Failed to fetch order usage history', details: err.message });
+    res.status(500).json({
+      error: "Failed to fetch order usage history",
+      details: err.message,
+    });
   }
 }
 
@@ -7287,14 +8290,14 @@ export async function cancelOrder(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { id } = req.params;
-    const { reason } = req.body || {};  // Optional reason
-    const updated_by = req.user?.id || 'system';  // Assume user from auth
+    const { reason } = req.body || {}; // Optional reason
+    const updated_by = req.user?.id || "system"; // Assume user from auth
 
     if (!id) {
-      throw new Error('Order ID is required');
+      throw new Error("Order ID is required");
     }
 
     // Update global order status
@@ -7306,8 +8309,10 @@ export async function cancelOrder(req, res) {
     `;
     const updateResult = await client.query(updateQuery, [id, updated_by]);
     if (updateResult.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Order not found or already cancelled' });
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ error: "Order not found or already cancelled" });
     }
 
     // Log cancellation in order_tracking (for all receivers or latest)
@@ -7318,15 +8323,19 @@ export async function cancelOrder(req, res) {
     `;
     await client.query(trackingQuery, [id, updated_by]);
 
-    await client.query('COMMIT');
-    console.log(`Cancelled order: ${updateResult.rows[0].booking_ref || id}, reason: ${reason || 'N/A'}`);
-    res.json({ message: 'Order cancelled successfully', order_id: id, reason });
+    await client.query("COMMIT");
+    console.log(
+      `Cancelled order: ${updateResult.rows[0].booking_ref || id}, reason: ${reason || "N/A"}`,
+    );
+    res.json({ message: "Order cancelled successfully", order_id: id, reason });
   } catch (err) {
     if (client) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
     }
     console.error("Error cancelling order:", err.message);
-    res.status(500).json({ error: 'Failed to cancel order', details: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to cancel order", details: err.message });
   } finally {
     if (client) {
       client.release();
