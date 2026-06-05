@@ -1386,6 +1386,7 @@ export async function createConsignment(req, res) {
 
     // Normalize input (status is NO longer accepted from input)
     const input = {
+      user_id: data.user_id,
       consignment_number: data.consignment_number || data.consignmentNumber,
       remarks: data.remarks || "",
       shipper: data.shipper || "",
@@ -1488,6 +1489,50 @@ export async function createConsignment(req, res) {
       newConsignment = result.rows[0];
     });
 
+    let ccNew = [];
+
+    await withTransaction(async (client) => {
+      if (input.containers.length > 0) {
+        const values = [];
+        const placeholders = [];
+
+        input.containers.forEach((container, index) => {
+          const offset = index * 4;
+
+          placeholders.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`,
+          );
+
+          values.push(
+            newConsignment.id,
+            container.cid,
+            new Date(),
+            input.eform_date,
+            parseInt(input.user_id),
+            true,
+          );
+        });
+
+        const query = `
+      INSERT INTO container_consignment_history
+      (
+        consignment_id,
+        container_id,
+        assigned_at,
+        created_at,
+        created_by,
+        active
+      )
+      VALUES
+      ${placeholders.join(",")}
+      RETURNING *
+    `;
+
+        const result = await client.query(query, values);
+        ccNew = result.rows;
+      }
+    });
+
     // Optional: Add status color if needed in response
     // newConsignment.statusColor = getStatusColor(newConsignment.status);
 
@@ -1510,6 +1555,7 @@ export async function createConsignment(req, res) {
     });
   }
 }
+
 export async function updateConsignment(req, res) {
   const { id } = req.params; // Assume ID from params
   try {

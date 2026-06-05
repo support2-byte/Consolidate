@@ -1,4 +1,20 @@
 import pool from "../../db/pool.js";
+import { withUserAudit } from "../../middleware/dbAudit.js";
+
+async function withTransaction(operation) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await operation(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 function isValidDate(dateString) {
   if (!dateString) return false;
@@ -429,12 +445,10 @@ export async function createContainer(req, res) {
       return res.status(409).json({ error: "Container number already exists" });
     }
     if (err.code === "23514") {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Invalid value for constrained field (e.g., owner_type or availability)",
-        });
+      return res.status(400).json({
+        error:
+          "Invalid value for constrained field (e.g., owner_type or availability)",
+      });
     }
     if (err.code === "22007" || err.code === "22008") {
       return res
@@ -718,12 +732,10 @@ export async function updateContainer(req, res) {
       return res.status(409).json({ error: "Container number already exists" });
     }
     if (err.code === "23514") {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Invalid value for constrained field (e.g., owner_type or availability)",
-        });
+      return res.status(400).json({
+        error:
+          "Invalid value for constrained field (e.g., owner_type or availability)",
+      });
     }
     if (err.code === "22007" || err.code === "22008") {
       return res
@@ -791,11 +803,9 @@ export async function getAllContainers(req, res) {
         whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
         baseValues.push(normalizedLocation);
       } else {
-        return res
-          .status(400)
-          .json({
-            error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
-          });
+        return res.status(400).json({
+          error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
+        });
       }
     }
     let baseFrom = `
@@ -924,6 +934,7 @@ export async function getAllContainers(req, res) {
       .json({ error: err.message || "Failed to fetch containers" });
   }
 }
+
 export async function getContainerById(req, res) {
   try {
     const { cid } = req.params;
@@ -1128,7 +1139,6 @@ export async function getUsageHistory(req, res) {
     }
     const containerId = parseInt(cid);
 
-    // Pehle wali UNION query bilkul unchanged rahegi
     const historyQuery = `
       -- Status changes from container_status
       SELECT 
@@ -1136,7 +1146,9 @@ export async function getUsageHistory(req, res) {
         'STATUS_CHANGE' as event_type,
         cs.availability as event_status,
         NULL as assigned_qty,
+        NULL as assigned_weight_kg,
         NULL as action_type,
+        NULL as loaded_at,
         cs.location as location,
         cs.status_notes as notes,
         cs.created_by as changed_by,
@@ -1144,12 +1156,14 @@ export async function getUsageHistory(req, res) {
         NULL as order_id,
         NULL as receiver_id,
         NULL as detail_id,
+        NULL as consignment_number,
         cm.container_number,
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
         o.id as job_id,
         o.booking_ref as job_no,
+        o.rgl_booking_number as form_no,
         o.place_of_loading as pol,
         o.final_destination as pod,
         o.created_at as start_date,
@@ -1171,20 +1185,24 @@ export async function getUsageHistory(req, res) {
         'ASSIGNMENT' as event_type,
         cah.status as event_status,
         cah.assigned_qty,
+        cah.assigned_weight_kg,
         cah.action_type,
-        NULL as location,  -- Assignments may not have location; could enhance if needed
+        cah.loaded_at,
+        NULL as location,
         cah.notes,
         cah.changed_by,
         cah.previous_status,
         cah.order_id,
         cah.receiver_id,
         cah.detail_id,
+        con.consignment_number,
         cm.container_number,
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
-        cah.order_id as job_id,  -- Reuse order_id as job_id
+        cah.order_id as job_id,
         o.booking_ref as job_no,
+        o.rgl_booking_number as form_no,
         o.place_of_loading as pol,
         o.final_destination as pod,
         o.created_at as start_date,
@@ -1196,12 +1214,17 @@ export async function getUsageHistory(req, res) {
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
       LEFT JOIN orders o ON cah.order_id = o.id 
         AND o.status != 'Cancelled'
+      LEFT JOIN container_consignment_history cch 
+        ON cch.container_id = cah.cid 
+        -- AND cch.assigned_at <= cah.created_at
+        -- AND (cch.released_at IS NULL OR cch.released_at >= cah.created_at)
+      LEFT JOIN consignments con 
+        ON con.id = cch.consignment_id
       WHERE cah.cid = $1
 
       ORDER BY event_time DESC
     `;
 
-    // Alag se sirf container status history ka query
     const statusHistoryQuery = `
       SELECT 
         sid,
@@ -1216,7 +1239,6 @@ export async function getUsageHistory(req, res) {
       ORDER BY created_time DESC, sid DESC
     `;
 
-    // Dono queries ek saath run karo
     const [historyResult, statusHistoryResult] = await Promise.all([
       pool.query(historyQuery, [containerId]),
       pool.query(statusHistoryQuery, [containerId]),
@@ -1225,20 +1247,25 @@ export async function getUsageHistory(req, res) {
     const history = historyResult.rows;
     const statusHistory = statusHistoryResult.rows;
 
-    // Existing format bilkul unchanged rahega
     const formattedHistory = history.map((row) => {
       const eventSummary =
         row.event_type === "ASSIGNMENT"
-          ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || "N/A"})`
+          ? `${row.action_type} ${row.assigned_qty || 0} items (${row.assigned_weight_kg || 0} kg) (Prev: ${row.previous_status || "N/A"})`
           : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ""}`;
 
       return {
         eventTime: row.event_time.toISOString().split("T")[0],
         eventType: row.event_type,
-        eventSummary: eventSummary,
-        jobNo:
-          row.job_no ||
-          `JOB-${row.event_time.toISOString().split("T")[0].replace(/-/g, "")}`,
+        eventSummary,
+        assignedQty: Number(row.assigned_qty || 0),
+        assignedWeightKg: Number(row.assigned_weight_kg || 0),
+        loadedAt: row.loaded_at
+          ? row.loaded_at.toISOString().split("T")[0]
+          : null,
+        orderId: row.order_id,
+        bookingRef: row.job_no,
+        formNo: row.form_no,
+        consignmentNo: row.consignment_number || null,
         pol:
           row.pol || (row.owner_type === "soc" ? "Self Depot" : "Vendor Depot"),
         pod: row.pod || "Destination Depot",
@@ -1248,27 +1275,45 @@ export async function getUsageHistory(req, res) {
         endDate: row.end_date
           ? row.end_date.toISOString().split("T")[0]
           : row.event_time.toISOString().split("T")[0],
+        jobNo:
+          row.job_no ||
+          `JOB-${row.event_time.toISOString().split("T")[0].replace(/-/g, "")}`,
         statusProgression: [row.event_status],
         linkedOrders: row.job_no ? `ORD-${row.job_id}` : "N/A",
         remarks: row.notes || eventSummary,
         changedBy: row.changed_by,
-        orderId: row.order_id,
         receiverId: row.receiver_id,
         detailId: row.detail_id,
       };
     });
 
-    // Group by job (existing format)
-    const groupedHistory = {};
-    formattedHistory.forEach((entry) => {
-      const key = entry.jobNo;
-      if (!groupedHistory[key]) {
-        groupedHistory[key] = [];
-      }
-      groupedHistory[key].push(entry);
-    });
+    const groupedByConsignment = {};
 
-    // Status history ko format karo
+    // const groupedHistory = {};
+
+    formattedHistory
+      .filter((e) => e.eventType === "ASSIGNMENT")
+      .forEach((event) => {
+        const key =
+          event.consignmentNo ||
+          event.bookingRef ||
+          `NO-CONSIGNMENT-${event.orderId}`;
+
+        if (!groupedByConsignment[key]) {
+          groupedByConsignment[key] = {
+            consignmentNo: event.consignmentNo,
+            loadedAt: event.loadedAt,
+            bookingRef: event.bookingRef,
+            formNo: event.formNo,
+            pol: event.pol,
+            pod: event.pod,
+            orders: [],
+          };
+        }
+
+        groupedByConsignment[key].orders.push(event);
+      });
+
     const formattedStatusHistory = statusHistory.map((row) => ({
       sid: row.sid,
       cid: row.cid,
@@ -1282,11 +1327,30 @@ export async function getUsageHistory(req, res) {
     console.log(
       `Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`,
     );
+    console.log({
+      rawEvents: formattedHistory,
+      groupedByConsignment,
+      containerStatusHistory: {
+        totalRecords: formattedStatusHistory.length,
+        events: formattedStatusHistory,
+        summary: {
+          uniqueStatuses: [
+            ...new Set(formattedStatusHistory.map((s) => s.status)),
+          ],
+          firstStatus:
+            formattedStatusHistory[formattedStatusHistory.length - 1]?.status ||
+            "N/A",
+          latestStatus: formattedStatusHistory[0]?.status || "N/A",
+          totalLocations: [
+            ...new Set(formattedStatusHistory.map((s) => s.location)),
+          ].length,
+        },
+      },
+    });
 
-    // Response format mein sirf ek naya field add karo
     res.json({
       rawEvents: formattedHistory,
-      groupedByJob: groupedHistory,
+      groupedByConsignment,
       containerStatusHistory: {
         totalRecords: formattedStatusHistory.length,
         events: formattedStatusHistory,
@@ -1331,5 +1395,311 @@ export async function deleteContainer(req, res) {
     res
       .status(500)
       .json({ error: err.message || "Failed to delete container" });
+  }
+}
+
+export const getContainerAssignments = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        cc.id,
+        cc.container_id,
+        cm.container_number,
+        cc.consignment_id,
+        cs.consignment_number,
+        cc.assigned_at,
+        cc.released_at,
+        cc.created_at,
+        COALESCE(NULLIF(cu.name, ''), cu.email) AS created_by,
+        cc.modified_at,
+        COALESCE(NULLIF(mu.name, ''), mu.email) AS modified_by,
+        cc.active
+      FROM container_consignment_history cc
+      INNER JOIN container_master cm
+          ON cm.cid = cc.container_id
+      INNER JOIN consignments cs
+          ON cs.id = cc.consignment_id
+      INNER JOIN users cu
+          ON cu.id = cc.created_by
+      LEFT JOIN users mu
+          ON mu.id = cc.modified_by
+      ORDER BY cc.assigned_at DESC, cc.id DESC;
+    `);
+
+    return res.status(200).json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Error fetching container assignments:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch container assignments",
+      details: error.message,
+    });
+  }
+};
+
+export const releaseContainer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { release_date } = req.body;
+
+    if (!release_date) {
+      return res.status(400).json({
+        success: false,
+        message: "Release date is required",
+      });
+    }
+
+    let releasedAssignment = null;
+
+    await withTransaction(async (client) => {
+      const query = `
+        UPDATE container_consignment_history
+        SET
+          released_at = $1,
+          active = false,
+          modified_at = CURRENT_DATE
+        WHERE id = $2
+          AND released_at IS NULL
+        RETURNING *
+      `;
+
+      const result = await client.query(query, [release_date, id]);
+
+      if (result.rowCount === 0) {
+        throw new Error("ASSIGNMENT_NOT_FOUND");
+      }
+
+      releasedAssignment = result.rows[0];
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Container released successfully",
+      data: releasedAssignment,
+    });
+  } catch (error) {
+    if (error.message === "ASSIGNMENT_NOT_FOUND") {
+      return res.status(404).json({
+        success: false,
+        message: "Assignment not found or already released",
+      });
+    }
+
+    console.error("Error releasing container:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to release container",
+      error: error.message,
+    });
+  }
+};
+
+export async function getAllContainersForConsignment(req, res) {
+  console.log("getAllContainers called with query:", req.query);
+  try {
+    const {
+      container_number,
+      container_size,
+      container_type,
+      owner_type,
+      status = "",
+      location,
+      page = 1,
+      limit = 100,
+      includeOrder = "false",
+    } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    let whereClause = `
+      cm.status = 1
+      AND NOT EXISTS (
+        SELECT 1
+        FROM container_consignment_history cch
+        WHERE cch.container_id = cm.cid
+          AND cch.active = true
+      )
+    `;
+    let baseValues = [];
+
+    if (container_number) {
+      whereClause += ` AND cm.container_number ILIKE $${baseValues.length + 1}`;
+      baseValues.push(`%${container_number}%`);
+    }
+    if (container_size) {
+      whereClause += ` AND cm.container_size = $${baseValues.length + 1}`;
+      baseValues.push(container_size);
+    }
+    if (container_type) {
+      whereClause += ` AND cm.container_type = $${baseValues.length + 1}`;
+      baseValues.push(container_type);
+    }
+    if (owner_type) {
+      whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
+      baseValues.push(owner_type);
+    }
+    if (location) {
+      // FIXED: Better normalization to avoid double underscore
+      let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
+      if (normalizedLocation.endsWith("_port")) {
+        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
+      } else if (normalizedLocation.includes("port")) {
+        normalizedLocation = normalizedLocation
+          .replace(/_port$/, "port")
+          .replace(/port$/, "_port"); // Handle edge cases
+      } else {
+        normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
+      }
+      if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
+        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
+        baseValues.push(normalizedLocation);
+      } else {
+        return res.status(400).json({
+          error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
+        });
+      }
+    }
+    let baseFrom = `
+      FROM container_master cm
+
+      LEFT JOIN LATERAL (
+        SELECT location, availability
+        FROM container_status css
+        WHERE css.cid = cm.cid
+        ORDER BY css.sid DESC NULLS LAST
+        LIMIT 1
+      ) cs ON true
+
+      LEFT JOIN container_purchase_details cpd
+        ON cm.cid = cpd.cid
+
+      LEFT JOIN container_hire_details chd
+        ON cm.cid = chd.cid
+
+      LEFT JOIN LATERAL (
+        SELECT cch.active
+        FROM container_consignment_history cch
+        WHERE cch.container_id = cm.cid
+        ORDER BY cch.id DESC
+        LIMIT 1
+      ) cch ON true
+    `;
+
+    let selectClause = `
+      SELECT 
+        cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
+        COALESCE(cs.location, 'karachi_port') as location,
+        CASE 
+          WHEN cs.availability IS NOT NULL THEN cs.availability
+          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+          ELSE 'Available'
+        END as derived_status,
+        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
+        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,
+        cm.created_time
+    `;
+
+    let orderJoin = "";
+    if (includeOrder === "true") {
+      selectClause += `,
+        o.id as associated_order_id,
+        o.booking_ref as associated_booking_ref,
+        o.status as associated_order_status,
+        o.place_of_loading as order_place_of_loading,
+        o.final_destination as order_final_destination
+      `;
+      orderJoin = `
+        LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
+      `;
+      baseFrom += orderJoin;
+    }
+
+    // Use CTE to compute derived_status
+    const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
+
+    // Prepare params for limit/offset (always added)
+    let fullParams = [...baseValues];
+    let statusWhere = "";
+
+    if (status && status !== "") {
+      // Filter by specific status
+      const statusParamIndex = baseValues.length + 1;
+      statusWhere = `WHERE derived_status = $${statusParamIndex}`;
+      fullParams.push(status);
+    }
+
+    // Add limit and offset
+    const limitParamIndex = fullParams.length + 1;
+    const offsetParamIndex = limitParamIndex + 1;
+    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
+
+    let fullQuery;
+    if (status && status !== "") {
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ${statusWhere}
+        ORDER BY created_time DESC
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    } else {
+      // No status filter: show all
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ORDER BY created_time DESC
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    }
+
+    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
+    let countParams = [...baseValues];
+    let countStatusWhere = "";
+    if (status && status !== "") {
+      const countStatusIndex = baseValues.length + 1;
+      countStatusWhere = `WHERE derived_status = $${countStatusIndex}`;
+      countParams.push(status);
+    }
+    const countQuery = `
+      WITH container_summary AS (${innerQuery})
+      SELECT COUNT(*) as total FROM container_summary
+      ${countStatusWhere}
+    `;
+
+    console.log("Generated Query:", fullQuery); // Add logging for debugging
+    console.log("Generated Count Query:", countQuery);
+    console.log("Full Params:", fullParams);
+    console.log("Count Params:", countParams);
+
+    const rowsResult = await pool.query(fullQuery, fullParams);
+    const countResult = await pool.query(countQuery, countParams);
+
+    const rows = rowsResult.rows;
+
+    console.log(
+      "Fetched containers:",
+      rows.length,
+      "Total:",
+      parseInt(countResult.rows[0].total),
+      "Filters:",
+      { ...req.query, status },
+    );
+    res.json({
+      data: rows,
+      total: parseInt(countResult.rows[0].total || 0),
+      page: parseInt(page),
+      limit: parseInt(limit),
+    });
+  } catch (err) {
+    console.error("pool error:", err.message, "Query params:", req.query);
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to fetch containers" });
   }
 }

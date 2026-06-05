@@ -1981,6 +1981,8 @@ export async function getOrdersConsignments(req, res) {
           AND (${receiverExists})
         )
       )`;
+
+      whereClause += ` AND o.created_at::date = CURRENT_DATE`;
     }
 
     // Safe casting helpers (same as getOrderById)
@@ -2047,7 +2049,7 @@ export async function getOrdersConsignments(req, res) {
     // receiversSub – same structure as getOrderById
     const receiversSub = `
       (SELECT COALESCE(json_agg(r_full ORDER BY r_full.id), '[]'::json) FROM (
-        SELECT 
+        SELECT
           r.id,
           r.order_id                    AS orderId,
           r.receiver_name               AS receiverName,
@@ -2082,7 +2084,7 @@ export async function getOrdersConsignments(req, res) {
                 'plate_no',       dod.plate_no,
                 'drop_date',      TO_CHAR(dod.drop_date, 'YYYY-MM-DD')
               ) ORDER BY dod.id
-            ) FROM drop_off_details dod 
+            ) FROM drop_off_details dod
             WHERE dod.receiver_id = r.id
           ), '[]'::json) AS drop_off_details
         FROM receivers r
@@ -2253,6 +2255,94 @@ export async function getOrdersConsignments(req, res) {
     if (client) client.release();
   }
 }
+
+// export async function getOrdersConsignments(req, res) {
+//   try {
+//     const { container_ids } = req.query;
+
+//     if (!container_ids) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "container_ids is required" });
+//     }
+
+//     const containerIds = container_ids
+//       .split(",")
+//       .map((id) => parseInt(id))
+//       .filter((id) => !isNaN(id) && id > 0);
+
+//     if (containerIds.length === 0) {
+//       return res.json({ success: true, data: [] });
+//     }
+
+//     // Inline the IDs as a literal SQL array — avoids pg casting the JS array as jsonb
+//     const idList = containerIds.join(",");
+
+//     const query = `
+//       SELECT DISTINCT
+//           o.id,
+//           o.booking_ref,
+//           o.status,
+//           o.place_of_loading,
+//           o.final_destination,
+//           cm.cid                               AS container_id,
+//           cm.container_number,
+//           cd.status                            AS container_status,
+//           cd.assign_weight::numeric            AS assign_weight,
+//           cd.assign_total_box::integer         AS assign_total_box,
+//           cd.total_number::integer             AS total_number,
+//           cd.remaining_items::integer          AS remaining_items
+//       FROM orders o
+
+//       INNER JOIN receivers r
+//           ON r.order_id = o.id
+
+//       INNER JOIN order_items oi
+//           ON oi.receiver_id = r.id
+
+//       INNER JOIN LATERAL (
+//           SELECT
+//               (elem->'container'->>'cid')::integer  AS cid,
+//               elem->>'status'                        AS status,
+//               elem->>'assign_weight'                 AS assign_weight,
+//               elem->>'assign_total_box'              AS assign_total_box,
+//               elem->>'total_number'                  AS total_number,
+//               elem->>'remaining_items'               AS remaining_items
+//           FROM jsonb_array_elements(
+//               CASE jsonb_typeof(oi.container_details)
+//                   WHEN 'array' THEN oi.container_details
+//                   ELSE '[]'::jsonb
+//               END
+//           ) AS elem
+//           WHERE (elem->'container'->>'cid') IS NOT NULL
+//       ) cd ON true
+
+//       INNER JOIN container_master cm
+//           ON cm.cid = cd.cid
+
+//       WHERE cd.cid IN (${idList})
+
+//       AND o.status NOT IN ('Shipment Delivered')
+
+//       ORDER BY o.id DESC
+//     `;
+
+//     // No parameters — IDs are inlined as safe integers (already parsed + filtered above)
+//     const result = await pool.query(query);
+
+//     console.log("getOrdersConsignments rows:", result.rows.length);
+
+//     return res.json({ success: true, data: result.rows });
+//   } catch (error) {
+//     console.error("Error fetching orders for consignment:", error);
+//     return res.status(500).json({
+//       success: false,
+//       message: "Failed to fetch orders",
+//       error: error.message,
+//     });
+//   }
+// }
+
 export async function getOrderById(req, res) {
   let client;
   try {
@@ -4098,14 +4188,16 @@ export async function assignContainersBatch(req, res) {
       // 2. Receiver
       const receiverRes = await client.query(
         `
-        SELECT 
-          id, 
-          receiver_name, 
-          qty_delivered, 
-          total_number, 
-          total_weight
+        SELECT
+          id,
+          receiver_name,
+          qty_delivered,
+          total_number,
+          total_weight,
+          containers
         FROM receivers
-        WHERE id = $1 AND order_id = $2
+        WHERE id = $1
+          AND order_id = $2
         FOR UPDATE
       `,
         [receiverIdNum, orderIdNum],
@@ -4187,103 +4279,46 @@ export async function assignContainersBatch(req, res) {
         console.log(`Zero-weight assignment accepted for item ${targetItemId}`);
       }
 
-      // 4. Get ALL items in the order
-      const allItemsRes = await client.query(
+      let receiverContainers = [];
+
+      try {
+        receiverContainers = Array.isArray(receiver.containers)
+          ? receiver.containers
+          : JSON.parse(receiver.containers || "[]");
+      } catch {
+        receiverContainers = [];
+      }
+
+      const updatedContainers = [
+        ...new Set([...receiverContainers, contNumber]),
+      ];
+
+      await client.query(
         `
-        SELECT 
-          id,
-          total_number,
-          total_weight,
-          assigned_boxes,
-          assigned_weight_kg,
-          container_details,
-          weight
-        FROM order_items
-        WHERE order_id = $1
-        FOR UPDATE
-      `,
-        [orderIdNum],
+  UPDATE receivers
+  SET
+    qty_delivered = COALESCE(qty_delivered, 0) + $1,
+    containers = $2::jsonb,
+    status = CASE
+      WHEN COALESCE(qty_delivered, 0) + $1 >= total_number
+      THEN 'Ready for Loading'
+      ELSE status
+    END,
+    updated_at = NOW()
+  WHERE id = $3
+`,
+        [assignBoxes, JSON.stringify(updatedContainers), receiverIdNum],
       );
-
-      if (allItemsRes.rowCount === 0) {
-        skipped.push({ ...ass, reason: "no items found in order" });
-        continue;
-      }
-
-      // 5. Update EVERY item in the order
-      for (const it of allItemsRes.rows) {
-        const itId = it.id;
-
-        const currAssignedB = Number(it.assigned_boxes || 0);
-        const remItems = Number(it.total_number || 0) - currAssignedB;
-
-        const itemWeight = Number(it.weight || 0);
-
-        let details =
-          safeParseJsonArrayForMultiple(it.container_details || "[]") || [];
-
-        let e = details.find((en) => en?.container?.cid === cid);
-        if (!e) {
-          e = {
-            status: "Ready for Loading",
-            container: { cid, container_number: contNumber },
-            total_number: String(it.total_number || 0),
-            assign_weight: "0.00",
-            remaining_items: String(it.total_number || 0),
-            assign_total_box: "0",
-          };
-          details.push(e);
-        }
-
-        // Assign full remaining items as assigned boxes
-        e.assign_total_box = String(remItems);
-        e.assign_weight = itemWeight.toFixed(2);
-        e.remaining_items = "0";
-
-        const itemJson = JSON.stringify(details);
-
-        // Set full assigned_boxes and assigned_weight_kg
-        const newB = Number(it.total_number || 0);
-        const newW = itemWeight;
-
-        await client.query(
-          `
-          UPDATE order_items
-          SET
-            assigned_boxes     = $1,
-            assigned_weight_kg = $2,
-            container_details  = $3::jsonb,
-            assigned_at        = NOW(),
-            updated_at         = NOW()
-          WHERE id = $4
-        `,
-          [Number(newB), Number(newW), itemJson, itId],
-        );
-
-        // Track only the target assignment
-        if (itId === targetItemId) {
-          results.push({
-            orderId: orderIdNum,
-            receiverId: receiverIdNum,
-            itemId: itId,
-            container: contNumber,
-            assignedQty: assignBoxes,
-            assignedWeightKg: assignWeight,
-            usedCustomWeight: ass.assignedWeightKg != null,
-            note: "Full remaining items assigned to all order items",
-          });
-        }
-      }
 
       // 6. History log (target item only) – now uses current user email
       await client.query(
         `
-        INSERT INTO container_assignment_history (
-          cid, container_number, order_id, receiver_id, detail_id,
-          assigned_qty, assigned_weight_kg, status, previous_status,
-          action_type, created_by, updated_by, changed_by, notes, created_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
-      `,
+          INSERT INTO container_assignment_history (
+            cid, container_number, order_id, receiver_id, detail_id,
+            assigned_qty, assigned_weight_kg, status, previous_status,
+            action_type, created_by, updated_by, changed_by, notes, created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+        `,
         [
           cid,
           contNumber,
@@ -4293,14 +4328,76 @@ export async function assignContainersBatch(req, res) {
           assignBoxes,
           assignWeight,
           "Ready for Loading",
-          "Available",
+          "Created",
           "ASSIGN",
-          currentUserEmail, // created_by = current user email
-          currentUserEmail, // updated_by = current user email
-          currentUserEmail, // changed_by = current user email
+          currentUserEmail,
+          currentUserEmail,
+          currentUserEmail,
           `Assigned ${assignBoxes} boxes (${assignWeight} kg) via batch`,
         ],
       );
+
+      let details =
+        safeParseJsonArrayForMultiple(targetItem.container_details || "[]") ||
+        [];
+
+      let entry = details.find((e) => e?.container?.cid === cid);
+
+      if (!entry) {
+        entry = {
+          status: "Ready for Loading",
+          container: {
+            cid,
+            container_number: contNumber,
+          },
+          total_number: String(targetItem.total_number || 0),
+          assign_weight: "0.00",
+          remaining_items: String(targetItem.total_number || 0),
+          assign_total_box: "0",
+        };
+
+        details.push(entry);
+      }
+
+      entry.assign_total_box = String(
+        Number(entry.assign_total_box || 0) + assignBoxes,
+      );
+
+      entry.assign_weight = (
+        Number(entry.assign_weight || 0) + assignWeight
+      ).toFixed(2);
+
+      entry.remaining_items = String(
+        Number(targetItem.total_number) - (currentAssignedBoxes + assignBoxes),
+      );
+
+      await client.query(
+        `
+  UPDATE order_items
+  SET
+    assigned_boxes = $1,
+    assigned_weight_kg = $2,
+    container_details = $3::jsonb,
+    assigned_at = NOW(),
+    updated_at = NOW()
+  WHERE id = $4
+`,
+        [
+          currentAssignedBoxes + assignBoxes,
+          Number(targetItem.assigned_weight_kg || 0) + assignWeight,
+          JSON.stringify(details),
+          targetItemId,
+        ],
+      );
+
+      results.push({
+        orderId: orderIdNum,
+        receiverId: receiverIdNum,
+        itemId: targetItemId,
+        container: contNumber,
+        assignedQty: assignBoxes,
+        assignedWeightKg: assignWeight,
+      });
 
       // 7. Set all receivers in the order to Ready for Loading
       await client.query(
@@ -4716,6 +4813,7 @@ export async function assignContainersToOrders(req, res) {
     await client.query("BEGIN");
 
     const { assignments } = req.body;
+    const currentUserEmail = req.user?.email || "system-fallback";
 
     // Get real user email for auditing
     const changedBy = req.user?.id || req.user?.email || "system-fallback";
@@ -4771,6 +4869,7 @@ export async function assignContainersToOrders(req, res) {
           const itemId = Number(assign.orderItemId);
           const qty = Number(assign.qty || 0);
           const userWeight = parseFloat(assign.totalAssignedWeight || 0);
+          const itemLoadingDate = assign.loadingDate || null;
 
           if (!itemId || qty <= 0) continue;
           let removeWeight = parseFloat(assign.totalAssignedWeight || 0);
@@ -4856,17 +4955,17 @@ export async function assignContainersToOrders(req, res) {
             // History insert – now uses real user email in created_by & updated_by
             // ────────────────────────────────────────────────
             // At the top of your function (after client connect)
-            const currentUserEmail = req.user?.email || "system-fallback";
 
             // Then inside the loop:
             await client.query(
               `
-  INSERT INTO container_assignment_history (
-    cid, container_number, order_id, receiver_id, detail_id,
-    assigned_qty, assigned_weight_kg, status, previous_status,
-    action_type, created_by, updated_by, changed_by, notes, created_at
-  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
-`,
+                INSERT INTO container_assignment_history (
+                  cid, container_number, order_id, receiver_id, detail_id,
+                  assigned_qty, assigned_weight_kg, status, previous_status,
+                  action_type, created_by, updated_by, changed_by, notes,
+                  created_at, loaded_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),$15)
+              `,
               [
                 cid,
                 entry.container.container_number,
@@ -4878,10 +4977,11 @@ export async function assignContainersToOrders(req, res) {
                 entry.status,
                 "Created",
                 "ASSIGN",
-                currentUserEmail, // created_by
-                currentUserEmail, // updated_by
-                currentUserEmail, // changed_by → now shows email!
+                currentUserEmail,
+                currentUserEmail,
+                currentUserEmail,
                 `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`,
+                itemLoadingDate ? new Date(itemLoadingDate) : null,
               ],
             );
 
