@@ -14,6 +14,7 @@ import {
   getContainerAssignments,
   releaseContainer,
   getAllContainersForConsignment,
+  getUnassignedOrders,
   // getContainers
 } from "./container.controller.js";
 import { updateContainer } from "../orders/order.controller.js";
@@ -39,5 +40,6 @@ router.get("/:cid", getContainerById);
 router.get("/:cid/usage-history", getUsageHistory);
 router.put("/:cid", updateContainer);
 router.delete("/:cid", deleteContainer);
+router.get("/:cid/unassigned-orders", getUnassignedOrders);
 
 export default router;

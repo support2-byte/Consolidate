@@ -1557,11 +1557,10 @@ export async function createConsignment(req, res) {
 }
 
 export async function updateConsignment(req, res) {
-  const { id } = req.params; // Assume ID from params
+  const { id } = req.params;
   try {
     const data = req.body;
 
-    // Map mixed-case input to consistent snake_case for validation and DB
     const normalizedInput = {
       consignment_number: data.consignment_number || data.consignmentNumber,
       status: data.status,
@@ -1588,7 +1587,7 @@ export async function updateConsignment(req, res) {
       delivered: data.delivered || 0,
       pending: data.pending || 0,
       containers: data.containers || [],
-      orders: data.orders || [], // Keep as-is: array of IDs (numbers) or objects
+      orders: data.orders || [],
     };
 
     const validationErrors = validateConsignmentFields(normalizedInput);
@@ -1619,6 +1618,7 @@ export async function updateConsignment(req, res) {
     } else {
       orderErrors = [{ index: -1, errors: ["orders: Must be an array"] }];
     }
+
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({
         error: "Array validation failed",
@@ -1626,13 +1626,25 @@ export async function updateConsignment(req, res) {
       });
     }
 
-    // Auto-calculate ETA if missing or if status changed
-    let computedETA = normalizedInput.eta;
-    if (!computedETA || data.status !== undefined) {
-      // Will be computed inside transaction
+    // Extract user_id for audit trail
+    const userId = data.user_id || req.user?.id;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ error: "user_id is required for audit trail" });
     }
 
-    // Normalize dates and stringify JSON fields
+    // Extract and validate new container CIDs from request
+    const newContainerIds = new Set(
+      normalizedInput.containers
+        .map((c) => (c.cid != null ? parseInt(c.cid, 10) : null))
+        .filter((cid) => cid != null && !isNaN(cid)),
+    );
+
+    console.log("New container IDs from request:", [...newContainerIds]);
+
+    let computedETA = normalizedInput.eta;
+
     const normalizedData = {
       consignment_number: normalizedInput.consignment_number,
       status: normalizedInput.status,
@@ -1662,7 +1674,6 @@ export async function updateConsignment(req, res) {
       orders: JSON.stringify(normalizedInput.orders),
     };
 
-    // Build SET clause carefully: use only keys from normalizedData
     const updateFields = Object.keys(normalizedData).filter(
       (key) => !["id", "created_at", "updated_at"].includes(key),
     );
@@ -1675,8 +1686,10 @@ export async function updateConsignment(req, res) {
     const query = `UPDATE consignments SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
 
     let updatedConsignment;
+    let containerDiffSummary = { released: [], added: [] };
+
     await withTransaction(async (client) => {
-      // Auto-calculate ETA inside transaction if needed
+      // ── Step 1: Auto-calculate ETA if needed ──────────────────────────
       if (!computedETA || data.status !== undefined) {
         computedETA = await calculateETA(
           client,
@@ -1688,34 +1701,86 @@ export async function updateConsignment(req, res) {
         }
       }
 
-      // Use withUserAudit → automatically adds updated_by = req.user.email (and updated_at if missing)
+      // ── Step 2: Update the consignment row ────────────────────────────
       const updateResult = await withUserAudit(req, query, values);
       if (updateResult.rowCount === 0) {
         throw new Error("Consignment not found");
       }
       updatedConsignment = updateResult.rows[0];
 
-      // Log to tracking if status changed
+      // ── Step 3: Get currently active containers for this consignment ──
+      const activeContainersResult = await client.query(
+        `SELECT id, container_id 
+         FROM container_consignment_history
+         WHERE consignment_id = $1 AND active = true`,
+        [id],
+      );
+
+      const activeContainerIds = new Set(
+        activeContainersResult.rows.map((r) => r.container_id),
+      );
+
+      // ── Step 5: Remove all existing container mappings for this consignment ──
+      const deleteResult = await client.query(
+        `
+          DELETE FROM container_consignment_history
+          WHERE consignment_id = $1
+          RETURNING container_id`,
+        [id],
+      );
+
+      containerDiffSummary.released = deleteResult.rows.map(
+        (r) => r.container_id,
+      );
+
+      for (const cid of newContainerIds) {
+        const insertResult = await client.query(
+          `
+          INSERT INTO container_consignment_history
+            (
+              container_id,
+              consignment_id,
+              assigned_at,
+              created_at,
+              created_by,
+              active
+            )
+          VALUES
+            (
+              $1,
+              $2,
+              NOW(),
+              NOW(),
+              $3,
+              true
+            )
+          RETURNING container_id`,
+          [cid, id, userId],
+        );
+
+        if (insertResult.rowCount > 0) {
+          containerDiffSummary.added.push(cid);
+        }
+      }
+
       if (data.status !== undefined) {
         const logResult = await logToTracking(client, id, "status_updated", {
           newStatus: normalizedInput.status,
           eta: computedETA,
         });
         if (!logResult.success) {
-          console.warn(`Logging failed for ${id}:`, logResult.error);
+          console.warn(
+            `Tracking log failed for consignment ${id}:`,
+            logResult.error,
+          );
         }
       }
-
-      console.log(
-        `Skipped orders/containers cascade for consignment ${id} (JSON-driven relationship)`,
-      );
 
       if (["In Transit", "Delivered"].includes(normalizedInput.status)) {
         await sendNotification(updatedConsignment, "updated");
       }
     });
 
-    // Compute and add client-side fields to response
     const responseData = {
       ...updatedConsignment,
       statusColor: getStatusColor(updatedConsignment.status),
@@ -1724,14 +1789,25 @@ export async function updateConsignment(req, res) {
       paymentType: updatedConsignment.payment_type || "",
       shippingLine: updatedConsignment.shipping_line || null,
       netWeight: updatedConsignment.net_weight || "0.00",
+      containerDiff: {
+        released: containerDiffSummary.released,
+        added: containerDiffSummary.added,
+        noChange: [...newContainerIds].filter(
+          (cid) => !containerDiffSummary.added.includes(cid),
+        ),
+      },
     };
 
-    console.log("Consignment updated with ID:", updatedConsignment.id);
-    res
-      .status(200)
-      .json({ message: "Consignment updated", data: responseData });
+    console.log("Consignment updated successfully, ID:", updatedConsignment.id);
+    console.log("Container diff:", containerDiffSummary);
+
+    res.status(200).json({
+      message: "Consignment updated",
+      data: responseData,
+    });
   } catch (err) {
     console.error("Error updating consignment:", err);
+
     if (err.message === "Consignment not found") {
       return res.status(404).json({ error: "Consignment not found" });
     }
@@ -1740,9 +1816,17 @@ export async function updateConsignment(req, res) {
         .status(409)
         .json({ error: "Consignment number already exists" });
     }
-    res
-      .status(500)
-      .json({ error: "Failed to update consignment", details: err.message });
+    if (err.code === "23503") {
+      return res.status(400).json({
+        error: "Foreign key violation — container or user ID not found",
+        details: err.detail,
+      });
+    }
+
+    res.status(500).json({
+      error: "Failed to update consignment",
+      details: err.message,
+    });
   }
 }
 

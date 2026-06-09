@@ -819,6 +819,17 @@ export async function getAllContainers(req, res) {
       ) cs ON true
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+      LEFT JOIN LATERAL (
+        SELECT
+          c.id,
+          c.consignment_number
+        FROM container_consignment_history cch
+        JOIN consignments c
+          ON c.id = cch.consignment_id
+        WHERE cch.container_id = cm.cid
+        ORDER BY cch.id DESC
+        LIMIT 1
+      ) lc ON true
     `;
 
     let selectClause = `
@@ -832,7 +843,8 @@ export async function getAllContainers(req, res) {
           ELSE 'Available'
         END as derived_status,
         cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,
+        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,lc.id as consignment_id,
+        lc.consignment_number,
         cm.created_time
     `;
 
@@ -1140,7 +1152,6 @@ export async function getUsageHistory(req, res) {
     const containerId = parseInt(cid);
 
     const historyQuery = `
-      -- Status changes from container_status
       SELECT 
         cs.created_time as event_time,
         'STATUS_CHANGE' as event_type,
@@ -1161,25 +1172,25 @@ export async function getUsageHistory(req, res) {
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
-        o.id as job_id,
-        o.booking_ref as job_no,
-        o.rgl_booking_number as form_no,
-        o.place_of_loading as pol,
-        o.final_destination as pod,
-        o.created_at as start_date,
-        o.updated_at as end_date,
-        o.status as order_status
+        NULL as job_id,
+        NULL as job_no,
+        NULL as form_no,
+        NULL as pol,
+        NULL as pod,
+        NULL as start_date,
+        NULL as end_date,
+        NULL as order_status,
+        NULL as consignment_status,
+        NULL as shipper_name,
+        NULL as consignee_name
       FROM container_status cs
       JOIN container_master cm ON cs.cid = cm.cid
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      LEFT JOIN orders o ON o.associated_container = cm.container_number 
-        AND o.status != 'Cancelled'
       WHERE cs.cid = $1
 
       UNION ALL
 
-      -- Assignment events from container_assignment_history
       SELECT 
         cah.created_at as event_time,
         'ASSIGNMENT' as event_type,
@@ -1195,7 +1206,7 @@ export async function getUsageHistory(req, res) {
         cah.order_id,
         cah.receiver_id,
         cah.detail_id,
-        con.consignment_number,
+        con.consignment_number as consignment_number,
         cm.container_number,
         cm.owner_type,
         cpd.owned_by,
@@ -1207,23 +1218,26 @@ export async function getUsageHistory(req, res) {
         o.final_destination as pod,
         o.created_at as start_date,
         o.updated_at as end_date,
-        o.status as order_status
-      FROM container_assignment_history cah
-      JOIN container_master cm ON cah.cid = cm.cid
-      LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      LEFT JOIN orders o ON cah.order_id = o.id 
-        AND o.status != 'Cancelled'
-      LEFT JOIN container_consignment_history cch 
-        ON cch.container_id = cah.cid 
-        -- AND cch.assigned_at <= cah.created_at
-        -- AND (cch.released_at IS NULL OR cch.released_at >= cah.created_at)
-      LEFT JOIN consignments con 
-        ON con.id = cch.consignment_id
-      WHERE cah.cid = $1
+        o.status as order_status,
+        con.status as consignment_status,
+        con.shipper as shipper_name,
+        con.consignee as consignee_name
+        FROM container_assignment_history cah
+        JOIN container_master cm ON cah.cid = cm.cid
+        LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
+        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+        LEFT JOIN orders o 
+          ON cah.order_id = o.id 
+          AND o.status != 'Cancelled'
+        LEFT JOIN consignments con
+          ON con.orders @> to_jsonb(cah.order_id)
+        LEFT JOIN container_consignment_history cch
+          ON cch.consignment_id = con.id
+          AND cch.container_id = cah.cid
+        WHERE cah.cid = $1
+          AND con.id IS NOT NULL
 
-      ORDER BY event_time DESC
-    `;
+        ORDER BY event_time DESC`;
 
     const statusHistoryQuery = `
       SELECT 
@@ -1256,6 +1270,9 @@ export async function getUsageHistory(req, res) {
       return {
         eventTime: row.event_time.toISOString().split("T")[0],
         eventType: row.event_type,
+        consignmentStatus: row.consignment_status || null,
+        shipperName: row.shipper_name || null,
+        consigneeName: row.consignee_name || null,
         eventSummary,
         assignedQty: Number(row.assigned_qty || 0),
         assignedWeightKg: Number(row.assigned_weight_kg || 0),
@@ -1289,24 +1306,20 @@ export async function getUsageHistory(req, res) {
 
     const groupedByConsignment = {};
 
-    // const groupedHistory = {};
-
     formattedHistory
-      .filter((e) => e.eventType === "ASSIGNMENT")
+      .filter((e) => e.eventType === "ASSIGNMENT" && e.assignedQty > 0)
       .forEach((event) => {
         const key =
-          event.consignmentNo ||
-          event.bookingRef ||
-          `NO-CONSIGNMENT-${event.orderId}`;
+          event.consignmentNo || `ORDER-${event.bookingRef || event.orderId}`;
 
         if (!groupedByConsignment[key]) {
           groupedByConsignment[key] = {
-            consignmentNo: event.consignmentNo,
-            loadedAt: event.loadedAt,
+            consignmentNo: event.consignmentNo || null,
             bookingRef: event.bookingRef,
             formNo: event.formNo,
             pol: event.pol,
             pod: event.pod,
+            loadedAt: event.loadedAt,
             orders: [],
           };
         }
@@ -1327,6 +1340,7 @@ export async function getUsageHistory(req, res) {
     console.log(
       `Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`,
     );
+
     console.log({
       rawEvents: formattedHistory,
       groupedByConsignment,
@@ -1411,8 +1425,7 @@ export const getContainerAssignments = async (req, res) => {
         cc.released_at,
         cc.created_at,
         COALESCE(NULLIF(cu.name, ''), cu.email) AS created_by,
-        cc.modified_at,
-        COALESCE(NULLIF(mu.name, ''), mu.email) AS modified_by,
+        COALESCE(NULLIF(mu.name, ''), mu.email) AS released_by,
         cc.active
       FROM container_consignment_history cc
       INNER JOIN container_master cm
@@ -1422,7 +1435,7 @@ export const getContainerAssignments = async (req, res) => {
       INNER JOIN users cu
           ON cu.id = cc.created_by
       LEFT JOIN users mu
-          ON mu.id = cc.modified_by
+          ON mu.id = cc.released_by
       ORDER BY cc.assigned_at DESC, cc.id DESC;
     `);
 
@@ -1445,7 +1458,7 @@ export const getContainerAssignments = async (req, res) => {
 export const releaseContainer = async (req, res) => {
   try {
     const { id } = req.params;
-    const { release_date } = req.body;
+    const { release_date, user_id } = req.body;
 
     if (!release_date) {
       return res.status(400).json({
@@ -1462,13 +1475,13 @@ export const releaseContainer = async (req, res) => {
         SET
           released_at = $1,
           active = false,
-          modified_at = CURRENT_DATE
-        WHERE id = $2
+          released_by = $2
+        WHERE id = $3
           AND released_at IS NULL
         RETURNING *
       `;
 
-      const result = await client.query(query, [release_date, id]);
+      const result = await client.query(query, [release_date, user_id, id]);
 
       if (result.rowCount === 0) {
         throw new Error("ASSIGNMENT_NOT_FOUND");
@@ -1701,5 +1714,106 @@ export async function getAllContainersForConsignment(req, res) {
     res
       .status(500)
       .json({ error: err.message || "Failed to fetch containers" });
+  }
+}
+
+export async function getUnassignedOrders(req, res) {
+  try {
+    const { cid } = req.params;
+
+    if (!cid || isNaN(parseInt(cid))) {
+      return res.status(400).json({ error: "Valid CID is required" });
+    }
+
+    const containerId = parseInt(cid);
+
+    const query = `
+      SELECT
+        cah.created_at          AS event_time,
+        'ASSIGNMENT'            AS event_type,
+        cah.status              AS event_status,
+        cah.assigned_qty,
+        cah.assigned_weight_kg,
+        cah.action_type,
+        cah.loaded_at,
+        cah.notes,
+        cah.changed_by,
+        cah.previous_status,
+        cah.order_id,
+        cah.receiver_id,
+        cah.detail_id,
+        cm.container_number,
+        cm.owner_type,
+        o.booking_ref           AS job_no,
+        o.rgl_booking_number    AS form_no,
+        o.place_of_loading      AS pol,
+        o.final_destination     AS pod,
+        o.created_at            AS start_date,
+        o.updated_at            AS end_date,
+        o.id                    AS job_id
+      FROM container_assignment_history cah
+      JOIN container_master cm ON cah.cid = cm.cid
+      LEFT JOIN orders o
+        ON cah.order_id = o.id
+        AND o.status != 'Cancelled'
+      WHERE cah.cid = $1
+        AND o.id IS NOT NULL          -- was con.id, which doesn't exist
+        AND cah.assigned_qty > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM consignments c
+          WHERE c.orders @> to_jsonb(cah.order_id)
+        )
+      ORDER BY cah.created_at DESC
+    `;
+
+    const result = await pool.query(query, [containerId]);
+
+    const orders = result.rows.map((row) => {
+      const eventSummary = `${row.action_type || "ASSIGNMENT"} ${row.assigned_qty || 0} items (${row.assigned_weight_kg || 0} kg) — Prev: ${row.previous_status || "N/A"}`;
+
+      return {
+        eventTime: row.event_time
+          ? row.event_time.toISOString().split("T")[0]
+          : null,
+        eventType: row.event_type,
+        eventSummary,
+        assignedQty: Number(row.assigned_qty || 0),
+        assignedWeightKg: Number(row.assigned_weight_kg || 0),
+        actionType: row.action_type || null,
+        previousStatus: row.previous_status || null,
+        loadedAt: row.loaded_at
+          ? row.loaded_at.toISOString().split("T")[0]
+          : null,
+        orderId: row.order_id || null,
+        bookingRef: row.job_no || null,
+        formNo: row.form_no || null,
+        pol:
+          row.pol || (row.owner_type === "soc" ? "Self Depot" : "Vendor Depot"),
+        pod: row.pod || "Destination Depot",
+        startDate: row.start_date
+          ? row.start_date.toISOString().split("T")[0]
+          : row.event_time?.toISOString().split("T")[0] || null,
+        endDate: row.end_date
+          ? row.end_date.toISOString().split("T")[0]
+          : row.event_time?.toISOString().split("T")[0] || null,
+        linkedOrders: row.job_no ? `ORD-${row.job_id}` : "N/A",
+        remarks: row.notes || eventSummary,
+        changedBy: row.changed_by || "System",
+        receiverId: row.receiver_id || null,
+        detailId: row.detail_id || null,
+      };
+    });
+
+    console.log(
+      `[unassigned-orders] container ${containerId}: ${orders.length} events without a consignment`,
+    );
+
+    return res.json({ total: orders.length, orders });
+  } catch (err) {
+    console.error("Error fetching unassigned orders:", err);
+    return res.status(500).json({
+      error: "Failed to fetch unassigned orders",
+      details: err.message,
+    });
   }
 }

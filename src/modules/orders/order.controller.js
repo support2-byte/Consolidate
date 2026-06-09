@@ -1982,7 +1982,31 @@ export async function getOrdersConsignments(req, res) {
         )
       )`;
 
-      whereClause += ` AND o.created_at::date = CURRENT_DATE`;
+      const { consignment_id } = req.query;
+
+      if (consignment_id) {
+        whereClause += ` AND (
+    o.created_at::date = CURRENT_DATE
+    OR o.created_at::date = (
+      SELECT cch.released_at
+      FROM container_consignment_history cch
+      WHERE cch.consignment_id = $${params.length + 1}
+        AND cch.released_at IS NOT NULL
+      ORDER BY cch.id DESC
+      LIMIT 1
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM consignments c
+      WHERE c.id = $${params.length + 1}
+        AND c.orders @> to_jsonb(o.id)
+    )
+  )`;
+
+        params.push(parseInt(consignment_id, 10));
+      } else {
+        whereClause += ` AND o.created_at::date = CURRENT_DATE`;
+      }
     }
 
     // Safe casting helpers (same as getOrderById)
@@ -4316,8 +4340,8 @@ export async function assignContainersBatch(req, res) {
           INSERT INTO container_assignment_history (
             cid, container_number, order_id, receiver_id, detail_id,
             assigned_qty, assigned_weight_kg, status, previous_status,
-            action_type, created_by, updated_by, changed_by, notes, created_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+            action_type, created_by, updated_by, changed_by, notes, created_at, loaded_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
         `,
         [
           cid,
@@ -5080,7 +5104,8 @@ export async function removeContainerAssignments(req, res) {
     await client.query("BEGIN");
 
     const { assignments } = req.body;
-    const created_by = req.user?.id || "system";
+    // const created_by = req.user?.id || req.user?.email || "system";
+    const created_by = req.user?.email || "system";
 
     if (
       !assignments ||
