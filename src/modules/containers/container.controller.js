@@ -1341,27 +1341,6 @@ export async function getUsageHistory(req, res) {
       `Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`,
     );
 
-    console.log({
-      rawEvents: formattedHistory,
-      groupedByConsignment,
-      containerStatusHistory: {
-        totalRecords: formattedStatusHistory.length,
-        events: formattedStatusHistory,
-        summary: {
-          uniqueStatuses: [
-            ...new Set(formattedStatusHistory.map((s) => s.status)),
-          ],
-          firstStatus:
-            formattedStatusHistory[formattedStatusHistory.length - 1]?.status ||
-            "N/A",
-          latestStatus: formattedStatusHistory[0]?.status || "N/A",
-          totalLocations: [
-            ...new Set(formattedStatusHistory.map((s) => s.location)),
-          ].length,
-        },
-      },
-    });
-
     res.json({
       rawEvents: formattedHistory,
       groupedByConsignment,
@@ -1488,6 +1467,15 @@ export const releaseContainer = async (req, res) => {
       }
 
       releasedAssignment = result.rows[0];
+
+      await client.query(
+        `
+        UPDATE container_master
+          SET derived_status = 'Available'
+        WHERE cid = $1
+        `,
+        [releasedAssignment.container_id],
+      );
     });
 
     return res.status(200).json({

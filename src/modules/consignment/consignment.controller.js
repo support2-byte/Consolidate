@@ -1288,20 +1288,22 @@ export async function getConsignments(req, res) {
 
     let baseQuery = `
       SELECT 
-        cons.id, 
-        cons.consignment_number, 
-        cons.status, 
-        COALESCE(s.name, cons.shipper) AS shipper,  -- Prefer joined name, fallback to denormalized
-        COALESCE(c.name, cons.consignee) AS consignee, 
-        cons.eta, 
+        cons.id,
+        cons.consignment_number,
+        cons.status,
+        COALESCE(shipper_tp.company_name, cons.shipper) AS shipper,
+        COALESCE(consignee_tp.company_name, cons.consignee) AS consignee,
+        cons.eta,
         cons.created_at,
-        cons.gross_weight, 
-        cons.orders, 
-        cons.delivered, 
+        cons.gross_weight,
+        cons.orders,
+        cons.delivered,
         cons.pending
       FROM consignments cons
-      LEFT JOIN shippers s ON cons.shipper_id = s.id  -- LEFT JOIN to handle missing refs
-      LEFT JOIN consignees c ON cons.consignee_id = c.id
+      LEFT JOIN third_parties shipper_tp
+        ON cons.shipper_id = shipper_tp.id
+      LEFT JOIN third_parties consignee_tp
+        ON cons.consignee_id = consignee_tp.id
     `;
     let whereClauses = [];
     let queryParams = [];
@@ -1460,7 +1462,7 @@ export async function createConsignment(req, res) {
       payment_type: input.payment_type,
       vessel: input.vessel,
       voyage: input.voyage,
-      eta: finalEta, // ← Only if provided
+      eta: finalEta,
       shipping_line_name: input.shipping_line,
       seal_no: input.seal_no,
       net_weight: input.net_weight,
@@ -1472,7 +1474,6 @@ export async function createConsignment(req, res) {
       orders: JSON.stringify(input.orders),
     };
 
-    // Dynamic INSERT – use withUserAudit for auto created_by / updated_by
     const keys = Object.keys(dbData);
     const values = Object.values(dbData);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(", ");
@@ -1514,22 +1515,47 @@ export async function createConsignment(req, res) {
         });
 
         const query = `
-      INSERT INTO container_consignment_history
-      (
-        consignment_id,
-        container_id,
-        assigned_at,
-        created_at,
-        created_by,
-        active
-      )
-      VALUES
-      ${placeholders.join(",")}
-      RETURNING *
-    `;
+          INSERT INTO container_consignment_history
+          (
+            consignment_id,
+            container_id,
+            assigned_at,
+            created_at,
+            created_by,
+            active
+          )
+          VALUES
+          ${placeholders.join(",")}
+          RETURNING *`;
 
         const result = await client.query(query, values);
         ccNew = result.rows;
+      }
+    });
+
+    let updatedCah = [];
+
+    await withTransaction(async (client) => {
+      if (ccNew.length > 0) {
+        const values = [];
+        const tuples = [];
+
+        ccNew.forEach((row, index) => {
+          const offset = index * 2;
+          tuples.push(`($${offset + 1}, $${offset + 2})`);
+          values.push(parseInt(row.container_id), parseInt(row.consignment_id));
+        });
+
+        const query = `
+        UPDATE container_assignment_history cah
+        SET consignment_id = v.consignment_id::integer
+        FROM (
+          VALUES ${tuples.join(",")}
+        ) AS v(cid, consignment_id)
+        WHERE cah.cid = v.cid::integer
+      `;
+
+        await client.query(query, values);
       }
     });
 

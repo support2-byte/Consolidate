@@ -1812,7 +1812,6 @@ export async function getOrderByReference(req, res) {
 
     const ordersResult = await pool.query(ordersQuery, params);
 
-    // For public endpoint, usually expect 0 or 1 result
     const data = ordersResult.rows.map((row) => ({
       ...row,
       overall_status: row.latest_tracking_status || row.status || "Created",
@@ -1845,12 +1844,21 @@ export async function getOrderByReference(req, res) {
   }
 }
 
+// export const getOrdersConsignments = async(req, res) => {
+//   try {
+//     const {container_ids} = req.query
+//     const client = await pool.connect()
+
+//     const ids = container_ids.map((c) => c.cid)
+
+//     const orders = await client.query(`SELECT id, booking_ref, rgl_booking_number, place_of_loading, place_of_delivery, sender_id, receiver_id FROM orders WHERE container_id IN (${ids})`)
+//   } catch (error) {
+//     return res.status(500).json(success)
+//   }
+// }
+
+// Current API
 export async function getOrdersConsignments(req, res) {
-  // console.log('[getOrdersConsignments] Request query:', req,res);
-  // console.log('[getOrdersConsignments] Auth user:', req.user ? req.user.email : 'unauthenticated');s
-  // const { id } = req.params;
-  // const { includeContainer = 'true' } = req.query;
-  // Early auth check (optional – remove if endpoint should be public)
   if (!req.user) {
     return res.status(401).json({
       success: false,
@@ -1858,21 +1866,18 @@ export async function getOrdersConsignments(req, res) {
       details: "Please log in to view orders",
     });
   }
+
   const client = await pool.connect();
 
-  // let client;
   try {
-    // ────────────────────────────────────────────────
-    // Pagination – safe + early validation
-    // ────────────────────────────────────────────────
     const rawPage = req.query.page || "1";
     const rawLimit = req.query.limit || "10";
     const safePage = Math.max(1, parseInt(rawPage, 10));
     const safeLimit = Math.max(1, Math.min(100, parseInt(rawLimit, 10)));
     const safeOffset = (safePage - 1) * safeLimit;
 
-    // Filters
-    const { status, booking_ref, container_id } = req.query;
+    const { status, booking_ref, container_id, consignment_id, pol, pod } =
+      req.query;
     let whereClause = "WHERE 1=1";
     let params = [];
 
@@ -1886,7 +1891,6 @@ export async function getOrdersConsignments(req, res) {
       params.push(`%${booking_ref}%`);
     }
 
-    // Container filter (kept your safe logic – no change)
     if (container_id) {
       const containerIds = container_id
         .split(",")
@@ -1944,7 +1948,7 @@ export async function getOrdersConsignments(req, res) {
       }
 
       const otConditions = validIds
-        .map((idStr, idx) => {
+        .map((idStr) => {
           const paramIdx = params.length + 1;
           params.push(parseInt(idStr));
           return `ot.container_id = $${paramIdx}`;
@@ -1952,7 +1956,7 @@ export async function getOrdersConsignments(req, res) {
         .join(" OR ");
 
       const cmConditions = containerNumbers
-        .map((num, idx) => {
+        .map((num) => {
           const paramIdx = params.length + 1;
           params.push(`%${num}%`);
           return `cm.container_number ILIKE $${paramIdx}`;
@@ -1960,13 +1964,13 @@ export async function getOrdersConsignments(req, res) {
         .join(" OR ");
 
       const receiverExists = containerNumbers
-        .map((num, idx) => {
+        .map((num) => {
           const paramIdx = params.length + 1;
           params.push(`%${num}%`);
           return `EXISTS (
-          SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
-          WHERE cont ILIKE $${paramIdx}
-        )`;
+            SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
+            WHERE cont ILIKE $${paramIdx}
+          )`;
         })
         .join(" OR ");
 
@@ -1976,44 +1980,51 @@ export async function getOrdersConsignments(req, res) {
         EXISTS (
           SELECT 1 FROM receivers r
           WHERE r.order_id = o.id
-          AND r.containers IS NOT NULL
-          AND jsonb_typeof(r.containers) = 'array'
-          AND (${receiverExists})
+            AND r.containers IS NOT NULL
+            AND jsonb_typeof(r.containers) = 'array'
+            AND (${receiverExists})
         )
       )`;
 
-      const { consignment_id } = req.query;
-
       if (consignment_id) {
         whereClause += ` AND (
-    o.created_at::date = CURRENT_DATE
-    OR o.created_at::date = (
-      SELECT cch.released_at
-      FROM container_consignment_history cch
-      WHERE cch.consignment_id = $${params.length + 1}
-        AND cch.released_at IS NOT NULL
-      ORDER BY cch.id DESC
-      LIMIT 1
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM consignments c
-      WHERE c.id = $${params.length + 1}
-        AND c.orders @> to_jsonb(o.id)
-    )
-  )`;
-
+          o.created_at::date = CURRENT_DATE
+          OR o.created_at::date = (
+            SELECT cch.released_at
+            FROM container_consignment_history cch
+            WHERE cch.consignment_id = $${params.length + 1}
+              AND cch.released_at IS NOT NULL
+            ORDER BY cch.id DESC
+            LIMIT 1
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM consignments c
+            WHERE c.id = $${params.length + 1}
+              AND c.orders @> to_jsonb(o.id)
+          )
+        )`;
         params.push(parseInt(consignment_id, 10));
       } else {
-        whereClause += ` AND o.created_at::date = CURRENT_DATE`;
+        if (pol) {
+          whereClause += ` AND o.place_of_loading = $${params.length + 1}`;
+          params.push(String(pol.trim()));
+        }
+        if (pod) {
+          whereClause += ` AND o.place_of_delivery = $${params.length + 1}`;
+          params.push(String(pod.trim()));
+        }
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM container_assignment_history ch
+          WHERE ch.order_id = o.id
+            AND COALESCE(ch.status, 'Ready for Loading') = 'Ready for Loading'
+        )`;
       }
     }
 
-    // Safe casting helpers (same as getOrderById)
     const safeIntCast = (val) => `COALESCE(${val}, 0)`;
     const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
 
-    // containerDetailsSub – same as getOrderById
     const containerDetailsSub = `
       COALESCE((
         SELECT json_agg(
@@ -2041,7 +2052,6 @@ export async function getOrdersConsignments(req, res) {
       ), '[]'::json)
     `;
 
-    // shippingDetailsAgg – same structure as getOrderById
     const shippingDetailsAgg = `
       (SELECT COALESCE(json_agg(
         json_build_object(
@@ -2070,7 +2080,6 @@ export async function getOrdersConsignments(req, res) {
       WHERE oi.receiver_id = r.id)
     `;
 
-    // receiversSub – same structure as getOrderById
     const receiversSub = `
       (SELECT COALESCE(json_agg(r_full ORDER BY r_full.id), '[]'::json) FROM (
         SELECT
@@ -2117,8 +2126,7 @@ export async function getOrdersConsignments(req, res) {
       ) r_full) AS receivers
     `;
 
-    // Main select fields (your original structure)
-    let selectFields = [
+    const selectFields = [
       "o.*",
       "s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_type, s.selected_sender_owner",
       "t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic",
@@ -2133,14 +2141,12 @@ export async function getOrdersConsignments(req, res) {
       receiversSub,
     ].join(", ");
 
-    let joinsArray = [
+    const joins = [
       "LEFT JOIN senders s ON o.id = s.order_id",
       "LEFT JOIN transport_details t ON o.id = t.order_id",
       "LEFT JOIN LATERAL (SELECT ot2.status, ot2.created_time, ot2.container_id FROM order_tracking ot2 WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1) ot ON true",
       "LEFT JOIN container_master cm ON ot.container_id = cm.cid",
-    ];
-
-    const joins = joinsArray.join("\n      ");
+    ].join("\n      ");
 
     const countQuery = `
       SELECT COUNT(DISTINCT o.id) as total_count
@@ -2167,7 +2173,6 @@ export async function getOrdersConsignments(req, res) {
 
     const total = parseInt(countResult.rows[0]?.total_count || 0);
 
-    // Format response – same style as getOrderById
     const formattedData = result.rows.map((row) => {
       let receivers = row.receivers || [];
       if (typeof receivers === "string") {
@@ -2279,6 +2284,8 @@ export async function getOrdersConsignments(req, res) {
     if (client) client.release();
   }
 }
+
+// Old API
 
 // export async function getOrdersConsignments(req, res) {
 //   try {
@@ -4123,6 +4130,8 @@ export async function assignContainersBatch(req, res) {
 
     const { assignments = [] } = req.body;
 
+    console.log({ assignments });
+
     if (!Array.isArray(assignments) || assignments.length === 0) {
       return res.status(400).json({
         success: false,
@@ -4319,18 +4328,18 @@ export async function assignContainersBatch(req, res) {
 
       await client.query(
         `
-  UPDATE receivers
-  SET
-    qty_delivered = COALESCE(qty_delivered, 0) + $1,
-    containers = $2::jsonb,
-    status = CASE
-      WHEN COALESCE(qty_delivered, 0) + $1 >= total_number
-      THEN 'Ready for Loading'
-      ELSE status
-    END,
-    updated_at = NOW()
-  WHERE id = $3
-`,
+          UPDATE receivers
+          SET
+            qty_delivered = COALESCE(qty_delivered, 0) + $1,
+            containers = $2::jsonb,
+            status = CASE
+              WHEN COALESCE(qty_delivered, 0) + $1 >= total_number
+              THEN 'Ready for Loading'
+              ELSE status
+            END,
+            updated_at = NOW()
+          WHERE id = $3
+        `,
         [assignBoxes, JSON.stringify(updatedContainers), receiverIdNum],
       );
 
@@ -4397,15 +4406,15 @@ export async function assignContainersBatch(req, res) {
 
       await client.query(
         `
-  UPDATE order_items
-  SET
-    assigned_boxes = $1,
-    assigned_weight_kg = $2,
-    container_details = $3::jsonb,
-    assigned_at = NOW(),
-    updated_at = NOW()
-  WHERE id = $4
-`,
+          UPDATE order_items
+          SET
+            assigned_boxes = $1,
+            assigned_weight_kg = $2,
+            container_details = $3::jsonb,
+            assigned_at = NOW(),
+            updated_at = NOW()
+          WHERE id = $4
+        `,
         [
           currentAssignedBoxes + assignBoxes,
           Number(targetItem.assigned_weight_kg || 0) + assignWeight,
@@ -6822,7 +6831,7 @@ export async function updateSpecificItemsStatus(req, res) {
              updated_at = CURRENT_TIMESTAMP
        WHERE order_id = $2
          AND item_ref = ANY($3::text[])${extraWhere}
-   RETURNING id, receiver_id, item_ref, consignment_status
+      RETURNING id, receiver_id, item_ref, consignment_status
     `,
       queryParams,
     );
