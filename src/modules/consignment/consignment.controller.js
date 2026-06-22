@@ -732,215 +732,130 @@ export async function getConsignmentById(req, res) {
     res.status(500).json({ error: "Failed to fetch consignment" });
   }
 }
-export async function updateConsignmentStatus(req, res) {
-  console.log("Update Status Request:", { params: req.params, body: req.body });
-  try {
-    const { id } = req.params;
-    const numericId = parseInt(id, 10);
-    if (isNaN(numericId) || numericId <= 0) {
-      return res
-        .status(400)
-        .json({ error: "Invalid consignment ID. Must be a positive integer." });
-    }
 
-    const { status, reason } = req.body;
+// export async function updateConsignmentStatus(req, res) {
+//   try {
+//     const consignmentId = Number(req.params.id);
 
-    if (!status) {
-      return res
-        .status(400)
-        .json({ error: "Status is required in request body" });
-    }
+//     if (!Number.isInteger(consignmentId) || consignmentId <= 0) {
+//       return res.status(400).json({
+//         error: "Invalid consignment ID",
+//       });
+//     }
 
-    if (!validConsignmentStatuses.includes(status)) {
-      return res.status(400).json({
-        error: `Invalid status: ${status}. Must be one of: ${validConsignmentStatuses.join(", ")}`,
-      });
-    }
+//     const { status, reason = null } = req.body;
 
-    // Optional: Require reason for terminal/sensitive changes
-    const sensitiveStatuses = ["HOLD", "Cancelled"];
-    if (sensitiveStatuses.includes(status) && !reason) {
-      return res
-        .status(400)
-        .json({ error: `Reason is required for status: ${status}` });
-    }
+//     if (!status) {
+//       return res.status(400).json({
+//         error: "Status is required",
+//       });
+//     }
 
-    // Validate consignment exists
-    const { rows } = await pool.query(
-      "SELECT status FROM consignments WHERE id = $1",
-      [numericId],
-    );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Consignment not found" });
-    }
+//     if (!validConsignmentStatuses.includes(status)) {
+//       return res.status(400).json({
+//         error: `Invalid status. Allowed: ${validConsignmentStatuses.join(", ")}`,
+//       });
+//     }
 
-    const currentStatus = rows[0].status;
-    if (currentStatus === status) {
-      return res.status(200).json({ message: "Status unchanged" });
-    }
+//     const consignmentResult = await pool.query(
+//       `
+//       SELECT
+//         id,
+//         status,
+//         order_id,
+//         sender_id,
+//         receiver_id,
+//         container_id,
+//         consignment_number,
+//         item_ref
+//       FROM consignments
+//       WHERE id = $1
+//       `,
+//       [consignmentId],
+//     );
 
-    // Enhanced transition validation (basic state machine)
-    const allowedTransitions = {
-      "Drafts Cleared": ["Submitted On Vessel", "Submitted", "Customs Cleared"],
-      "Submitted On Vessel": [
-        "In Transit On Vessel",
-        "Under Shipment Processing",
-      ],
-      "In Transit On Vessel": ["Arrived at Facility", "Ready for Delivery"],
-      "Ready for Delivery": ["Delivered", "HOLD for Delivery"],
-      // Terminal: Only self or other terminal
-      Delivered: ["Delivered", "HOLD"],
-      Cancelled: ["Cancelled"],
-      HOLD: ["HOLD", "HOLD for Delivery", "Delivered"],
-      // Add more as needed; fallback allows any non-terminal
-    };
-    const terminalStatuses = ["Delivered", "Cancelled", "HOLD"];
-    if (
-      terminalStatuses.includes(currentStatus) &&
-      !terminalStatuses.includes(status)
-    ) {
-      return res.status(400).json({
-        error: `Cannot advance from terminal status: ${currentStatus}`,
-      });
-    }
-    if (
-      !terminalStatuses.includes(currentStatus) &&
-      allowedTransitions[currentStatus] &&
-      !allowedTransitions[currentStatus].includes(status)
-    ) {
-      return res.status(400).json({
-        error: `Invalid transition from ${currentStatus} to ${status}. Allowed: ${allowedTransitions[currentStatus].join(", ")}`,
-      });
-    }
+//     if (!consignmentResult.rows.length) {
+//       return res.status(404).json({
+//         error: "Consignment not found",
+//       });
+//     }
 
-    // Compute newEta once using pool (set to null for terminal)
-    let newEta;
-    if (terminalStatuses.includes(status)) {
-      newEta = null; // Or new Date('2025-12-26') for Delivered testing
-    } else {
-      newEta = await calculateETA(pool, status);
-    }
+//     const consignment = consignmentResult.rows[0];
 
-    let updateError = null; // Flag for error handling
-    await withTransaction(async (client) => {
-      try {
-        // Update status, ETA, and timestamp
-        await client.query(
-          "UPDATE consignments SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
-          [status, newEta, numericId],
-        );
+//     if (consignment.status === status) {
+//       return res.json({
+//         message: "Status unchanged",
+//       });
+//     }
 
-        // Isolated logging (non-critical)
-        try {
-          await safeLogToTracking(client, numericId, "status_updated", {
-            from: currentStatus,
-            to: status,
-            newEta,
-            reason: reason || "Manual update",
-          });
-        } catch (logErr) {
-          console.warn(
-            `Failed to log tracking for consignment ${numericId}:`,
-            logErr,
-          );
-          // Continue without abort
-        }
+//     const terminalStatuses = ["Delivered", "Cancelled", "HOLD"];
 
-        // Isolated notification (non-critical)
-        try {
-          const updated = await client.query(
-            "SELECT * FROM consignments WHERE id = $1",
-            [numericId],
-          );
-          await sendNotification(
-            updated.rows[0],
-            `status_updated_to_${status}`,
-            { reason },
-          );
-        } catch (notifErr) {
-          console.warn(
-            `Failed to send notification for consignment ${numericId}:`,
-            notifErr,
-          );
-          // Continue without abort
-        }
+//     const newEta = terminalStatuses.includes(status)
+//       ? null
+//       : await calculateETA(pool, status);
 
-        // Optional: Sync linked orders' statuses (skip for partial/terminal to avoid overwriting)
-        if (!["Partially Delivered", ...terminalStatuses].includes(status)) {
-          try {
-            let orderIdsQuery = await client.query(
-              "SELECT orders FROM consignments WHERE id = $1",
-              [numericId],
-            );
-            let rawOrders = orderIdsQuery.rows[0]?.orders;
-            if (typeof rawOrders === "string") {
-              try {
-                rawOrders = JSON.parse(rawOrders);
-              } catch (parseErr) {
-                console.warn(
-                  `Failed to parse orders for sync in update:`,
-                  parseErr,
-                );
-                rawOrders = [];
-              }
-            }
-            const syncOrderIds = extractOrderIds(rawOrders)
-              .map((oid) => parseInt(oid, 10))
-              .filter((oid) => !isNaN(oid) && oid > 0);
-            // Log for debugging
-            console.log(
-              `Sync orderIds for consignment ${numericId}:`,
-              syncOrderIds,
-            );
-            if (syncOrderIds.length > 0) {
-              await client.query(
-                "UPDATE orders SET status = $1 WHERE id = ANY($2::int[])",
-                [status, syncOrderIds],
-              );
-            }
-          } catch (syncErr) {
-            console.warn(
-              `Failed to sync orders for consignment ${numericId}:`,
-              syncErr,
-            );
-            // Don't rollback—log only
-          }
-        }
-      } catch (updateErr) {
-        updateError = updateErr; // Capture error without throwing yet
-        if (updateErr.code === "22P02") {
-          // Enum violation
-          console.warn(
-            `Enum constraint violation for status '${status}' on consignment ${numericId}; skipping update. Add to enum: ALTER TYPE consignment_status ADD VALUE '${status}';`,
-          );
-        } else {
-          throw updateErr; // Re-throw non-enum errors to abort tx
-        }
-      }
-    });
+//     await withTransaction(async (client) => {
+//       await client.query(
+//         `
+//         UPDATE consignments
+//         SET
+//           status = $1,
+//           eta = $2,
+//           updated_at = CURRENT_TIMESTAMP
+//         WHERE id = $3
+//         `,
+//         [status, newEta, consignmentId],
+//       );
 
-    // Single response point outside transaction (avoids headers-sent error)
-    if (updateError && updateError.code === "22P02") {
-      return res.status(409).json({
-        error: `Status '${status}' not recognized in DB enum. Admin fix needed.`,
-      });
-    }
+//       await client.query(
+//         `
+//         INSERT INTO order_tracking (
+//           order_id,
+//           sender_id,
+//           receiver_id,
+//           container_id,
+//           consignment_number,
+//           status,
+//           old_status,
+//           item_ref,
+//           created_by
+//         )
+//         VALUES (
+//           $1,$2,$3,$4,$5,$6,$7,$8,$9
+//         )
+//         `,
+//         [
+//           consignment.order_id,
+//           consignment.sender_id,
+//           consignment.receiver_id,
+//           consignment.container_id,
+//           consignment.consignment_number,
+//           status,
+//           consignment.status,
+//           consignment.item_ref,
+//           req.user?.username || req.user?.email || req.user?.id || "system",
+//         ],
+//       );
+//     });
 
-    res.json({
-      message: `Status updated to ${status}`,
-      data: {
-        newStatus: status,
-        previousStatus: currentStatus,
-        reason: reason || null,
-        newEta,
-      },
-    });
-  } catch (err) {
-    console.error("Error updating status:", err);
-    res.status(500).json({ error: "Failed to update status" });
-  }
-}
-// Helper: Send notification (placeholder—integrate with your GAS/notifications module)
+//     return res.json({
+//       message: `Status updated to ${status}`,
+//       data: {
+//         previousStatus: consignment.status,
+//         newStatus: status,
+//         reason,
+//         newEta,
+//       },
+//     });
+//   } catch (error) {
+//     console.error(error);
+
+//     return res.status(500).json({
+//       error: "Failed to update status",
+//     });
+//   }
+// }
+
 async function sendNotification(consignmentData, event = "created") {
   // e.g., await emailService.send({ to: consignmentData.consignee.email, subject: `Consignment ${consignmentData.consignment_number} ${event}` });
   console.log(
@@ -1360,33 +1275,12 @@ export async function getConsignments(req, res) {
   }
 }
 
-// === Mapping: Consignment Status → Receiver/Shipment Status for ETA lookup ===
-const CONSIGNMENT_TO_RECEIVER_STATUS = {
-  "Drafts Cleared": "Ready for Loading", // → 12 days
-  "Submitted On Vessel": "Shipment Processing", // → 7 days
-  "Customs Cleared": "Shipment Processing", // → 7 days
-  Submitted: "Shipment Processing",
-  "Under Shipment Processing": "Shipment Processing",
-  "In Transit": "Shipment In Transit", // → 4 days
-  "In Transit On Vessel": "Shipment In Transit",
-  "Arrived at Facility": "Arrived at Sort Facility", // → 1 day
-  "Ready for Delivery": "Ready for Delivery", // → 0 days
-  "Arrived at Destination": "Under Processing", // → 2 days
-  Delivered: "Shipment Delivered", // → 0 days
-  "HOLD for Delivery": "Ready for Delivery",
-  HOLD: "Ready for Delivery",
-  Cancelled: "Shipment Delivered",
-  // Legacy
-  Draft: "Ready for Loading",
-};
-
 export async function createConsignment(req, res) {
   console.log("Create Consignment Request Body:", req.body);
 
   try {
     const data = req.body;
 
-    // Normalize input (status is NO longer accepted from input)
     const input = {
       user_id: data.user_id,
       consignment_number: data.consignment_number || data.consignmentNumber,
@@ -1407,7 +1301,7 @@ export async function createConsignment(req, res) {
       payment_type: data.payment_type || data.paymentType || "Collect",
       vessel: data.vessel ? parseInt(data.vessel) : null,
       voyage: data.voyage || "",
-      eta: data.eta?.trim() || null, // Optional: only if provided
+      eta: data.eta?.trim() || null,
       shipping_line: data.shipping_line || data.shippingLine || "",
       seal_no: data.seal_no || data.sealNo || "",
       net_weight: data.net_weight || data.netWeight || 0,
@@ -1421,7 +1315,6 @@ export async function createConsignment(req, res) {
         : [],
     };
 
-    // Validation (remove status from validation)
     const validationErrors = validateConsignmentFields(input);
     if (validationErrors.length > 0) {
       return res
@@ -1437,14 +1330,11 @@ export async function createConsignment(req, res) {
       });
     }
 
-    // ETA: only normalize if provided
     const finalEta = input.eta ? normalizeDate(input.eta) : null;
 
-    // Prepare data for insert
-    // Status is now hardcoded as 'Draft Cleared'
     const dbData = {
       consignment_number: input.consignment_number,
-      status: "Drafts Cleared", // ← Hardcoded in backend
+      status: "Draft",
       remarks: input.remarks,
       shipper: input.shipper,
       consignee: input.consignee,
@@ -1485,7 +1375,6 @@ export async function createConsignment(req, res) {
     let newConsignment = null;
 
     await withTransaction(async (client) => {
-      // Use withUserAudit – it will automatically add created_by, updated_by, created_at, updated_at
       const result = await withUserAudit(req, insertQuery, values);
       newConsignment = result.rows[0];
     });
@@ -1533,8 +1422,6 @@ export async function createConsignment(req, res) {
       }
     });
 
-    let updatedCah = [];
-
     await withTransaction(async (client) => {
       if (ccNew.length > 0) {
         const values = [];
@@ -1542,25 +1429,88 @@ export async function createConsignment(req, res) {
 
         ccNew.forEach((row, index) => {
           const offset = index * 2;
+
           tuples.push(`($${offset + 1}, $${offset + 2})`);
+
           values.push(parseInt(row.container_id), parseInt(row.consignment_id));
         });
 
-        const query = `
-        UPDATE container_assignment_history cah
-        SET consignment_id = v.consignment_id::integer
-        FROM (
-          VALUES ${tuples.join(",")}
-        ) AS v(cid, consignment_id)
-        WHERE cah.cid = v.cid::integer
-      `;
+        const orderIds = input.orders.map((id) => parseInt(id));
 
-        await client.query(query, values);
+        await client.query(
+          `
+          UPDATE container_assignment_history cah
+          SET consignment_id = v.consignment_id::integer
+          FROM (
+            VALUES ${tuples.join(",")}
+          ) AS v(cid, consignment_id)
+          WHERE cah.cid = v.cid::integer
+            AND cah.action_type = 'ASSIGN'
+            AND cah.order_id = ANY($${values.length + 1}::int[])
+          `,
+          [...values, orderIds],
+        );
+
+        const currentStatusResult = await client.query(
+          `
+          SELECT status
+          FROM container_assignment_history
+          WHERE consignment_id = $1
+          LIMIT 1
+        `,
+          [newConsignment.id],
+        );
+
+        const currentStatus = currentStatusResult.rows?.[0]?.status || null;
+
+        const statusesResult = await client.query(`
+          SELECT
+            container_status,
+            sorting_number
+          FROM statuses
+          WHERE status = true
+            AND container_status IS NOT NULL
+          ORDER BY sorting_number ASC
+        `);
+
+        const statuses = statusesResult.rows;
+
+        let nextStatus = null;
+
+        if (currentStatus) {
+          const currentIndex = statuses.findIndex(
+            (s) => s.container_status === currentStatus,
+          );
+
+          if (currentIndex !== -1 && currentIndex < statuses.length - 1) {
+            nextStatus = statuses[currentIndex + 1].container_status;
+          }
+        }
+        if (nextStatus) {
+          await client.query(
+            `
+            UPDATE container_assignment_history
+              SET status = $1
+            WHERE consignment_id = $2
+            `,
+            [nextStatus, newConsignment.id],
+          );
+        }
+
+        const containerIds = ccNew.map((row) => parseInt(row.container_id));
+
+        await client.query(
+          `
+          UPDATE container_status
+          SET
+            availability = 'Occupied',
+            created_time = NOW()
+          WHERE cid = ANY($1::int[])
+          `,
+          [containerIds],
+        );
       }
     });
-
-    // Optional: Add status color if needed in response
-    // newConsignment.statusColor = getStatusColor(newConsignment.status);
 
     res.status(201).json({
       message: "Consignment created successfully",
