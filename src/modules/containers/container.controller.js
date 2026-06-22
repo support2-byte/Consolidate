@@ -116,7 +116,7 @@ export async function getStatuses(req, res) {
           ORDER BY css.sid DESC NULLS LAST
           LIMIT 1
         ) cs ON true
-        WHERE cm.status = 1
+        WHERE cm.status = 'Available'
       ) sub
       WHERE derived_status IS NOT NULL
       ORDER BY value
@@ -363,7 +363,7 @@ export async function createContainer(req, res) {
 
     // Check for duplicate container_number
     const checkQuery =
-      "SELECT cid FROM container_master WHERE container_number = $1 AND status = 1";
+      "SELECT cid FROM container_master WHERE container_number = $1";
     const checkResult = await client.query(checkQuery, [container_number]);
     if (checkResult.rowCount > 0) {
       await client.query("ROLLBACK");
@@ -373,7 +373,7 @@ export async function createContainer(req, res) {
     // Insert master
     const masterQuery = `
       INSERT INTO container_master (container_number, container_size, container_type, owner_type, remarks, status, created_by)
-      VALUES ($1, $2, $3, $4, $5, 1, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING cid
     `;
     const masterValues = [
@@ -382,6 +382,7 @@ export async function createContainer(req, res) {
       container_type,
       owner_type,
       remarks || "",
+      derived_status || availability || "Available",
       created_by,
     ];
     const masterResult = await client.query(masterQuery, masterValues);
@@ -803,7 +804,6 @@ export const getAllContainers = async (req, res) => {
         LIMIT 1
       ) cas ON true
 
-      WHERE cm.status = 1
       ORDER BY cm.created_time DESC
     `;
 
@@ -850,7 +850,7 @@ export async function getContainerById(req, res) {
       ) cs ON true
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      WHERE cm.cid = $1 AND cm.status = 1 AND (cs.location = 'karachi_port' OR cs.location = 'dubai_port')  -- NEW: Enforce valid locations
+      WHERE cm.cid = $1
     `;
 
     if (includeOrder === "true") {
@@ -1402,8 +1402,7 @@ export async function getAllContainersForConsignment(req, res) {
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let whereClause = `
-      cm.status = 1
-      AND NOT EXISTS (
+      NOT EXISTS (
         SELECT 1
         FROM container_consignment_history cch
         WHERE cch.container_id = cm.cid

@@ -1413,9 +1413,13 @@ export async function getOrdersConsignments(req, res) {
           whereClause += ` AND o.place_of_delivery = $${params.length}`;
         }
         whereClause += ` AND EXISTS (
-          SELECT 1 FROM container_assignment_history ch
+          SELECT 1
+          FROM container_assignment_history ch
           WHERE ch.order_id = o.id
-            AND COALESCE(ch.status, 'Ready for Loading') = 'Ready for Loading'
+            AND COALESCE(ch.status, 'Ready for Loading') IN (
+              'Ready for Loading',
+              'Loaded'
+            )
         )`;
       }
     }
@@ -3154,7 +3158,6 @@ export async function assignContainersBatch(req, res) {
         continue;
       }
 
-      // 1. Container lookup
       const contRes = await client.query(
         `
         SELECT 
@@ -3176,7 +3179,7 @@ export async function assignContainersBatch(req, res) {
         ) cs ON true
         WHERE cm.cid = $1 
            OR cm.container_number = $2
-      `,
+        `,
         [containerIdNum, String(ass.containerId)],
       );
 
@@ -3199,7 +3202,6 @@ export async function assignContainersBatch(req, res) {
       const cid = container.cid;
       const contNumber = container.container_number;
 
-      // 2. Receiver
       const receiverRes = await client.query(
         `
         SELECT
@@ -3213,7 +3215,7 @@ export async function assignContainersBatch(req, res) {
         WHERE id = $1
           AND order_id = $2
         FOR UPDATE
-      `,
+        `,
         [receiverIdNum, orderIdNum],
       );
 
@@ -3223,7 +3225,6 @@ export async function assignContainersBatch(req, res) {
       }
 
       const receiver = receiverRes.rows[0];
-
       const remainingReceiverQty =
         Number(receiver.total_number) - Number(receiver.qty_delivered || 0);
 
@@ -3234,21 +3235,21 @@ export async function assignContainersBatch(req, res) {
 
       const itemsRes = await client.query(
         `
-          SELECT
-            id,
-            item_ref,
-            total_number,
-            total_weight,
-            assigned_boxes,
-            assigned_weight_kg,
-            container_details,
-            weight
-          FROM order_items
-          WHERE receiver_id = $1
-            AND total_number > COALESCE(assigned_boxes, 0)
-          ORDER BY id
-          LIMIT 1 OFFSET $2
-          FOR UPDATE
+        SELECT
+          id,
+          item_ref,
+          total_number,
+          total_weight,
+          assigned_boxes,
+          assigned_weight_kg,
+          container_details,
+          weight
+        FROM order_items
+        WHERE receiver_id = $1
+          AND total_number > COALESCE(assigned_boxes, 0)
+        ORDER BY id
+        LIMIT 1 OFFSET $2
+        FOR UPDATE
         `,
         [receiverIdNum, detailIdxNum],
       );
@@ -3262,7 +3263,6 @@ export async function assignContainersBatch(req, res) {
       }
 
       const targetItem = itemsRes.rows[0];
-
       const targetItemId = targetItem.id;
       const itemRef = targetItem.item_ref;
 
@@ -3289,8 +3289,13 @@ export async function assignContainersBatch(req, res) {
         let totalW = Number(targetItem.total_weight || 0);
         if (totalW <= 0)
           totalW = receiver ? Number(receiver.total_weight || 0) : 0;
-        const fraction = assignBoxes / Number(targetItem.total_number || 1);
-        assignWeight = Number((fraction * totalW).toFixed(2));
+
+        const alreadyAssignedWeight = Number(
+          targetItem.assigned_weight_kg || 0,
+        );
+        const remainingWeight = totalW - alreadyAssignedWeight;
+        const fraction = assignBoxes / (remainingBoxes || 1);
+        assignWeight = Number((fraction * remainingWeight).toFixed(2));
       }
 
       if (assignBoxes <= 0) {
@@ -3298,12 +3303,7 @@ export async function assignContainersBatch(req, res) {
         continue;
       }
 
-      if (assignWeight <= 0) {
-        console.log(`Zero-weight assignment accepted for item ${targetItemId}`);
-      }
-
       let receiverContainers = [];
-
       try {
         receiverContainers = Array.isArray(receiver.containers)
           ? receiver.containers
@@ -3340,14 +3340,14 @@ export async function assignContainersBatch(req, res) {
           itemRef,
         });
       }
-      // 6. History log (target item only) – now uses current user email
+
       await client.query(
         `
-          INSERT INTO container_assignment_history (
-            cid, container_number, order_id, receiver_id, detail_id,
-            assigned_qty, assigned_weight_kg, status, previous_status,
-            action_type, created_by, updated_by, changed_by, notes, created_at, loaded_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
+        INSERT INTO container_assignment_history (
+          cid, container_number, order_id, receiver_id, detail_id,
+          assigned_qty, assigned_weight_kg, status, previous_status,
+          action_type, created_by, updated_by, changed_by, notes, created_at, loaded_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
         `,
         [
           cid,
@@ -3376,41 +3376,35 @@ export async function assignContainersBatch(req, res) {
       if (!entry) {
         entry = {
           status: "Ready for Loading",
-          container: {
-            cid,
-            container_number: contNumber,
-          },
+          container: { cid, container_number: contNumber },
           total_number: String(targetItem.total_number || 0),
           assign_weight: "0.00",
           remaining_items: String(targetItem.total_number || 0),
           assign_total_box: "0",
         };
-
         details.push(entry);
       }
 
       entry.assign_total_box = String(
         Number(entry.assign_total_box || 0) + assignBoxes,
       );
-
       entry.assign_weight = (
         Number(entry.assign_weight || 0) + assignWeight
       ).toFixed(2);
-
       entry.remaining_items = String(
         Number(targetItem.total_number) - (currentAssignedBoxes + assignBoxes),
       );
 
       await client.query(
         `
-          UPDATE order_items
-          SET
-            assigned_boxes = $1,
-            assigned_weight_kg = $2,
-            container_details = $3::jsonb,
-            assigned_at = NOW(),
-            updated_at = NOW()
-          WHERE id = $4
+        UPDATE order_items
+        SET
+          assigned_boxes = $1,
+          assigned_weight_kg = $2,
+          container_details = $3::jsonb,
+          assigned_at = NOW(),
+          updated_at = NOW()
+        WHERE id = $4
         `,
         [
           currentAssignedBoxes + assignBoxes,
@@ -3429,7 +3423,6 @@ export async function assignContainersBatch(req, res) {
         assignedWeightKg: assignWeight,
       });
 
-      // 7. Set all receivers in the order to Ready for Loading
       await client.query(
         `
         UPDATE receivers
@@ -3437,7 +3430,7 @@ export async function assignContainersBatch(req, res) {
           status = 'Ready for Loading',
           updated_at = NOW()
         WHERE order_id = $1
-      `,
+        `,
         [orderIdNum],
       );
 
@@ -3459,7 +3452,6 @@ export async function assignContainersBatch(req, res) {
       });
     }
 
-    // Update orders total_assigned_qty (sum from target items only)
     for (const ordId of updatedOrders) {
       const orderTotal = results
         .filter((r) => r.orderId === ordId)
@@ -3472,7 +3464,7 @@ export async function assignContainersBatch(req, res) {
           SET total_assigned_qty = total_assigned_qty + $1,
               updated_at = NOW()
           WHERE id = $2
-        `,
+          `,
           [orderTotal, ordId],
         );
       }
@@ -3490,7 +3482,6 @@ export async function assignContainersBatch(req, res) {
     });
   } catch (err) {
     if (client) await client.query("ROLLBACK");
-    console.error("Batch assign error:", err.stack || err);
     res.status(500).json({
       success: false,
       message: "Server error during batch assignment",
@@ -4186,7 +4177,6 @@ export async function removeContainerAssignments(req, res) {
         const isFullRemoval = !!recRemove.full;
 
         if (isFullRemoval) {
-          // ─── FULL RECEIVER REMOVAL ───
           const itemsRes = await client.query(
             `
             SELECT id, assigned_boxes, assigned_weight_kg, container_details
@@ -4245,40 +4235,38 @@ export async function removeContainerAssignments(req, res) {
               removedContainers.add(containerNumber);
             }
 
-            // Clear item completely
             await client.query(
               `
-                  UPDATE order_items
-          SET
-            assigned_boxes = 0,
-            assigned_weight_kg = 0,
-            container_details = '[]'::jsonb,
-            assigned_at = NULL,
-            updated_at = NOW()
-          WHERE id = $1 AND order_id = $2
-        `,
-              [itemId, orderId],
+              UPDATE order_items
+              SET
+                assigned_boxes = 0,
+                assigned_weight_kg = 0,
+                container_details = '[]'::jsonb,
+                assigned_at = NULL,
+                updated_at = NOW()
+              WHERE id = $1 AND order_id = $2
+              `,
+              [item.id, orderId],
             );
 
             await client.query(
               `
-          UPDATE receivers r
-          SET
-            containers = '[]'::jsonb,
-            qty_delivered = 0,
-            status = 'Created',
-            updated_at = NOW()
-          WHERE r.id = (
-            SELECT receiver_id FROM order_items WHERE id = $1 AND order_id = $2
-          )
-        `,
-              [itemId, orderId],
+              UPDATE receivers r
+              SET
+                containers = '[]'::jsonb,
+                qty_delivered = 0,
+                status = 'Created',
+                updated_at = NOW()
+              WHERE r.id = (
+                SELECT receiver_id FROM order_items WHERE id = $1 AND order_id = $2
+              )
+              `,
+              [item.id, orderId],
             );
 
             orderRemovedQty += receiverRemovedQty;
           }
         } else {
-          // ─── PARTIAL / SINGLE CONTAINER REMOVAL ───
           for (const itemIdStr in recRemove) {
             const removeInfo = recRemove[itemIdStr];
             const itemId = Number(removeInfo.orderItemId || itemIdStr);
@@ -4314,7 +4302,6 @@ export async function removeContainerAssignments(req, res) {
 
             let containerDetails = safeParseJsonArray(item.container_details);
 
-            // Sanitize before modification
             const sanitizedDetails = containerDetails
               .map((entry) => {
                 if (!entry || typeof entry !== "object") return null;
@@ -4401,19 +4388,16 @@ export async function removeContainerAssignments(req, res) {
 
               removedContainers.add(containerNumber);
 
-              // Remove entry completely
               sanitizedDetails.splice(entryIdx, 1);
             }
 
             const newBoxes = Math.max(0, currentBoxes - removedThisItemQty);
             const newKg = Math.max(0, currentKg - removedThisItemKg);
 
-            // Update remaining_items on remaining entries
             sanitizedDetails.forEach((cd) => {
               cd.remaining_items = String(item.total_number - newBoxes);
             });
 
-            // Final safe JSON
             const finalJson = JSON.stringify(
               sanitizedDetails.length ? sanitizedDetails : [],
             );
@@ -4442,7 +4426,6 @@ export async function removeContainerAssignments(req, res) {
           }
         }
 
-        // Final receiver update (always run if something was removed)
         if (receiverRemovedQty > 0 || receiverRemovedKg > 0) {
           receiverContainers = receiverContainers.filter(
             (c) => !removedContainers.has(c),
@@ -4515,9 +4498,6 @@ export async function removeContainerAssignments(req, res) {
 }
 
 async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
-  console.log(
-    `Preparing to send update to subscribers for order ${orderId}: ${oldStatus} -> ${newStatus}`,
-  );
   try {
     // Fetch order details (adapted for your schema; assumes 'reference_id' in receivers or orders)
     const orderQuery = `
@@ -4528,7 +4508,6 @@ async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
     `;
     const orderResult = await pool.query(orderQuery, [orderId]);
     if (orderResult.rowCount === 0) {
-      console.log(`No order found for ID ${orderId}`);
       return;
     }
 
