@@ -108,6 +108,40 @@ export async function createOrder(req, res) {
       remarks: b[`${ownerPrefix}_remarks`] || "",
     };
 
+    const duplicateCheck = await client.query(
+      `
+  SELECT
+    EXISTS(
+      SELECT 1
+      FROM orders
+      WHERE booking_ref = $1
+    ) AS booking_ref_exists,
+
+    EXISTS(
+      SELECT 1
+      FROM orders
+      WHERE rgl_booking_number = $2
+    ) AS rgl_booking_exists
+  `,
+      [b.booking_ref, b.rgl_booking_number],
+    );
+
+    const { booking_ref_exists, rgl_booking_exists } = duplicateCheck.rows[0];
+
+    if (booking_ref_exists || rgl_booking_exists) {
+      await client.query("ROLLBACK");
+
+      return res.status(409).json({
+        success: false,
+        error: [
+          booking_ref_exists && "Booking Ref already exists",
+          rgl_booking_exists && "RGL Booking Number already exists",
+        ]
+          .filter(Boolean)
+          .join("; "),
+      });
+    }
+
     const ordersResult = await withUserAudit(
       req,
       `INSERT INTO orders (
@@ -3367,6 +3401,11 @@ export async function assignContainersBatch(req, res) {
         ],
       );
 
+      await client.query(
+        `UPDATE container_master SET status = 'Ready for Loading' WHERE cid = $1`,
+        [cid],
+      );
+
       let details =
         safeParseJsonArrayForMultiple(targetItem.container_details || "[]") ||
         [];
@@ -3862,12 +3901,11 @@ export async function assignContainersToOrders(req, res) {
         const recId = Number(recIdStr);
         const recAssign = orderAssign[recIdStr];
 
-        // Always fetch & lock receiver first
         const receiverRes = await client.query(
           `
           SELECT id, qty_delivered, containers, total_number
-          FROM receivers
-          WHERE id = $1 AND order_id = $2
+            FROM receivers
+            WHERE id = $1 AND order_id = $2
           FOR UPDATE
         `,
           [recId, orderId],
@@ -4008,6 +4046,11 @@ export async function assignContainersToOrders(req, res) {
                 `Assigned ${thisQty} boxes (${thisWeight.toFixed(2)} kg) - user total ${userWeight} kg`,
                 itemLoadingDate ? new Date(itemLoadingDate) : null,
               ],
+            );
+
+            await client.query(
+              `UPDATE container_master SET status = 'Ready for Loading' WHERE cid = $1`,
+              [cid],
             );
 
             newContainers.add(entry.container.container_number);
@@ -5434,16 +5477,33 @@ export async function changeConsignmentStatus(req, res) {
 
       const containerStatusResult = await client.query(
         `
-        SELECT container_status, order_status
+        SELECT container_status, order_status, sorting_number
         FROM statuses
         WHERE consignment_status = $1
         `,
         [trimmedStatus],
       );
 
-      const containerStatus =
+      let containerStatus =
         containerStatusResult.rows[0]?.container_status ?? null;
       const orderStatus = containerStatusResult.rows[0]?.order_status ?? null;
+      const currentSortingNumber =
+        containerStatusResult.rows[0]?.sorting_number ?? null;
+
+      if (!containerStatus && currentSortingNumber !== null) {
+        const fallbackResult = await client.query(
+          `
+          SELECT container_status
+          FROM statuses
+          WHERE sorting_number < $1 AND container_status IS NOT NULL
+          ORDER BY sorting_number DESC
+          LIMIT 1
+          `,
+          [currentSortingNumber],
+        );
+
+        containerStatus = fallbackResult.rows[0]?.container_status ?? null;
+      }
 
       await client.query(
         `

@@ -766,53 +766,50 @@ export const getAllContainers = async (req, res) => {
         cm.created_time,
         COALESCE(cs.location, 'karachi_port') AS location,
         COALESCE(cs.availability, 'Available') AS current_status,
-        COALESCE(cas.status, '') AS assignment_status,
+        CASE
+          WHEN lc.active = false THEN COALESCE(cm.status, '')
+          ELSE COALESCE(cas.status, cm.status, '')
+        END AS assignment_status,
         COALESCE(cs.status_notes, '') AS status_notes,
-        COALESCE(lc.consignment_number, '') AS consignment_number
+        CASE
+          WHEN lc.active = false OR lc.active IS NULL THEN ''
+          ELSE COALESCE(lc.consignment_number, '')
+        END AS consignment_number
       FROM container_master cm
-
       LEFT JOIN LATERAL (
-        SELECT
-          location,
-          availability,
-          status_notes
+        SELECT location, availability, status_notes
         FROM container_status
         WHERE cid = cm.cid
         ORDER BY sid DESC
         LIMIT 1
       ) cs ON true
-
       LEFT JOIN LATERAL (
-        SELECT
-          c.id AS consignment_id,
-          c.consignment_number
+        SELECT c.consignment_number, cch.active
         FROM container_consignment_history cch
-        JOIN consignments c
-          ON c.id = cch.consignment_id
+        JOIN consignments c ON c.id = cch.consignment_id
         WHERE cch.container_id = cm.cid
         ORDER BY cch.id DESC
         LIMIT 1
       ) lc ON true
-
       LEFT JOIN LATERAL (
-        SELECT
-          cah.status
+        SELECT cah.status
         FROM container_assignment_history cah
         WHERE cah.cid = cm.cid
           AND cah.action_type = 'ASSIGN'
         ORDER BY cah.id DESC
         LIMIT 1
       ) cas ON true
-
       ORDER BY cm.created_time DESC
     `;
-
     const result = await pool.query(query);
 
-    return res.status(200).json({
-      success: true,
-      data: result.rows,
-    });
+    const data = result.rows.map((row) => ({
+      ...row,
+      assignment_status:
+        row.assignment_status === "Available" ? "" : row.assignment_status,
+    }));
+
+    return res.status(200).json({ success: true, data });
   } catch (err) {
     console.error("Error fetching containers:", err);
     return res.status(500).json({
@@ -821,7 +818,6 @@ export const getAllContainers = async (req, res) => {
     });
   }
 };
-
 export async function getContainerById(req, res) {
   try {
     const { cid } = req.params;
@@ -1346,7 +1342,7 @@ export const releaseContainer = async (req, res) => {
       await client.query(
         `
         UPDATE container_master
-          SET derived_status = 'Available'
+          SET status = 'Available'
         WHERE cid = $1
         `,
         [releasedAssignment.container_id],
