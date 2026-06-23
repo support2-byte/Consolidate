@@ -1423,20 +1423,27 @@ export async function getOrdersConsignments(req, res) {
       )`;
 
       if (consignment_id) {
+        if (pol) {
+          params.push(pol.trim());
+          whereClause += ` AND LOWER(TRIM(o.place_of_loading)) = LOWER(TRIM($${params.length}))`;
+        }
+
+        if (pod) {
+          params.push(pod.trim());
+          whereClause += ` AND LOWER(TRIM(o.place_of_delivery)) = LOWER(TRIM($${params.length}))`;
+        }
+
         params.push(parseInt(consignment_id, 10));
-        whereClause += ` AND (
-          o.created_at::date = CURRENT_DATE
-          OR o.created_at::date = (
-            SELECT cch.released_at FROM container_consignment_history cch
-            WHERE cch.consignment_id = $${params.length}
-              AND cch.released_at IS NOT NULL
-            ORDER BY cch.id DESC LIMIT 1
+        const consignmentParam = params.length;
+
+        whereClause += `
+          AND EXISTS (
+            SELECT 1
+            FROM consignments c
+            WHERE c.id = $${consignmentParam}
+              AND c.orders @> to_jsonb(o.id)
           )
-          OR EXISTS (
-            SELECT 1 FROM consignments c
-            WHERE c.id = $${params.length} AND c.orders @> to_jsonb(o.id)
-          )
-        )`;
+        `;
       } else {
         if (pol) {
           params.push(String(pol.trim()));
@@ -1447,14 +1454,15 @@ export async function getOrdersConsignments(req, res) {
           whereClause += ` AND o.place_of_delivery = $${params.length}`;
         }
         whereClause += ` AND EXISTS (
-          SELECT 1
-          FROM container_assignment_history ch
-          WHERE ch.order_id = o.id
-            AND COALESCE(ch.status, 'Ready for Loading') IN (
-              'Ready for Loading',
-              'Loaded'
-            )
-        )`;
+            SELECT 1
+            FROM container_assignment_history ch
+            WHERE ch.order_id = o.id
+              AND COALESCE(ch.status, 'Ready for Loading') IN (
+                'Ready for Loading',
+                'Loaded'
+              )
+          )
+        `;
       }
     }
 

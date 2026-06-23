@@ -14,7 +14,6 @@ import {
   updateDocument,
   deleteCustomer,
   getCustomersPanel,
-  updateCustomerByID,
 } from "./customer.controller.js"; // Adjust path as needed
 import upload from "../../middleware/upload.js";
 import { get } from "http";

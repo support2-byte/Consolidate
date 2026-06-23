@@ -1454,8 +1454,8 @@ export async function createConsignment(req, res) {
         const currentStatusResult = await client.query(
           `
           SELECT status
-          FROM container_assignment_history
-          WHERE consignment_id = $1
+            FROM container_assignment_history
+            WHERE consignment_id = $1
           LIMIT 1
         `,
           [newConsignment.id],
