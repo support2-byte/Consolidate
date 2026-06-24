@@ -1,5 +1,6 @@
 // src/modules/options/functions.js
 import pool from "../../db/pool.js"; // Fixed: Removed extra space, added .js
+import { sendBugReportEmail } from "../../services/sendBugReportEmail.js";
 
 // Helper function to format options (shared across all functions)
 const formatOptions = (rows, valueField = "id", labelField = "name") => {
@@ -1004,5 +1005,169 @@ export const deleteStatus = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const createBugReport = async (req, res) => {
+  const { title, description } = req.body;
+
+  if (!title?.trim() || !description?.trim()) {
+    return res
+      .status(400)
+      .json({ message: "Title and description are required." });
+  }
+  if (title.trim().length > 80) {
+    return res
+      .status(400)
+      .json({ message: "Title must be 80 characters or fewer." });
+  }
+  if (description.trim().length > 1000) {
+    return res
+      .status(400)
+      .json({ message: "Description must be 1000 characters or fewer." });
+  }
+
+  try {
+    const reportQuery = `
+      INSERT INTO bug_reports (title, description, created_at) 
+      VALUES ($1, $2, NOW()) 
+      RETURNING id, title, description, is_fixed AS "isFixed", created_at AS "createdAt"
+    `;
+    const { rows } = await pool.query(reportQuery, [
+      title.trim(),
+      description.trim(),
+    ]);
+    const newReport = rows[0];
+
+    let attachments = [];
+    if (req.files?.length) {
+      const attachmentInserts = req.files.map((file) =>
+        pool.query(
+          `INSERT INTO bug_report_attachments (report_id, image_url) VALUES ($1, $2) RETURNING image_url`,
+          [newReport.id, file.path],
+        ),
+      );
+      const results = await Promise.all(attachmentInserts);
+      attachments = results.map((r) => r.rows[0].image_url);
+    }
+
+    try {
+      await sendBugReportEmail({
+        title: newReport.title,
+        description: newReport.description,
+        submittedAt: newReport.createdAt,
+        attachments,
+      });
+    } catch (emailErr) {
+      logger.error("[bug-report] Email failed, report saved", {
+        error: emailErr.message,
+      });
+    }
+
+    return res.status(201).json({
+      message: "Bug report submitted successfully.",
+      report: { ...newReport, attachments },
+    });
+  } catch (err) {
+    logger.error("[bug-report] DB Insert failed", { error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Failed to save the report. Please try again." });
+  }
+};
+
+export const getBugReports = async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        br.id,
+        br.title,
+        br.description,
+        br.is_fixed AS "isFixed",
+        br.created_at AS "createdAt",
+        COALESCE(
+          JSON_AGG(bra.image_url) FILTER (WHERE bra.image_url IS NOT NULL),
+          '[]'
+        ) AS attachments
+      FROM bug_reports br
+      LEFT JOIN bug_report_attachments bra ON bra.report_id = br.id
+      GROUP BY br.id
+      ORDER BY br.created_at DESC
+    `;
+    const { rows } = await pool.query(query);
+    return res.status(200).json({ reports: rows });
+  } catch (err) {
+    logger.error("[bug-report] DB Fetch failed", { error: err.message });
+    return res.status(500).json({ message: "Failed to fetch bug reports." });
+  }
+};
+
+export const updateBugReport = async (req, res) => {
+  const { id } = req.params;
+  const { title, description, isFixed } = req.body;
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE bug_reports 
+       SET 
+         title = COALESCE($1, title), 
+         description = COALESCE($2, description), 
+         is_fixed = COALESCE($3, is_fixed)
+       WHERE id = $4 
+       RETURNING id, title, description, is_fixed AS "isFixed", created_at AS "createdAt"`,
+      [title?.trim() || null, description?.trim() || null, isFixed ?? null, id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Bug report not found." });
+    }
+
+    let attachments = [];
+    if (req.files?.length) {
+      const inserts = req.files.map((file) =>
+        pool.query(
+          `INSERT INTO bug_report_attachments (report_id, image_url) VALUES ($1, $2) RETURNING image_url`,
+          [id, file.path],
+        ),
+      );
+      const results = await Promise.all(inserts);
+      attachments = results.map((r) => r.rows[0].image_url);
+    }
+
+    const { rows: existingAttachments } = await pool.query(
+      `SELECT image_url FROM bug_report_attachments WHERE report_id = $1`,
+      [id],
+    );
+
+    return res.status(200).json({
+      message: "Bug report updated successfully.",
+      report: {
+        ...rows[0],
+        attachments: existingAttachments.map((a) => a.image_url),
+      },
+    });
+  } catch (err) {
+    logger.error("[bug-report] DB Update failed", { error: err.message });
+    return res.status(500).json({ message: "Failed to update bug report." });
+  }
+};
+
+export const deleteBugReport = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const query = `DELETE FROM bug_reports WHERE id = $1 RETURNING id`;
+    const { rows } = await pool.query(query, [id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Bug report not found." });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "Bug report deleted successfully." });
+  } catch (err) {
+    console.error("[bug-report] DB Delete failed:", err);
+    return res.status(500).json({ message: "Failed to delete bug report." });
   }
 };

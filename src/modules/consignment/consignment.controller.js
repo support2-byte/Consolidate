@@ -464,38 +464,36 @@ export async function calculateETA(pool, status) {
 // }
 
 export async function getConsignmentById(req, res) {
-  console.log("Fetching consignment:", req.params);
-
   try {
     const { id } = req.params;
     const { autoSync = "false" } = req.query;
     const enableAutoSync = autoSync === "true";
     let orderIds = [];
     const numericId = parseInt(id, 10);
+
     if (isNaN(numericId) || numericId <= 0) {
       return res.status(400).json({ error: "Invalid consignment ID." });
     }
 
     const client = await pool.connect();
     let consignment = null;
-    let containers = []; // declared in outer scope — always available
+    let containers = [];
 
     try {
       await client.query("BEGIN");
 
-      // 1. Fetch main consignment
       const consRes = await client.query(
         "SELECT * FROM consignments WHERE id = $1",
         [numericId],
       );
+
       if (consRes.rowCount === 0) {
         await client.query("ROLLBACK");
         return res.status(404).json({ error: "Consignment not found" });
       }
+
       consignment = consRes.rows[0];
 
-      // 2. Parse order IDs safely
-      // let orderIds = [];
       if (consignment.orders) {
         let rawOrders =
           typeof consignment.orders === "string"
@@ -508,43 +506,45 @@ export async function getConsignmentById(req, res) {
           : [];
       }
 
+      const statusRes = await client.query(
+        "SELECT order_status, sorting_number FROM statuses WHERE order_status IS NOT NULL",
+      );
+
+      const statusPriority = statusRes.rows.reduce((acc, row) => {
+        if (row.order_status) {
+          acc[row.order_status] = row.sorting_number || 0;
+        }
+        return acc;
+      }, {});
+
       let linkedOrders = [];
       let minReceiverEta = null;
       let mostAdvancedReceiverStatus = null;
 
       if (orderIds.length > 0) {
-        // Fetch orders
         const orderRes = await client.query(
-          `
-          SELECT 
-            id, 
-            sender_name AS shipper, 
-            receiver_name AS consignee, 
-            eta AS order_eta, 
-            etd, 
-            qty_delivered AS delivered, 
-            total_assigned_qty, 
+          `SELECT 
+            id,
+            sender_name AS shipper,
+            receiver_name AS consignee,
+            eta AS order_eta,
+            etd,
+            qty_delivered AS delivered,
+            total_assigned_qty,
             status AS order_status
-          FROM orders 
-          WHERE id = ANY($1::int[])
-        `,
+          FROM orders
+          WHERE id = ANY($1::int[])`,
           [orderIds],
         );
         linkedOrders = orderRes.rows;
 
-        // Fetch receivers
         const receiverRes = await client.query(
-          `
-          SELECT status, eta 
-          FROM receivers 
-          WHERE order_id = ANY($1::int[])
-        `,
+          `SELECT status, eta FROM receivers WHERE order_id = ANY($1::int[])`,
           [orderIds],
         );
 
         const receivers = receiverRes.rows;
 
-        // Compute min ETA
         const validEtas = receivers
           .filter((r) => r.eta)
           .map((r) => new Date(r.eta));
@@ -552,18 +552,6 @@ export async function getConsignmentById(req, res) {
           minReceiverEta = new Date(Math.min(...validEtas));
         }
 
-        // Most advanced receiver status
-        const statusPriority = {
-          "Shipment Delivered": 9,
-          "Ready for Delivery": 8,
-          "Under Processing": 7,
-          "Shipment In Transit": 6,
-          "Shipment Processing": 5,
-          "Loaded Into Container": 4,
-          "Ready for Loading": 3,
-          "Order Created": 2,
-          Created: 1,
-        };
         mostAdvancedReceiverStatus = receivers.reduce((best, curr) => {
           const p = statusPriority[curr.status] || 0;
           const bp = statusPriority[best?.status] || 0;
@@ -571,7 +559,6 @@ export async function getConsignmentById(req, res) {
         }, null)?.status;
       }
 
-      // Enhance consignment fields
       consignment.statusColor = getStatusColor(consignment.status);
 
       if (linkedOrders.length > 0) {
@@ -638,97 +625,66 @@ export async function getConsignmentById(req, res) {
     } finally {
       client.release();
     }
-    // ────────────────────────────────────────────────────────────────
-    // Containers – separate non-transactional fetch
-    // ────────────────────────────────────────────────────────────────
-    // let containers = [];  // ← use let instead of const
 
     if (orderIds.length > 0) {
       const containerClient = await pool.connect();
       try {
-        console.log(
-          `Fetching containers for consignment ${numericId} with order IDs:`,
-          orderIds,
-        );
-
         const containerRes = await containerClient.query(
-          `
-      SELECT 
-        cm.cid AS id,
-        cm.container_size          AS size,
-        cm.container_number        AS "containerNo",
-        cm.container_type          AS "containerType",
-        cm.owner_type              AS ownership,
-        COALESCE(cm.location, 'N/A') AS location,
-        
-        COALESCE(
-          (SELECT cs.availability 
-           FROM container_status cs 
-           WHERE cs.cid = cm.cid 
-           ORDER BY cs.created_time DESC 
-           LIMIT 1),
-          cm.derived_status,
-          'Available'
-        ) AS derived_status
-      FROM container_master cm
-      WHERE cm.container_number IN (
-        SELECT DISTINCT TRIM(value::text)
-        FROM receivers r,
-             jsonb_array_elements_text(
-               CASE 
-                 WHEN jsonb_typeof(r.containers) = 'array' THEN r.containers
-                 WHEN r.containers IS NOT NULL THEN jsonb_build_array(r.containers)
-                 ELSE '[]'::jsonb
-               END
-             ) AS value
-        WHERE r.order_id = ANY($1::int[])
-          AND r.containers IS NOT NULL
-          AND TRIM(value::text) != ''
-      )
-    `,
+          `SELECT
+            cm.cid                            AS id,
+            cm.container_size                 AS size,
+            cm.container_number               AS "containerNo",
+            cm.container_type                 AS "containerType",
+            cm.owner_type                     AS ownership,
+            COALESCE(cm.status, 'Available')  AS status,
+            COALESCE(
+              (SELECT cs.location
+              FROM container_status cs
+              WHERE cs.cid = cm.cid
+                AND cs.location IS NOT NULL
+                AND cs.location != ''
+              ORDER BY cs.created_time DESC
+              LIMIT 1),
+              'N/A'
+            ) AS location
+          FROM container_master cm
+          WHERE cm.container_number IN (
+            SELECT DISTINCT TRIM(value::text)
+            FROM receivers r,
+                jsonb_array_elements_text(
+                  CASE
+                    WHEN jsonb_typeof(r.containers) = 'array' THEN r.containers
+                    WHEN r.containers IS NOT NULL THEN jsonb_build_array(r.containers)
+                    ELSE '[]'::jsonb
+                  END
+                ) AS value
+            WHERE r.order_id = ANY($1::int[])
+              AND r.containers IS NOT NULL
+              AND TRIM(value::text) != ''
+          )`,
           [orderIds],
         );
 
-        containers = containerRes.rows.map((row) => {
-          const ds = row.derived_status || "Available";
-          return {
-            id: row.id,
-            size: row.size,
-            containerNo: row.containerNo,
-            containerType: row.containerType,
-            ownership: row.ownership,
-            location: row.location,
-            derived_status: ds,
-            derived_status_color: getStatusColor(ds),
-            status: ds,
-            statusColor: getStatusColor(ds),
-          };
-        });
-
-        console.log(
-          `Fetched ${containers.length} containers for consignment ${numericId}`,
-        );
+        containers = containerRes.rows.map((row) => ({
+          id: row.id,
+          size: row.size,
+          containerNo: row.containerNo,
+          containerType: row.containerType,
+          ownership: row.ownership,
+          location: row.location,
+          status: row.status,
+          statusColor: getStatusColor(row.status),
+        }));
       } catch (containerErr) {
-        console.error(
-          `Failed to fetch containers for consignment ${numericId}:`,
-          containerErr.message,
-          containerErr.stack,
-        );
-        containers = []; // safe fallback
+        containers = [];
       } finally {
         containerClient.release();
       }
-    } else {
-      console.log(
-        `No order IDs → skipping containers for consignment ${numericId}`,
-      );
     }
 
-    // Attach containers
     consignment.containers = containers;
     res.json({ data: consignment });
   } catch (err) {
-    console.error("Error fetching consignment:", err.stack || err);
     res.status(500).json({ error: "Failed to fetch consignment" });
   }
 }

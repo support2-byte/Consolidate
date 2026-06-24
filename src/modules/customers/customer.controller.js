@@ -10,29 +10,22 @@ import logger from "../../services/logger.js";
 const ORG_ID = process.env.ZOHO_BOOKS_ORG_ID;
 
 export async function getCustomersPanel(req, res) {
-  console.log("Received request for customer panel sync");
-
   try {
-    const { search = "All", limit = 6000 } = req.query;
+    const { limit = 6000 } = req.query;
 
     if (!process.env.ZOHO_BOOKS_ORG_ID) {
       throw new Error("Missing ZOHO_BOOKS_ORG_ID in environment variables");
     }
 
     const token = await getZohoAccessToken();
-    console.log("Fetched Zoho access token successfully");
-
-    // Use correct base URL (add ZOHO_REGION='com' or 'in' to .env if needed; default .com)
-    const baseUrl = "https://www.zohoapis.com/books/v3/contacts"; // or .in if your org is India/Pakistan region
+    const baseUrl = "https://www.zohoapis.com/books/v3/contacts";
 
     let page = 1;
-    const per_page = 200; // Max allowed by Zoho Books
+    const per_page = 200;
     let allCustomers = [];
     let hasMore = true;
 
     while (hasMore) {
-      console.log(`Fetching page ${page}...`);
-
       const zohoRes = await axios.get(baseUrl, {
         headers: {
           Authorization: `Zoho-oauthtoken ${token}`,
@@ -43,8 +36,6 @@ export async function getCustomersPanel(req, res) {
           contact_type: "customer",
           page,
           per_page,
-          // Optional: sort_column: 'created_time', sort_order: 'D' for newest first
-          // filter_by: 'Status.Active' if you only want active
         },
       });
 
@@ -59,18 +50,20 @@ export async function getCustomersPanel(req, res) {
 
       const pageContext = zohoRes.data.page_context || {};
       hasMore = pageContext.has_more_page || false;
-      console.log(
-        `Page ${page}: ${contacts.length} customers. Total so far: ${allCustomers.length}. More pages: ${hasMore}`,
-      );
+
+      logger.info("Zoho page fetched", {
+        page,
+        count: contacts.length,
+        total: allCustomers.length,
+        hasMore,
+      });
 
       page++;
-      // Small delay to avoid rate limits (Zoho allows ~100 req/min, but safe)
       await new Promise((r) => setTimeout(r, 800));
     }
 
-    console.log(`Total customers fetched from Zoho: ${allCustomers.length}`);
+    logger.info("Zoho fetch complete", { total: allCustomers.length });
 
-    // Sync to DB (your loop is good)
     for (const c of allCustomers) {
       if (!c.contact_id) continue;
 
@@ -87,21 +80,21 @@ export async function getCustomersPanel(req, res) {
       await pool.query(
         `INSERT INTO customers 
           (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-           system_notes, contact_type, status, created_by, modified_by, created_time, modified_time)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           system_notes, contact_type, status, created_by, modified_by, 
+           created_time, modified_time, phone_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (zoho_id) DO UPDATE SET
-           contact_name = COALESCE(EXCLUDED.contact_name, customers.contact_name),
-           email = COALESCE(EXCLUDED.email, customers.email),
-           address = COALESCE(EXCLUDED.address, customers.address),
-           zoho_notes = COALESCE(EXCLUDED.zoho_notes, customers.zoho_notes),
-           associated_by = COALESCE(EXCLUDED.associated_by, customers.associated_by),
-           system_notes = COALESCE(EXCLUDED.system_notes, customers.system_notes),
-           contact_type = COALESCE(EXCLUDED.contact_type, customers.contact_type),
-           status = COALESCE(EXCLUDED.status, customers.status),
-           created_by = COALESCE(EXCLUDED.created_by, customers.created_by),
-           modified_by = COALESCE(EXCLUDED.modified_by, customers.modified_by),
-           created_time = COALESCE(EXCLUDED.created_time, customers.created_time),
-           modified_time = COALESCE(EXCLUDED.modified_time, customers.modified_time)`,
+           contact_name  = EXCLUDED.contact_name,
+           email         = EXCLUDED.email,
+           address       = EXCLUDED.address,
+           zoho_notes    = EXCLUDED.zoho_notes,
+           contact_type  = EXCLUDED.contact_type,
+           status        = EXCLUDED.status,
+           created_by    = EXCLUDED.created_by,
+           modified_by   = EXCLUDED.modified_by,
+           created_time  = EXCLUDED.created_time,
+           modified_time = EXCLUDED.modified_time,
+           phone_number  = EXCLUDED.phone_number`,
         [
           c.contact_id,
           c.contact_name || null,
@@ -117,11 +110,11 @@ export async function getCustomersPanel(req, res) {
             null,
           createdTime,
           modifiedTime,
+          c.phone || null,
         ],
       );
     }
 
-    // Return latest from DB (with limit)
     const limitVal = parseInt(limit);
     const limitQuery = limitVal > 0 ? "LIMIT $1" : "";
     const queryParams = limitQuery ? [limitVal] : [];
@@ -133,19 +126,24 @@ export async function getCustomersPanel(req, res) {
 
     res.json(rows);
   } catch (err) {
-    console.error("Sync error:", err);
+    logger.error("Zoho sync failed", {
+      message: err.message,
+      status: err.response?.status,
+    });
+
     const status = err.response?.status || 500;
     const msg = err.response?.data?.message || err.message;
 
     if (status === 404) {
       return res.status(400).json({
-        error: `Zoho returned 404 - check organization_id (${process.env.ZOHO_BOOKS_ORG_ID}) or API domain (try .in if Pakistan/India org)`,
+        error: `Zoho returned 404 - check organization_id (${process.env.ZOHO_BOOKS_ORG_ID}) or API domain`,
       });
     }
 
     res.status(status).json({ error: `Failed to sync customers: ${msg}` });
   }
 }
+
 // getCustomers remains the same (DB query with search/limit for efficiency)
 export async function getCustomers(req, res) {
   try {

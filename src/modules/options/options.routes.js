@@ -46,7 +46,12 @@ import {
   updateStatus,
   addNewStatus,
   deleteStatus,
+  createBugReport,
+  getBugReports,
+  updateBugReport,
+  deleteBugReport,
 } from "./options.controllers.js";
+import { bugReportUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
 
@@ -101,5 +106,18 @@ router.get("/allStatus", getAllStatus);
 router.put("/updateStatus/:id", updateStatus);
 router.post("/addStatus", addNewStatus);
 router.delete("/deleteStatus/:id", deleteStatus);
+
+router.post(
+  "/bug-report",
+  bugReportUpload.array("attachments", 3),
+  createBugReport,
+);
+router.get("/bug-report", getBugReports);
+router.put(
+  "/bug-report/:id",
+  bugReportUpload.array("attachments", 3),
+  updateBugReport,
+);
+router.delete("/bug-report/:id", deleteBugReport);
 
 export default router;
