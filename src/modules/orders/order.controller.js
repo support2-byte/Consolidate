@@ -3371,12 +3371,11 @@ export async function assignContainersBatch(req, res) {
         `
         UPDATE receivers
         SET
-          qty_delivered = COALESCE(qty_delivered, 0) + $1,
-          containers = $2::jsonb,
+          containers = $1::jsonb,
           updated_at = NOW()
-        WHERE id = $3
+        WHERE id = $2
         `,
-        [assignBoxes, JSON.stringify(updatedContainers), receiverIdNum],
+        [JSON.stringify(updatedContainers), receiverIdNum],
       );
 
       const nextStatus = await moveReceiverToNextStatus(client, receiverIdNum);
@@ -4030,6 +4029,7 @@ export async function assignContainersToOrders(req, res) {
 
             const newTotalAssigned =
               currentBoxes + assignedThisItemQty + thisQty;
+
             entry.remaining_items = String(
               item.total_number - newTotalAssigned,
             );
