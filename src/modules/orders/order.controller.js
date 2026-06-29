@@ -926,7 +926,6 @@ export const getOrders = async (req, res) => {
                               jsonb_build_object(
                                 'cid',
                                 (cd->'container'->>'cid')::int,
-
                                 'container_number',
                                 cd->'container'->>'container_number'
                               ),
@@ -958,6 +957,9 @@ export const getOrders = async (req, res) => {
                             ORDER BY sid DESC
                             LIMIT 1
                           ) cs ON true
+
+                          WHERE cd->>'container' IS NOT NULL
+
                         ),
                         '[]'::jsonb
                       )
