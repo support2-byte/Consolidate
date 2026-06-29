@@ -832,8 +832,20 @@ export async function getContainerById(req, res) {
           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
           ELSE 'Available'
         END as derived_status,
-        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination
+        cpd.manufacture_date::text, 
+        cpd.purchase_date::text, 
+        cpd.purchase_price, 
+        cpd.purchase_from, 
+        cpd.owned_by, 
+        cpd.available_at, 
+        cpd.currency,
+        chd.hire_start_date::text, 
+        chd.hire_end_date::text, 
+        chd.hired_by, 
+        chd.return_date::text, 
+        chd.free_days, 
+        chd.place_of_loading, 
+        chd.place_of_destination
     `;
     let fromClause = `
       FROM container_master cm
