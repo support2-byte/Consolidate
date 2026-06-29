@@ -1,5 +1,6 @@
 // src/modules/options/functions.js
 import pool from "../../db/pool.js"; // Fixed: Removed extra space, added .js
+import logger from "../../services/logger.js";
 import { sendBugReportEmail } from "../../services/sendBugReportEmail.js";
 
 // Helper function to format options (shared across all functions)
@@ -1043,7 +1044,7 @@ export const createBugReport = async (req, res) => {
     if (req.files?.length) {
       const attachmentInserts = req.files.map((file) =>
         pool.query(
-          `INSERT INTO bug_report_attachments (report_id, image_url) VALUES ($1, $2) RETURNING image_url`,
+          `INSERT INTO bug_report_attachments (report_id, image_url, created_at) VALUES ($1, $2, NOW()) RETURNING image_url`,
           [newReport.id, file.path],
         ),
       );
@@ -1126,7 +1127,7 @@ export const updateBugReport = async (req, res) => {
     if (req.files?.length) {
       const inserts = req.files.map((file) =>
         pool.query(
-          `INSERT INTO bug_report_attachments (report_id, image_url) VALUES ($1, $2) RETURNING image_url`,
+          `INSERT INTO bug_report_attachments (report_id, image_url, created_at) VALUES ($1, $2, NOW()) RETURNING image_url`,
           [id, file.path],
         ),
       );

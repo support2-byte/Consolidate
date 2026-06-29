@@ -2398,23 +2398,18 @@ export async function updateContainer(req, res) {
 
     const { cid } = req.params;
     const updates = req.body;
+
+    const n = (v) => (v === "" || v === undefined ? null : v);
     const created_by = updates.created_by || req.user?.id || "system";
 
     const current = await client.query(
-      `
-      SELECT owner_type
-      FROM container_master
-      WHERE cid = $1
-      `,
+      `SELECT cid, owner_type FROM container_master WHERE cid = $1`,
       [cid],
     );
 
     if (current.rowCount === 0) {
       await client.query("ROLLBACK");
-
-      return res.status(404).json({
-        error: "Container not found",
-      });
+      return res.status(404).json({ error: "Container not found" });
     }
 
     if (
@@ -2422,99 +2417,119 @@ export async function updateContainer(req, res) {
       updates.owner_type !== current.rows[0].owner_type
     ) {
       await client.query("ROLLBACK");
-
-      return res.status(400).json({
-        error: "Cannot change owner_type manually",
-      });
+      return res
+        .status(400)
+        .json({ error: "Cannot change owner_type manually" });
     }
 
     await client.query(
-      `
-      UPDATE container_master
-      SET
-        container_number = COALESCE($1, container_number),
-        container_size   = COALESCE($2, container_size),
-        container_type   = COALESCE($3, container_type),
-        remarks          = COALESCE($4, remarks),
-        available_at     = COALESCE($5, available_at),
-        updated_at       = NOW()
-      WHERE cid = $6
-      `,
+      `UPDATE container_master
+       SET
+         container_number    = $1,
+         container_size      = $2,
+         container_type      = $3,
+         remarks             = $4,
+         available_at        = $5,
+         location            = $6,
+         derived_status      = $7,
+         updated_at          = NOW()
+       WHERE cid = $8`,
       [
-        updates.container_number,
-        updates.container_size,
-        updates.container_type,
-        updates.remarks,
-        updates.available_at,
+        n(updates.container_number),
+        n(updates.container_size),
+        n(updates.container_type),
+        n(updates.remarks),
+        n(updates.available_at),
+        n(updates.location),
+        n(updates.derived_status),
         cid,
       ],
     );
 
+    await client.query(
+      "UPDATE container_status SET location = $1 WHERE cid = $2",
+      [n(updates.location), cid],
+    );
+
     const purchaseExists = await client.query(
-      `
-      SELECT pid
-      FROM container_purchase_details
-      WHERE cid = $1
-      `,
+      `SELECT pid FROM container_purchase_details WHERE cid = $1`,
       [cid],
     );
 
+    const purchaseParams = [
+      n(updates.manufacture_date),
+      n(updates.purchase_date),
+      n(updates.purchase_price) ?? 0,
+      n(updates.purchase_from),
+      n(updates.owned_by),
+      n(updates.available_at),
+      n(updates.currency),
+      created_by,
+    ];
+
     if (purchaseExists.rowCount > 0) {
       await client.query(
-        `
-        UPDATE container_purchase_details
-        SET
-          manufacture_date = COALESCE($1, manufacture_date),
-          purchase_date    = COALESCE($2, purchase_date),
-          purchase_price   = COALESCE($3, purchase_price),
-          purchase_from    = COALESCE($4, purchase_from),
-          owned_by         = COALESCE($5, owned_by),
-          available_at     = COALESCE($6, available_at),
-          currency         = COALESCE($7, currency),
-          created_by       = $8
-        WHERE cid = $9
-        `,
-        [
-          updates.manufacture_date,
-          updates.purchase_date,
-          updates.purchase_price,
-          updates.purchase_from,
-          updates.owned_by,
-          updates.available_at,
-          updates.currency,
-          created_by,
-          cid,
-        ],
+        `UPDATE container_purchase_details
+         SET
+           manufacture_date = $1,
+           purchase_date    = $2,
+           purchase_price   = $3,
+           purchase_from    = $4,
+           owned_by         = $5,
+           available_at     = $6,
+           currency         = $7,
+           created_by       = $8
+         WHERE cid = $9`,
+        [...purchaseParams, cid],
       );
     } else {
       await client.query(
-        `
-        INSERT INTO container_purchase_details
-        (
-          cid,
-          manufacture_date,
-          purchase_date,
-          purchase_price,
-          purchase_from,
-          owned_by,
-          available_at,
-          currency,
-          created_by
-        )
-        VALUES
-        ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        `,
-        [
-          cid,
-          updates.manufacture_date,
-          updates.purchase_date,
-          updates.purchase_price,
-          updates.purchase_from,
-          updates.owned_by,
-          updates.available_at,
-          updates.currency,
-          created_by,
-        ],
+        `INSERT INTO container_purchase_details
+           (cid, manufacture_date, purchase_date, purchase_price,
+            purchase_from, owned_by, available_at, currency, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [cid, ...purchaseParams],
+      );
+    }
+
+    const hireExists = await client.query(
+      `SELECT hid FROM container_hire_details WHERE cid = $1`,
+      [cid],
+    );
+
+    const hireParams = [
+      n(updates.hire_start_date),
+      n(updates.hire_end_date),
+      n(updates.hired_by),
+      n(updates.return_date),
+      n(updates.free_days),
+      n(updates.place_of_loading),
+      n(updates.place_of_destination),
+      created_by,
+    ];
+
+    if (hireExists.rowCount > 0) {
+      await client.query(
+        `UPDATE container_hire_details
+         SET
+           hire_start_date    = $1,
+           hire_end_date      = $2,
+           hired_by           = $3,
+           return_date        = $4,
+           free_days          = $5,
+           place_of_loading   = $6,
+           place_of_destination = $7,
+           created_by         = $8
+         WHERE cid = $9`,
+        [...hireParams, cid],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO container_hire_details
+           (cid, hire_start_date, hire_end_date, hired_by,
+            return_date, free_days, place_of_loading, place_of_destination, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [cid, ...hireParams],
       );
     }
 
@@ -2525,20 +2540,14 @@ export async function updateContainer(req, res) {
       message: "Container updated successfully",
     });
   } catch (err) {
-    if (client) {
-      await client.query("ROLLBACK");
-    }
-
+    if (client) await client.query("ROLLBACK");
     console.error("Container update failed:", err);
-
     return res.status(500).json({
       error: "Failed to update container",
       details: err.message,
     });
   } finally {
-    if (client) {
-      client.release();
-    }
+    if (client) client.release();
   }
 }
 
