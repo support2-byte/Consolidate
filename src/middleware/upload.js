@@ -23,7 +23,17 @@ const storage = new CloudinaryStorage({
 
     return {
       folder,
-      allowed_formats: ["jpg", "jpeg", "png", "gif", "pdf", "doc", "docx", "xls", "xlsx"],
+      allowed_formats: [
+        "jpg",
+        "jpeg",
+        "png",
+        "gif",
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+      ],
       resource_type,
       // Optional: public_id: `${file.fieldname}-${Date.now()}`,
     };
@@ -35,7 +45,9 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
-      "image/jpeg", "image/png", "image/gif",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
       "application/pdf",
       "application/msword",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -48,6 +60,30 @@ const upload = multer({
     } else {
       cb(new Error("Invalid file type. Allowed: images, PDF, Word, Excel"));
     }
+  },
+});
+
+export const bugReportUpload = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: () => {
+      const timestamp = Date.now();
+      const today = new Date();
+      const dateStr = `${String(today.getDate()).padStart(2, "0")}-${String(today.getMonth() + 1).padStart(2, "0")}-${today.getFullYear()}`;
+      return {
+        folder: "consolidate-app/bug-report",
+        allowed_formats: ["jpg", "jpeg", "png"],
+        resource_type: "image",
+        public_id: `Bug-Report-${dateStr}-${timestamp}`,
+      };
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/jpg"];
+    allowed.includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new Error("Only JPG and PNG images are allowed for bug reports."));
   },
 });
 

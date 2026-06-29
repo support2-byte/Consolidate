@@ -1,62 +1,97 @@
 import pool from "../../db/pool.js";
+import { withUserAudit } from "../../middleware/dbAudit.js";
+import { calculateETA } from "../../services/calculateEta.js";
+
+async function withTransaction(operation) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await operation(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 function isValidDate(dateString) {
   if (!dateString) return false;
-  const normalized = dateString.toString().split('T')[0];  // Strip time if full ISO
+  const normalized = dateString.toString().split("T")[0]; // Strip time if full ISO
   const date = new Date(normalized);
   return !isNaN(date.getTime()) && normalized.match(/^\d{4}-\d{2}-\d{2}$/);
 }
 
 function normalizeDate(dateString) {
   if (!dateString) return null;
-  const normalized = dateString.toString().split('T')[0];
+  const normalized = dateString.toString().split("T")[0];
   return isValidDate(normalized) ? normalized : null;
 }
 
 function validateSocFields({
-  location, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at
+  location,
+  manufacture_date,
+  purchase_date,
+  purchase_price,
+  purchase_from,
+  owned_by,
+  available_at,
 }) {
   const errors = [];
-  if (!location) errors.push('location');
-  if (!isValidDate(manufacture_date)) errors.push(`manufacture_date (got: "${manufacture_date}")`);
-  if (!isValidDate(purchase_date)) errors.push(`purchase_date (got: "${purchase_date}")`);
-  if (!purchase_price) errors.push('purchase_price');
-  if (!purchase_from) errors.push('purchase_from');
-  if (!owned_by) errors.push('owned_by');
-  if (!available_at) errors.push('available_at');  // Treat as string from dropdown, not date
+  if (!location) errors.push("location");
+  if (!isValidDate(manufacture_date))
+    errors.push(`manufacture_date (got: "${manufacture_date}")`);
+  if (!isValidDate(purchase_date))
+    errors.push(`purchase_date (got: "${purchase_date}")`);
+  if (!purchase_price) errors.push("purchase_price");
+  if (!purchase_from) errors.push("purchase_from");
+  if (!owned_by) errors.push("owned_by");
+  if (!available_at) errors.push("available_at"); // Treat as string from dropdown, not date
   return errors;
 }
 
 function validateCocFields({
-  hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination
+  hire_start_date,
+  hire_end_date,
+  hired_by,
+  return_date,
+  free_days,
+  place_of_loading,
+  place_of_destination,
 }) {
   const errors = [];
-  if (!isValidDate(hire_start_date)) errors.push(`hire_start_date (got: "${hire_start_date}")`);
-  if (!isValidDate(hire_end_date)) errors.push(`hire_end_date (got: "${hire_end_date}")`);
-  if (!hired_by) errors.push('hired_by');
-  if (free_days === undefined || isNaN(free_days)) errors.push('free_days (must be number)');
-  if (!place_of_loading) errors.push('place_of_loading');
-  if (!place_of_destination) errors.push('place_of_destination');
-  if (return_date && !isValidDate(return_date)) errors.push(`return_date (got: "${return_date}")`);
+  if (!isValidDate(hire_start_date))
+    errors.push(`hire_start_date (got: "${hire_start_date}")`);
+  if (!isValidDate(hire_end_date))
+    errors.push(`hire_end_date (got: "${hire_end_date}")`);
+  if (!hired_by) errors.push("hired_by");
+  if (free_days === undefined || isNaN(free_days))
+    errors.push("free_days (must be number)");
+  if (!place_of_loading) errors.push("place_of_loading");
+  if (!place_of_destination) errors.push("place_of_destination");
+  if (return_date && !isValidDate(return_date))
+    errors.push(`return_date (got: "${return_date}")`);
   return errors;
 }
 
 // Helper for status color mapping (for dynamic options)
 function getStatusColor(status) {
   const colors = {
-    'Available': 'success',
-    'Returned': 'success',
-    'In Transit': 'warning',
-    'Loaded': 'warning',
-    'Occupied': 'warning',
-    'Hired': 'warning',
-    'Arrived': 'error',
-    'Under Repair': 'error',
-    'De-Linked': 'info',
-    'Cleared': 'info',
-    'Assigned to Job': 'warning'
+    Available: "success",
+    Returned: "success",
+    "In Transit": "warning",
+    Loaded: "warning",
+    Occupied: "warning",
+    Hired: "warning",
+    Arrived: "error",
+    "Under Repair": "error",
+    "De-Linked": "info",
+    Cleared: "info",
+    "Assigned to Job": "warning",
   };
-  return colors[status] || 'default';
+  return colors[status] || "default";
 }
 
 export async function getStatuses(req, res) {
@@ -81,46 +116,82 @@ export async function getStatuses(req, res) {
           ORDER BY css.sid DESC NULLS LAST
           LIMIT 1
         ) cs ON true
-        WHERE cm.status = 1
+        WHERE cm.status = 'Available'
       ) sub
       WHERE derived_status IS NOT NULL
       ORDER BY value
     `;
 
     const result = await pool.query(query);
-    let statuses = result.rows.map(row => ({
+    let statuses = result.rows.map((row) => ({
       ...row,
-      color: getStatusColor(row.value)
+      color: getStatusColor(row.value),
     }));
 
     //     // Hardcode full list if query returns < 5 (or always, for consistency)
     if (statuses.length < 5) {
       statuses = [
-        { value: 'Available', label: 'Available', color: getStatusColor('Available') },
-        { value: 'Hired', label: 'Hired', color: getStatusColor('Hired') },
-        { value: 'Occupied', label: 'Occupied', color: getStatusColor('Occupied') },
-        { value: 'In Transit', label: 'In Transit', color: getStatusColor('In Transit') },
-        { value: 'Loaded', label: 'Loaded', color: getStatusColor('Loaded') },
-        { value: 'Assigned to Job', label: 'Assigned to Job', color: getStatusColor('Assigned to Job') },
-        { value: 'Arrived', label: 'Arrived', color: getStatusColor('Arrived') },
-        { value: 'De-Linked', label: 'De-Linked', color: getStatusColor('De-Linked') },
-        { value: 'Under Repair', label: 'Under Repair', color: getStatusColor('Under Repair') },
-        { value: 'Returned', label: 'Returned', color: getStatusColor('Returned') },
-        { value: 'Cleared', label: 'Cleared', color: getStatusColor('Cleared') },
+        {
+          value: "Available",
+          label: "Available",
+          color: getStatusColor("Available"),
+        },
+        { value: "Hired", label: "Hired", color: getStatusColor("Hired") },
+        {
+          value: "Occupied",
+          label: "Occupied",
+          color: getStatusColor("Occupied"),
+        },
+        {
+          value: "In Transit",
+          label: "In Transit",
+          color: getStatusColor("In Transit"),
+        },
+        { value: "Loaded", label: "Loaded", color: getStatusColor("Loaded") },
+        {
+          value: "Assigned to Job",
+          label: "Assigned to Job",
+          color: getStatusColor("Assigned to Job"),
+        },
+        {
+          value: "Arrived",
+          label: "Arrived",
+          color: getStatusColor("Arrived"),
+        },
+        {
+          value: "De-Linked",
+          label: "De-Linked",
+          color: getStatusColor("De-Linked"),
+        },
+        {
+          value: "Under Repair",
+          label: "Under Repair",
+          color: getStatusColor("Under Repair"),
+        },
+        {
+          value: "Returned",
+          label: "Returned",
+          color: getStatusColor("Returned"),
+        },
+        {
+          value: "Cleared",
+          label: "Cleared",
+          color: getStatusColor("Cleared"),
+        },
 
         // Add more if needed
       ];
     }
 
     // Remove duplicates if mixing dynamic + hardcoded
-    statuses = statuses.filter((s, index, self) =>
-      index === self.findIndex(t => t.value === s.value)
+    statuses = statuses.filter(
+      (s, index, self) => index === self.findIndex((t) => t.value === s.value),
     );
 
     res.json(statuses);
   } catch (err) {
     console.error("Error fetching statuses:", err);
-    res.status(500).json({ error: 'Failed to fetch statuses' });
+    res.status(500).json({ error: "Failed to fetch statuses" });
   }
 }
 
@@ -140,18 +211,19 @@ export async function getLocations(req, res) {
     res.json(result.rows);
   } catch (err) {
     console.error("Error fetching locations:", err);
-    res.status(500).json({ error: 'Failed to fetch locations' });
+    res.status(500).json({ error: "Failed to fetch locations" });
   }
 }
 
 export async function getSizes(req, res) {
   try {
-    const query = 'SELECT DISTINCT container_size AS value, container_size AS label FROM container_master WHERE container_size IS NOT NULL ORDER BY value';
+    const query =
+      "SELECT DISTINCT container_size AS value, container_size AS label FROM container_master WHERE container_size IS NOT NULL ORDER BY value";
     const result = await pool.query(query);
     res.json(result.rows);
   } catch (err) {
     console.error("Error fetching sizes:", err);
-    res.status(500).json({ error: 'Failed to fetch sizes' });
+    res.status(500).json({ error: "Failed to fetch sizes" });
   }
 }
 
@@ -159,15 +231,15 @@ export async function getTypes(req, res) {
   try {
     // Hardcode the full list to match frontend options
     const types = [
-      { value: 'RF', label: 'RF' },
-      { value: 'HC', label: 'HC' },
-      { value: 'Ft', label: 'FT' },
-      { value: 'Tank', label: 'Tank' }
+      { value: "RF", label: "RF" },
+      { value: "HC", label: "HC" },
+      { value: "Ft", label: "FT" },
+      { value: "Tank", label: "Tank" },
     ];
     res.json(types);
   } catch (err) {
     console.error("Error fetching types:", err);
-    res.status(500).json({ error: 'Failed to fetch types' });
+    res.status(500).json({ error: "Failed to fetch types" });
   }
 }
 
@@ -183,7 +255,7 @@ export async function getOwnershipTypes(req, res) {
     res.json(result.rows);
   } catch (err) {
     console.error("Error fetching ownership types:", err);
-    res.status(500).json({ error: 'Failed to fetch ownership types' });
+    res.status(500).json({ error: "Failed to fetch ownership types" });
   }
 }
 
@@ -191,42 +263,84 @@ export async function createContainer(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const {
-      container_number, container_size, container_type, owner_type, remarks, created_by,
+      container_number,
+      container_size,
+      container_type,
+      owner_type,
+      remarks,
+      created_by,
       // SOC (owned)
       // location, availability, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
-      location, availability, derived_status, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
+      location,
+      availability,
+      derived_status,
+      manufacture_date,
+      purchase_date,
+      purchase_price,
+      purchase_from,
+      owned_by,
+      available_at,
+      currency,
       // COC (hired)
-      hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination,
+      hire_start_date,
+      hire_end_date,
+      hired_by,
+      return_date,
+      free_days,
+      place_of_loading,
+      place_of_destination,
     } = req.body;
 
     // Validation
     if (!container_number || !container_size || !container_type) {
-      return res.status(400).json({ error: 'Container number, size, and type required' });
+      return res
+        .status(400)
+        .json({ error: "Container number, size, and type required" });
     }
-    if (!['soc', 'coc'].includes(owner_type)) {
-      return res.status(400).json({ error: 'owner_type must be "soc" or "coc"' });
+    if (!["soc", "coc"].includes(owner_type)) {
+      return res
+        .status(400)
+        .json({ error: 'owner_type must be "soc" or "coc"' });
     }
 
     let validationErrors = [];
-    if (owner_type === 'soc') {
-      validationErrors = validateSocFields({ location, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at });
+    if (owner_type === "soc") {
+      validationErrors = validateSocFields({
+        location,
+        manufacture_date,
+        purchase_date,
+        purchase_price,
+        purchase_from,
+        owned_by,
+        available_at,
+      });
     } else {
-      validationErrors = validateCocFields({ hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination });
+      validationErrors = validateCocFields({
+        hire_start_date,
+        hire_end_date,
+        hired_by,
+        return_date,
+        free_days,
+        place_of_loading,
+        place_of_destination,
+      });
     }
 
     if (validationErrors.length > 0) {
-      console.warn('Validation failed for fields:', validationErrors);
+      console.warn("Validation failed for fields:", validationErrors);
       return res.status(400).json({
         error: `${owner_type.toUpperCase()} fields missing or invalid`,
-        details: validationErrors.join(', ')
+        details: validationErrors.join(", "),
       });
     }
 
     if (currency && !/^[A-Z]{3}$/.test(currency)) {
-      return res.status(400).json({ error: 'Currency must be 3-letter code (e.g., USD)' });
+      return res
+        .status(400)
+        .json({ error: "Currency must be 3-letter code (e.g., USD)" });
     }
 
     // Normalize dates (skip available_at since it's now string)
@@ -236,76 +350,116 @@ export async function createContainer(req, res) {
     const normHireEndDate = normalizeDate(hire_end_date);
     const normReturnDate = normalizeDate(return_date);
 
-    if (owner_type === 'soc' && (!normManufactureDate || !normPurchaseDate)) {
-      return res.status(400).json({ error: 'Normalized dates invalid for SOC. Use YYYY-MM-DD.' });
+    if (owner_type === "soc" && (!normManufactureDate || !normPurchaseDate)) {
+      return res
+        .status(400)
+        .json({ error: "Normalized dates invalid for SOC. Use YYYY-MM-DD." });
     }
-    if (owner_type === 'coc' && (!normHireStartDate || !normHireEndDate)) {
-      return res.status(400).json({ error: 'Normalized dates invalid for COC. Use YYYY-MM-DD.' });
+    if (owner_type === "coc" && (!normHireStartDate || !normHireEndDate)) {
+      return res
+        .status(400)
+        .json({ error: "Normalized dates invalid for COC. Use YYYY-MM-DD." });
     }
 
     // Check for duplicate container_number
-    const checkQuery = 'SELECT cid FROM container_master WHERE container_number = $1 AND status = 1';
+    const checkQuery =
+      "SELECT cid FROM container_master WHERE container_number = $1";
     const checkResult = await client.query(checkQuery, [container_number]);
     if (checkResult.rowCount > 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Container number already exists' });
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Container number already exists" });
     }
 
     // Insert master
     const masterQuery = `
       INSERT INTO container_master (container_number, container_size, container_type, owner_type, remarks, status, created_by)
-      VALUES ($1, $2, $3, $4, $5, 1, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING cid
     `;
-    const masterValues = [container_number, container_size, container_type, owner_type, remarks || '', created_by];
+    const masterValues = [
+      container_number,
+      container_size,
+      container_type,
+      owner_type,
+      remarks || "",
+      derived_status || availability || "Available",
+      created_by,
+    ];
     const masterResult = await client.query(masterQuery, masterValues);
     const cid = masterResult.rows[0].cid;
 
     // Insert initial status history
     await client.query(
-      'INSERT INTO container_status (cid, location, availability, status_notes, created_by) VALUES ($1, $2, $3, $4, $5)',
+      "INSERT INTO container_status (cid, location, availability, status_notes, created_by) VALUES ($1, $2, $3, $4, $5)",
       [
         cid,
-        location || 'karachi_port',
-        derived_status || availability || 'Available',
-        'Initial creation',
-        created_by || 'system'
-      ]
+        location || "karachi_port",
+        derived_status || availability || "Available",
+        "Initial creation",
+        created_by || "system",
+      ],
     );
 
     // Conditional insert
-    if (owner_type === 'soc') {
-      console.log('Inserting SOC with available_at (string):', available_at);
+    if (owner_type === "soc") {
+      console.log("Inserting SOC with available_at (string):", available_at);
       await client.query(
-        'INSERT INTO container_purchase_details (cid, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-        [cid, normManufactureDate, normPurchaseDate, purchase_price, purchase_from, owned_by, available_at, currency || 'USD', created_by]
+        "INSERT INTO container_purchase_details (cid, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        [
+          cid,
+          normManufactureDate,
+          normPurchaseDate,
+          purchase_price,
+          purchase_from,
+          owned_by,
+          available_at,
+          currency || "USD",
+          created_by,
+        ],
       );
     } else {
       await client.query(
-        'INSERT INTO container_hire_details (cid, hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-        [cid, normHireStartDate, normHireEndDate, hired_by, normReturnDate, free_days, place_of_loading, place_of_destination, created_by]
+        "INSERT INTO container_hire_details (cid, hire_start_date, hire_end_date, hired_by, return_date, free_days, place_of_loading, place_of_destination, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        [
+          cid,
+          normHireStartDate,
+          normHireEndDate,
+          hired_by,
+          normReturnDate,
+          free_days,
+          place_of_loading,
+          place_of_destination,
+          created_by,
+        ],
       );
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     console.log("Created new container:", { cid });
-    res.status(201).json({ message: 'Container created', cid });
+    res.status(201).json({ message: "Container created", cid });
   } catch (err) {
     if (client) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
     }
     console.error("pool error:", err.message);
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'Container number already exists' });
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "Container number already exists" });
     }
-    if (err.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value for constrained field (e.g., owner_type or availability)' });
+    if (err.code === "23514") {
+      return res.status(400).json({
+        error:
+          "Invalid value for constrained field (e.g., owner_type or availability)",
+      });
     }
-    if (err.code === '22007' || err.code === '22008') {
-      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
+    if (err.code === "22007" || err.code === "22008") {
+      return res
+        .status(400)
+        .json({ error: "Invalid date format. Use YYYY-MM-DD." });
     }
-    res.status(500).json({ error: err.message || 'Failed to create container' });
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to create container" });
   } finally {
     if (client) {
       client.release();
@@ -317,26 +471,31 @@ export async function updateContainer(req, res) {
   let client;
   try {
     client = await pool.connect();
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const { cid } = req.params;
     const updates = req.body;
-    const created_by = updates.created_by || 'system'; // Assume created_by if not provided
-    console.log('updatess', updates);
+    const created_by = updates.created_by || "system"; // Assume created_by if not provided
+    console.log("updatess", updates);
 
     // Fetch current owner_type
-    const currentResult = await client.query('SELECT owner_type FROM container_master WHERE cid = $1', [cid]);
+    const currentResult = await client.query(
+      "SELECT owner_type FROM container_master WHERE cid = $1",
+      [cid],
+    );
     const current = currentResult.rows;
     if (current.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Container not found' });
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Container not found" });
     }
     const currentOwnerType = current[0].owner_type;
 
     // Prevent changing owner_type
     if (updates.owner_type && updates.owner_type !== currentOwnerType) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Cannot change owner_type; manual migration required' });
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ error: "Cannot change owner_type; manual migration required" });
     }
 
     // If derived_status provided, treat as new availability
@@ -365,13 +524,17 @@ export async function updateContainer(req, res) {
     };
 
     let updateErrors = [];
-    if (currentOwnerType === 'soc') {
+    if (currentOwnerType === "soc") {
       // For SOC, only validate provided fields
       for (const [field, value] of Object.entries(updatedSocFields)) {
         if (value !== undefined) {
-          if (['manufacture_date', 'purchase_date'].includes(field) && !isValidDate(value)) {
+          if (
+            ["manufacture_date", "purchase_date"].includes(field) &&
+            !isValidDate(value)
+          ) {
             updateErrors.push(`${field} (got: "${value}")`);
-          } else if (!value && !['location', 'available_at'].includes(field)) {  // location and available_at can be empty
+          } else if (!value && !["location", "available_at"].includes(field)) {
+            // location and available_at can be empty
             updateErrors.push(field);
           }
         }
@@ -379,42 +542,63 @@ export async function updateContainer(req, res) {
     } else {
       for (const [field, value] of Object.entries(updatedCocFields)) {
         if (value !== undefined) {
-          if (['hire_start_date', 'hire_end_date', 'return_date'].includes(field) && !isValidDate(value)) {
+          if (
+            ["hire_start_date", "hire_end_date", "return_date"].includes(
+              field,
+            ) &&
+            !isValidDate(value)
+          ) {
             updateErrors.push(`${field} (got: "${value}")`);
-          } else if (!value && !['return_date'].includes(field)) {  // return_date optional
+          } else if (!value && !["return_date"].includes(field)) {
+            // return_date optional
             updateErrors.push(field);
-          } else if (field === 'free_days' && isNaN(value)) {
-            updateErrors.push('free_days (must be number)');
+          } else if (field === "free_days" && isNaN(value)) {
+            updateErrors.push("free_days (must be number)");
           }
         }
       }
     }
 
     if (updateErrors.length > 0) {
-      console.warn('Update validation failed for fields:', updateErrors);
-      await client.query('ROLLBACK');
+      console.warn("Update validation failed for fields:", updateErrors);
+      await client.query("ROLLBACK");
       return res.status(400).json({
-        error: 'Invalid update fields',
-        details: updateErrors.join(', ')
+        error: "Invalid update fields",
+        details: updateErrors.join(", "),
       });
     }
 
     // Check for duplicate container_number if updating it
     if (updates.container_number) {
-      const checkQuery = 'SELECT cid FROM container_master WHERE container_number = $1 AND status = 1 AND cid != $2';
-      const checkResult = await client.query(checkQuery, [updates.container_number, cid]);
+      const checkQuery =
+        "SELECT cid FROM container_master WHERE container_number = $1 AND status = 1 AND cid != $2";
+      const checkResult = await client.query(checkQuery, [
+        updates.container_number,
+        cid,
+      ]);
       if (checkResult.rowCount > 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Container number already exists' });
+        await client.query("ROLLBACK");
+        return res
+          .status(409)
+          .json({ error: "Container number already exists" });
       }
     }
 
     // Update master (core fields) - add updated_at if schema has it
-    const masterKeys = ['container_number', 'container_size', 'container_type', 'remarks'];
-    const masterUpdates = Object.keys(updates).filter(key => masterKeys.includes(key));
+    const masterKeys = [
+      "container_number",
+      "container_size",
+      "container_type",
+      "remarks",
+    ];
+    const masterUpdates = Object.keys(updates).filter((key) =>
+      masterKeys.includes(key),
+    );
     if (masterUpdates.length > 0) {
-      const setClause = masterUpdates.map((key, index) => `${key} = $${index + 1}`).join(', ');
-      const values = masterUpdates.map(key => updates[key]);
+      const setClause = masterUpdates
+        .map((key, index) => `${key} = $${index + 1}`)
+        .join(", ");
+      const values = masterUpdates.map((key) => updates[key]);
       values.push(cid);
       const updateQuery = `UPDATE container_master SET ${setClause} WHERE cid = $${values.length}`;
       await client.query(updateQuery, values);
@@ -422,15 +606,15 @@ export async function updateContainer(req, res) {
 
     // Insert new status history entry for availability/location changes (instead of update, to support history)
     if (updates.availability !== undefined || updates.location !== undefined) {
-      let columns = ['cid'];
-      let placeholders = ['$1'];
+      let columns = ["cid"];
+      let placeholders = ["$1"];
       let qvalues = [cid];
-      let notes = 'Status updated';
+      let notes = "Status updated";
 
       let paramIndex = qvalues.length + 1;
 
       if (updates.availability !== undefined) {
-        columns.push('availability');
+        columns.push("availability");
         placeholders.push(`$${paramIndex}`);
         qvalues.push(updates.availability);
         notes += ` availability to ${updates.availability}`;
@@ -438,52 +622,79 @@ export async function updateContainer(req, res) {
       }
 
       if (updates.location !== undefined) {
-        columns.push('location');
+        columns.push("location");
         placeholders.push(`$${paramIndex}`);
         qvalues.push(updates.location);
         notes += ` location to ${updates.location}`;
         paramIndex++;
       }
 
-      columns.push('status_notes');
+      columns.push("status_notes");
       placeholders.push(`$${paramIndex}`);
       qvalues.push(notes);
       paramIndex++;
 
-      columns.push('created_by');
+      columns.push("created_by");
       placeholders.push(`$${paramIndex}`);
       qvalues.push(created_by);
 
-      const insertQuery = `INSERT INTO container_status (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+      const insertQuery = `INSERT INTO container_status (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`;
       await client.query(insertQuery, qvalues);
     }
 
     // Conditional: Update purchase (SOC) or hire (COC) - use current owner_type
     const effectiveOwnerType = updates.owner_type || currentOwnerType;
-    if (effectiveOwnerType === 'soc') {
-      const purchaseKeys = ['manufacture_date', 'purchase_date', 'purchase_price', 'purchase_from', 'owned_by', 'available_at', 'currency'];
-      const purchaseUpdates = Object.keys(updates).filter(key => purchaseKeys.includes(key));
+    if (effectiveOwnerType === "soc") {
+      const purchaseKeys = [
+        "manufacture_date",
+        "purchase_date",
+        "purchase_price",
+        "purchase_from",
+        "owned_by",
+        "available_at",
+        "currency",
+      ];
+      const purchaseUpdates = Object.keys(updates).filter((key) =>
+        purchaseKeys.includes(key),
+      );
       if (purchaseUpdates.length > 0) {
         // Normalize dates for update
         const normManufactureDate = normalizeDate(updates.manufacture_date);
         const normPurchaseDate = normalizeDate(updates.purchase_date);
-        const normAvailableAt = updates.available_at;  // String, no normalize
+        const normAvailableAt = updates.available_at; // String, no normalize
         const normalizedUpdates = {
           ...updates,
           manufacture_date: normManufactureDate,
           purchase_date: normPurchaseDate,
-          available_at: normAvailableAt
+          available_at: normAvailableAt,
         };
-        const setClause = purchaseUpdates.map((key, index) => `${key} = $${index + 1}`).join(', ');
-        const values = purchaseUpdates.map(key => normalizedUpdates[key]);
+        const setClause = purchaseUpdates
+          .map((key, index) => `${key} = $${index + 1}`)
+          .join(", ");
+        const values = purchaseUpdates.map((key) => normalizedUpdates[key]);
         values.push(cid);
         const updateQuery = `UPDATE container_purchase_details SET ${setClause} WHERE cid = $${values.length}`;
-        console.log('Updating SOC with normalized dates:', { manufacture_date: normManufactureDate, purchase_date: normPurchaseDate, available_at: normAvailableAt });
+        console.log("Updating SOC with normalized dates:", {
+          manufacture_date: normManufactureDate,
+          purchase_date: normPurchaseDate,
+          available_at: normAvailableAt,
+        });
         await client.query(updateQuery, values);
       }
-    } else {  // COC (hired)
-      const hireKeys = ['hire_start_date', 'hire_end_date', 'hired_by', 'return_date', 'free_days', 'place_of_loading', 'place_of_destination'];
-      const hireUpdates = Object.keys(updates).filter(key => hireKeys.includes(key));
+    } else {
+      // COC (hired)
+      const hireKeys = [
+        "hire_start_date",
+        "hire_end_date",
+        "hired_by",
+        "return_date",
+        "free_days",
+        "place_of_loading",
+        "place_of_destination",
+      ];
+      const hireUpdates = Object.keys(updates).filter((key) =>
+        hireKeys.includes(key),
+      );
       if (hireUpdates.length > 0) {
         // Normalize dates for update
         const normHireStartDate = normalizeDate(updates.hire_start_date);
@@ -493,36 +704,49 @@ export async function updateContainer(req, res) {
           ...updates,
           hire_start_date: normHireStartDate,
           hire_end_date: normHireEndDate,
-          return_date: normReturnDate
+          return_date: normReturnDate,
         };
-        const setClause = hireUpdates.map((key, index) => `${key} = $${index + 1}`).join(', ');
-        const values = hireUpdates.map(key => normalizedUpdates[key]);
+        const setClause = hireUpdates
+          .map((key, index) => `${key} = $${index + 1}`)
+          .join(", ");
+        const values = hireUpdates.map((key) => normalizedUpdates[key]);
         values.push(cid);
         const updateQuery = `UPDATE container_hire_details SET ${setClause} WHERE cid = $${values.length}`;
-        console.log('Updating COC with normalized dates:', { hire_start_date: normHireStartDate, hire_end_date: normHireEndDate, return_date: normReturnDate });
+        console.log("Updating COC with normalized dates:", {
+          hire_start_date: normHireStartDate,
+          hire_end_date: normHireEndDate,
+          return_date: normReturnDate,
+        });
         await client.query(updateQuery, values);
       }
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
     console.log("Updated container:", cid);
-    res.json({ message: 'Container updated' });
+    res.json({ message: "Container updated" });
   } catch (err) {
     if (client) {
-      await client.query('ROLLBACK');
+      await client.query("ROLLBACK");
     }
     console.error("pool error:", err.message);
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'Container number already exists' });
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "Container number already exists" });
     }
-    if (err.code === '23514') {
-      return res.status(400).json({ error: 'Invalid value for constrained field (e.g., owner_type or availability)' });
+    if (err.code === "23514") {
+      return res.status(400).json({
+        error:
+          "Invalid value for constrained field (e.g., owner_type or availability)",
+      });
     }
-    if (err.code === '22007' || err.code === '22008') {
-      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD.' });
+    if (err.code === "22007" || err.code === "22008") {
+      return res
+        .status(400)
+        .json({ error: "Invalid date format. Use YYYY-MM-DD." });
     }
-    res.status(500).json({ error: err.message || 'Failed to update container' });
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to update container" });
   } finally {
     if (client) {
       client.release();
@@ -530,169 +754,74 @@ export async function updateContainer(req, res) {
   }
 }
 
-export async function getAllContainers(req, res) {
-  console.log("getAllContainers called with query:", req.query);
+export const getAllContainers = async (req, res) => {
   try {
-    const { container_number, container_size, container_type, owner_type, status = '', location, page = 1, limit = 100, includeOrder = 'false' } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    let whereClause = `cm.status = 1`;
-    let baseValues = [];
-
-    if (container_number) {
-      whereClause += ` AND cm.container_number ILIKE $${baseValues.length + 1}`;
-      baseValues.push(`%${container_number}%`);
-    }
-    if (container_size) {
-      whereClause += ` AND cm.container_size = $${baseValues.length + 1}`;
-      baseValues.push(container_size);
-    }
-    if (container_type) {
-      whereClause += ` AND cm.container_type = $${baseValues.length + 1}`;
-      baseValues.push(container_type);
-    }
-    if (owner_type) {
-      whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
-      baseValues.push(owner_type);
-    }
-    if (location) {
-      // FIXED: Better normalization to avoid double underscore
-      let normalizedLocation = location.toLowerCase().replace(/\s+/g, '_');
-      if (normalizedLocation.endsWith('_port')) {
-        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
-      } else if (normalizedLocation.includes('port')) {
-        normalizedLocation = normalizedLocation.replace(/_port$/, 'port').replace(/port$/, '_port'); // Handle edge cases
-      } else {
-        normalizedLocation = normalizedLocation.replace(/port$/, '_port'); // Append if ends with 'port'
-      }
-      if (['karachi_port', 'dubai_port'].includes(normalizedLocation)) {
-        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
-        baseValues.push(normalizedLocation);
-      } else {
-        return res.status(400).json({ error: `Invalid location: must be 'karachi_port' or 'dubai_port'` });
-      }
-    }
-    let baseFrom = `
+    const query = `
+      SELECT
+        cm.cid,
+        cm.container_number,
+        cm.container_size,
+        cm.container_type,
+        cm.owner_type,
+        cm.created_time,
+        COALESCE(cs.location, 'karachi_port') AS location,
+        COALESCE(cs.availability, 'Available') AS current_status,
+        CASE
+          WHEN lc.active = false THEN COALESCE(cm.status, '')
+          ELSE COALESCE(cas.status, cm.status, '')
+        END AS assignment_status,
+        COALESCE(cs.status_notes, '') AS status_notes,
+        CASE
+          WHEN lc.active = false OR lc.active IS NULL THEN ''
+          ELSE COALESCE(lc.consignment_number, '')
+        END AS consignment_number
       FROM container_master cm
       LEFT JOIN LATERAL (
-        SELECT location, availability
-        FROM container_status css
-        WHERE css.cid = cm.cid
-        ORDER BY css.sid DESC NULLS LAST
+        SELECT location, availability, status_notes
+        FROM container_status
+        WHERE cid = cm.cid
+        ORDER BY sid DESC
         LIMIT 1
       ) cs ON true
-      LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+      LEFT JOIN LATERAL (
+        SELECT c.consignment_number, cch.active
+        FROM container_consignment_history cch
+        JOIN consignments c ON c.id = cch.consignment_id
+        WHERE cch.container_id = cm.cid
+        ORDER BY cch.id DESC
+        LIMIT 1
+      ) lc ON true
+      LEFT JOIN LATERAL (
+        SELECT cah.status
+        FROM container_assignment_history cah
+        WHERE cah.cid = cm.cid
+          AND cah.action_type = 'ASSIGN'
+        ORDER BY cah.id DESC
+        LIMIT 1
+      ) cas ON true
+      ORDER BY cm.created_time DESC
     `;
+    const result = await pool.query(query);
 
-    let selectClause = `
-      SELECT 
-        cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
-        COALESCE(cs.location, 'karachi_port') as location,
-        CASE 
-          WHEN cs.availability IS NOT NULL THEN cs.availability
-          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-          ELSE 'Available'
-        END as derived_status,
-        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,
-        cm.created_time
-    `;
+    const data = result.rows.map((row) => ({
+      ...row,
+      assignment_status:
+        row.assignment_status === "Available" ? "" : row.assignment_status,
+    }));
 
-    let orderJoin = '';
-    if (includeOrder === 'true') {
-      selectClause += `,
-        o.id as associated_order_id,
-        o.booking_ref as associated_booking_ref,
-        o.status as associated_order_status,
-        o.place_of_loading as order_place_of_loading,
-        o.final_destination as order_final_destination
-      `;
-      orderJoin = `
-        LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
-      `;
-      baseFrom += orderJoin;
-    }
-
-    // Use CTE to compute derived_status
-    const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
-
-    // Prepare params for limit/offset (always added)
-    let fullParams = [...baseValues];
-    let statusWhere = '';
-
-    if (status && status !== '') {
-      // Filter by specific status
-      const statusParamIndex = baseValues.length + 1;
-      statusWhere = `WHERE derived_status = $${statusParamIndex}`;
-      fullParams.push(status);
-    }
-
-    // Add limit and offset
-    const limitParamIndex = fullParams.length + 1;
-    const offsetParamIndex = limitParamIndex + 1;
-    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
-
-    let fullQuery;
-    if (status && status !== '') {
-      fullQuery = `
-        WITH container_summary AS (${innerQuery})
-        SELECT * FROM container_summary 
-        ${statusWhere}
-        ORDER BY created_time DESC
-        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-      `;
-    } else {
-      // No status filter: show all
-      fullQuery = `
-        WITH container_summary AS (${innerQuery})
-        SELECT * FROM container_summary 
-        ORDER BY created_time DESC
-        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-      `;
-    }
-
-    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
-    let countParams = [...baseValues];
-    let countStatusWhere = '';
-    if (status && status !== '') {
-      const countStatusIndex = baseValues.length + 1;
-      countStatusWhere = `WHERE derived_status = $${countStatusIndex}`;
-      countParams.push(status);
-    }
-    const countQuery = `
-      WITH container_summary AS (${innerQuery})
-      SELECT COUNT(*) as total FROM container_summary
-      ${countStatusWhere}
-    `;
-
-    console.log("Generated Query:", fullQuery);  // Add logging for debugging
-    console.log("Generated Count Query:", countQuery);
-    console.log("Full Params:", fullParams);
-    console.log("Count Params:", countParams);
-
-    const rowsResult = await pool.query(fullQuery, fullParams);
-    const countResult = await pool.query(countQuery, countParams);
-
-    const rows = rowsResult.rows;
-
-    console.log("Fetched containers:", rows.length, "Total:", parseInt(countResult.rows[0].total), "Filters:", { ...req.query, status });
-    res.json({
-      data: rows,
-      total: parseInt(countResult.rows[0].total || 0),
-      page: parseInt(page),
-      limit: parseInt(limit),
-    });
+    return res.status(200).json({ success: true, data });
   } catch (err) {
-    console.error("pool error:", err.message, "Query params:", req.query);
-    res.status(500).json({ error: err.message || 'Failed to fetch containers' });
+    console.error("Error fetching containers:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong!",
+    });
   }
-}
+};
 export async function getContainerById(req, res) {
   try {
     const { cid } = req.params;
-    const { includeOrder = 'false' } = req.query;
+    const { includeOrder = "false" } = req.query;
     let query = `
       SELECT 
         cm.*, 
@@ -703,8 +832,20 @@ export async function getContainerById(req, res) {
           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
           ELSE 'Available'
         END as derived_status,
-        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination
+        cpd.manufacture_date::text, 
+        cpd.purchase_date::text, 
+        cpd.purchase_price, 
+        cpd.purchase_from, 
+        cpd.owned_by, 
+        cpd.available_at, 
+        cpd.currency,
+        chd.hire_start_date::text, 
+        chd.hire_end_date::text, 
+        chd.hired_by, 
+        chd.return_date::text, 
+        chd.free_days, 
+        chd.place_of_loading, 
+        chd.place_of_destination
     `;
     let fromClause = `
       FROM container_master cm
@@ -717,10 +858,10 @@ export async function getContainerById(req, res) {
       ) cs ON true
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      WHERE cm.cid = $1 AND cm.status = 1 AND (cs.location = 'karachi_port' OR cs.location = 'dubai_port')  -- NEW: Enforce valid locations
+      WHERE cm.cid = $1
     `;
 
-    if (includeOrder === 'true') {
+    if (includeOrder === "true") {
       query += `,
         o.id as associated_order_id,
         o.booking_ref as associated_booking_ref,
@@ -729,10 +870,13 @@ export async function getContainerById(req, res) {
         o.final_destination as order_final_destination,
         o.created_at as order_created_at
       `;
-      fromClause = fromClause.replace('WHERE', `
+      fromClause = fromClause.replace(
+        "WHERE",
+        `
         LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
         WHERE
-      `);
+      `,
+      );
     }
 
     query += ` ${fromClause}`;
@@ -741,14 +885,14 @@ export async function getContainerById(req, res) {
     const rows = rowsResult.rows;
 
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Container not found' });
+      return res.status(404).json({ error: "Container not found" });
     }
 
     console.log("Fetched container:", rows[0].container_number);
     res.json(rows[0]);
   } catch (err) {
     console.error("pool error:", err.message);
-    res.status(500).json({ error: err.message || 'Failed to fetch container' });
+    res.status(500).json({ error: err.message || "Failed to fetch container" });
   }
 }
 // Updated Usage History endpoint - Combines container_status and container_assignment_history for comprehensive usage
@@ -763,7 +907,7 @@ export async function getContainerById(req, res) {
 //     // Union query to combine status changes and assignment events
 //     const historyQuery = `
 //       -- Status changes from container_status
-//       SELECT 
+//       SELECT
 //         cs.created_time as event_time,
 //         'STATUS_CHANGE' as event_type,
 //         cs.availability as event_status,
@@ -791,14 +935,14 @@ export async function getContainerById(req, res) {
 //       JOIN container_master cm ON cs.cid = cm.cid
 //       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
 //       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       LEFT JOIN orders o ON o.associated_container = cm.container_number 
+//       LEFT JOIN orders o ON o.associated_container = cm.container_number
 //         AND o.status != 'Cancelled'
 //       WHERE cs.cid = $1
 
 //       UNION ALL
 
 //       -- Assignment events from container_assignment_history
-//       SELECT 
+//       SELECT
 //         cah.created_at as event_time,
 //         'ASSIGNMENT' as event_type,
 //         cah.status as event_status,
@@ -826,7 +970,7 @@ export async function getContainerById(req, res) {
 //       JOIN container_master cm ON cah.cid = cm.cid
 //       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
 //       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       LEFT JOIN orders o ON cah.order_id = o.id 
+//       LEFT JOIN orders o ON cah.order_id = o.id
 //         AND o.status != 'Cancelled'
 //       WHERE cah.cid = $1
 
@@ -838,7 +982,7 @@ export async function getContainerById(req, res) {
 
 //     // Format for frontend (group by job if possible; enhance with event details)
 //     const formattedHistory = history.map(row => {
-//       const eventSummary = row.event_type === 'ASSIGNMENT' 
+//       const eventSummary = row.event_type === 'ASSIGNMENT'
 //         ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
 //         : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
 
@@ -882,24 +1026,23 @@ export async function getContainerById(req, res) {
 //   }
 // }
 
-
 export async function getUsageHistory(req, res) {
   try {
     const { cid } = req.params;
     if (!cid || isNaN(parseInt(cid))) {
-      return res.status(400).json({ error: 'Valid CID is required' });
+      return res.status(400).json({ error: "Valid CID is required" });
     }
     const containerId = parseInt(cid);
 
-    // Pehle wali UNION query bilkul unchanged rahegi
     const historyQuery = `
-      -- Status changes from container_status
       SELECT 
         cs.created_time as event_time,
         'STATUS_CHANGE' as event_type,
         cs.availability as event_status,
         NULL as assigned_qty,
+        NULL as assigned_weight_kg,
         NULL as action_type,
+        NULL as loaded_at,
         cs.location as location,
         cs.status_notes as notes,
         cs.created_by as changed_by,
@@ -907,64 +1050,78 @@ export async function getUsageHistory(req, res) {
         NULL as order_id,
         NULL as receiver_id,
         NULL as detail_id,
+        NULL as consignment_number,
         cm.container_number,
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
-        o.id as job_id,
-        o.booking_ref as job_no,
-        o.place_of_loading as pol,
-        o.final_destination as pod,
-        o.created_at as start_date,
-        o.updated_at as end_date,
-        o.status as order_status
+        NULL as job_id,
+        NULL as job_no,
+        NULL as form_no,
+        NULL as pol,
+        NULL as pod,
+        NULL as start_date,
+        NULL as end_date,
+        NULL as order_status,
+        NULL as consignment_status,
+        NULL as shipper_name,
+        NULL as consignee_name
       FROM container_status cs
       JOIN container_master cm ON cs.cid = cm.cid
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      LEFT JOIN orders o ON o.associated_container = cm.container_number 
-        AND o.status != 'Cancelled'
       WHERE cs.cid = $1
 
       UNION ALL
 
-      -- Assignment events from container_assignment_history
       SELECT 
         cah.created_at as event_time,
         'ASSIGNMENT' as event_type,
         cah.status as event_status,
         cah.assigned_qty,
+        cah.assigned_weight_kg,
         cah.action_type,
-        NULL as location,  -- Assignments may not have location; could enhance if needed
+        cah.loaded_at,
+        NULL as location,
         cah.notes,
         cah.changed_by,
         cah.previous_status,
         cah.order_id,
         cah.receiver_id,
         cah.detail_id,
+        con.consignment_number as consignment_number,
         cm.container_number,
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
-        cah.order_id as job_id,  -- Reuse order_id as job_id
+        cah.order_id as job_id,
         o.booking_ref as job_no,
+        o.rgl_booking_number as form_no,
         o.place_of_loading as pol,
         o.final_destination as pod,
         o.created_at as start_date,
         o.updated_at as end_date,
-        o.status as order_status
-      FROM container_assignment_history cah
-      JOIN container_master cm ON cah.cid = cm.cid
-      LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      LEFT JOIN orders o ON cah.order_id = o.id 
-        AND o.status != 'Cancelled'
-      WHERE cah.cid = $1
+        o.status as order_status,
+        con.status as consignment_status,
+        con.shipper as shipper_name,
+        con.consignee as consignee_name
+        FROM container_assignment_history cah
+        JOIN container_master cm ON cah.cid = cm.cid
+        LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
+        LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
+        LEFT JOIN orders o 
+          ON cah.order_id = o.id 
+          AND o.status != 'Cancelled'
+        LEFT JOIN consignments con
+          ON con.orders @> to_jsonb(cah.order_id)
+        LEFT JOIN container_consignment_history cch
+          ON cch.consignment_id = con.id
+          AND cch.container_id = cah.cid
+        WHERE cah.cid = $1
+          AND con.id IS NOT NULL
 
-      ORDER BY event_time DESC
-    `;
+        ORDER BY event_time DESC`;
 
-    // Alag se sirf container status history ka query
     const statusHistoryQuery = `
       SELECT 
         sid,
@@ -979,98 +1136,774 @@ export async function getUsageHistory(req, res) {
       ORDER BY created_time DESC, sid DESC
     `;
 
-    // Dono queries ek saath run karo
     const [historyResult, statusHistoryResult] = await Promise.all([
       pool.query(historyQuery, [containerId]),
-      pool.query(statusHistoryQuery, [containerId])
+      pool.query(statusHistoryQuery, [containerId]),
     ]);
 
     const history = historyResult.rows;
     const statusHistory = statusHistoryResult.rows;
 
-    // Existing format bilkul unchanged rahega
-    const formattedHistory = history.map(row => {
-      const eventSummary = row.event_type === 'ASSIGNMENT'
-        ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
-        : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
+    const formattedHistory = history.map((row) => {
+      const eventSummary =
+        row.event_type === "ASSIGNMENT"
+          ? `${row.action_type} ${row.assigned_qty || 0} items (${row.assigned_weight_kg || 0} kg) (Prev: ${row.previous_status || "N/A"})`
+          : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ""}`;
 
       return {
-        eventTime: row.event_time.toISOString().split('T')[0],
+        eventTime: row.event_time.toISOString().split("T")[0],
         eventType: row.event_type,
-        eventSummary: eventSummary,
-        jobNo: row.job_no || `JOB-${row.event_time.toISOString().split('T')[0].replace(/-/g, '')}`,
-        pol: row.pol || (row.owner_type === 'soc' ? 'Self Depot' : 'Vendor Depot'),
-        pod: row.pod || 'Destination Depot',
-        startDate: row.start_date ? row.start_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
-        endDate: row.end_date ? row.end_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
+        consignmentStatus: row.consignment_status || null,
+        shipperName: row.shipper_name || null,
+        consigneeName: row.consignee_name || null,
+        eventSummary,
+        assignedQty: Number(row.assigned_qty || 0),
+        assignedWeightKg: Number(row.assigned_weight_kg || 0),
+        loadedAt: row.loaded_at
+          ? row.loaded_at.toISOString().split("T")[0]
+          : null,
+        orderId: row.order_id,
+        bookingRef: row.job_no,
+        formNo: row.form_no,
+        consignmentNo: row.consignment_number || null,
+        pol:
+          row.pol || (row.owner_type === "soc" ? "Self Depot" : "Vendor Depot"),
+        pod: row.pod || "Destination Depot",
+        startDate: row.start_date
+          ? row.start_date.toISOString().split("T")[0]
+          : row.event_time.toISOString().split("T")[0],
+        endDate: row.end_date
+          ? row.end_date.toISOString().split("T")[0]
+          : row.event_time.toISOString().split("T")[0],
+        jobNo:
+          row.job_no ||
+          `JOB-${row.event_time.toISOString().split("T")[0].replace(/-/g, "")}`,
         statusProgression: [row.event_status],
-        linkedOrders: row.job_no ? `ORD-${row.job_id}` : 'N/A',
+        linkedOrders: row.job_no ? `ORD-${row.job_id}` : "N/A",
         remarks: row.notes || eventSummary,
         changedBy: row.changed_by,
-        orderId: row.order_id,
         receiverId: row.receiver_id,
-        detailId: row.detail_id
+        detailId: row.detail_id,
       };
     });
 
-    // Group by job (existing format)
-    const groupedHistory = {};
-    formattedHistory.forEach(entry => {
-      const key = entry.jobNo;
-      if (!groupedHistory[key]) {
-        groupedHistory[key] = [];
-      }
-      groupedHistory[key].push(entry);
-    });
+    const groupedByConsignment = {};
 
-    // Status history ko format karo
-    const formattedStatusHistory = statusHistory.map(row => ({
+    formattedHistory
+      .filter((e) => e.eventType === "ASSIGNMENT" && e.assignedQty > 0)
+      .forEach((event) => {
+        const key =
+          event.consignmentNo || `ORDER-${event.bookingRef || event.orderId}`;
+
+        if (!groupedByConsignment[key]) {
+          groupedByConsignment[key] = {
+            consignmentNo: event.consignmentNo || null,
+            bookingRef: event.bookingRef,
+            formNo: event.formNo,
+            pol: event.pol,
+            pod: event.pod,
+            loadedAt: event.loadedAt,
+            orders: [],
+          };
+        }
+
+        groupedByConsignment[key].orders.push(event);
+      });
+
+    const formattedStatusHistory = statusHistory.map((row) => ({
       sid: row.sid,
       cid: row.cid,
       location: row.location,
       status: row.availability,
-      createdBy: row.created_by || 'System',
+      createdBy: row.created_by || "System",
       createdTime: row.created_time,
-      notes: row.status_notes
+      notes: row.status_notes,
     }));
 
-    console.log(`Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`);
+    console.log(
+      `Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`,
+    );
 
-    // Response format mein sirf ek naya field add karo
     res.json({
       rawEvents: formattedHistory,
-      groupedByJob: groupedHistory,
+      groupedByConsignment,
       containerStatusHistory: {
         totalRecords: formattedStatusHistory.length,
         events: formattedStatusHistory,
         summary: {
-          uniqueStatuses: [...new Set(formattedStatusHistory.map(s => s.status))],
-          firstStatus: formattedStatusHistory[formattedStatusHistory.length - 1]?.status || 'N/A',
-          latestStatus: formattedStatusHistory[0]?.status || 'N/A',
-          totalLocations: [...new Set(formattedStatusHistory.map(s => s.location))].length
-        }
-      }
+          uniqueStatuses: [
+            ...new Set(formattedStatusHistory.map((s) => s.status)),
+          ],
+          firstStatus:
+            formattedStatusHistory[formattedStatusHistory.length - 1]?.status ||
+            "N/A",
+          latestStatus: formattedStatusHistory[0]?.status || "N/A",
+          totalLocations: [
+            ...new Set(formattedStatusHistory.map((s) => s.location)),
+          ].length,
+        },
+      },
     });
-
   } catch (err) {
     console.error("Error fetching usage history:", err);
-    res.status(500).json({ error: 'Failed to fetch usage history', details: err.message });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch usage history", details: err.message });
   }
 }
 
 export async function deleteContainer(req, res) {
   try {
     const { cid } = req.params;
-    const result = await pool.query('UPDATE container_master SET status = 0 WHERE cid = $1 RETURNING *', [cid]);
+    const result = await pool.query(
+      "UPDATE container_master SET status = 0 WHERE cid = $1 RETURNING *",
+      [cid],
+    );
 
     if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'Container not found' });
+      return res.status(404).json({ error: "Container not found" });
     }
 
     console.log("Deactivated container:", cid);
-    res.json({ message: 'Container deactivated' });
+    res.json({ message: "Container deactivated" });
   } catch (err) {
     console.error("pool error:", err.message);
-    res.status(500).json({ error: err.message || 'Failed to delete container' });
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to delete container" });
+  }
+}
+
+export const getContainerAssignments = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        cc.id,
+        cc.container_id,
+        cm.container_number,
+        cc.consignment_id,
+        cs.consignment_number,
+        cc.assigned_at,
+        cc.released_at,
+        cc.created_at,
+        COALESCE(NULLIF(cu.name, ''), cu.email) AS created_by,
+        COALESCE(NULLIF(mu.name, ''), mu.email) AS released_by,
+        cc.active
+      FROM container_consignment_history cc
+      INNER JOIN container_master cm
+          ON cm.cid = cc.container_id
+      INNER JOIN consignments cs
+          ON cs.id = cc.consignment_id
+      INNER JOIN users cu
+          ON cu.id = cc.created_by
+      LEFT JOIN users mu
+          ON mu.id = cc.released_by
+      ORDER BY cc.assigned_at DESC, cc.id DESC;
+    `);
+
+    return res.status(200).json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Error fetching container assignments:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch container assignments",
+      details: error.message,
+    });
+  }
+};
+
+export const releaseContainer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { release_date, user_id } = req.body;
+
+    if (!release_date) {
+      return res.status(400).json({
+        success: false,
+        message: "Release date is required",
+      });
+    }
+
+    let releasedAssignment = null;
+
+    await withTransaction(async (client) => {
+      const query = `
+        UPDATE container_consignment_history
+        SET
+          released_at = $1,
+          active = false,
+          released_by = $2
+        WHERE id = $3
+          AND released_at IS NULL
+        RETURNING *
+      `;
+
+      const result = await client.query(query, [release_date, user_id, id]);
+
+      if (result.rowCount === 0) {
+        throw new Error("ASSIGNMENT_NOT_FOUND");
+      }
+
+      releasedAssignment = result.rows[0];
+
+      await client.query(
+        `
+        UPDATE container_master
+          SET status = 'Available'
+        WHERE cid = $1
+        `,
+        [releasedAssignment.container_id],
+      );
+
+      await client.query(
+        `
+        UPDATE container_status
+          SET availability = 'Available'
+        WHERE cid = $1
+        `,
+        [releasedAssignment.container_id],
+      );
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Container released successfully",
+      data: releasedAssignment,
+    });
+  } catch (error) {
+    if (error.message === "ASSIGNMENT_NOT_FOUND") {
+      return res.status(404).json({
+        success: false,
+        message: "Assignment not found or already released",
+      });
+    }
+
+    console.error("Error releasing container:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to release container",
+      error: error.message,
+    });
+  }
+};
+
+export async function getAllContainersForConsignment(req, res) {
+  console.log("getAllContainers called with query:", req.query);
+  try {
+    const {
+      container_number,
+      container_size,
+      container_type,
+      owner_type,
+      status = "",
+      location,
+      page = 1,
+      limit = 100,
+      includeOrder = "false",
+    } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    let whereClause = `
+      NOT EXISTS (
+        SELECT 1
+        FROM container_consignment_history cch
+        WHERE cch.container_id = cm.cid
+          AND cch.active = true
+      )
+    `;
+    let baseValues = [];
+
+    if (container_number) {
+      whereClause += ` AND cm.container_number ILIKE $${baseValues.length + 1}`;
+      baseValues.push(`%${container_number}%`);
+    }
+    if (container_size) {
+      whereClause += ` AND cm.container_size = $${baseValues.length + 1}`;
+      baseValues.push(container_size);
+    }
+    if (container_type) {
+      whereClause += ` AND cm.container_type = $${baseValues.length + 1}`;
+      baseValues.push(container_type);
+    }
+    if (owner_type) {
+      whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
+      baseValues.push(owner_type);
+    }
+    if (location) {
+      // FIXED: Better normalization to avoid double underscore
+      let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
+      if (normalizedLocation.endsWith("_port")) {
+        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
+      } else if (normalizedLocation.includes("port")) {
+        normalizedLocation = normalizedLocation
+          .replace(/_port$/, "port")
+          .replace(/port$/, "_port"); // Handle edge cases
+      } else {
+        normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
+      }
+      if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
+        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
+        baseValues.push(normalizedLocation);
+      } else {
+        return res.status(400).json({
+          error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
+        });
+      }
+    }
+    let baseFrom = `
+      FROM container_master cm
+
+      LEFT JOIN LATERAL (
+        SELECT location, availability
+        FROM container_status css
+        WHERE css.cid = cm.cid
+        ORDER BY css.sid DESC NULLS LAST
+        LIMIT 1
+      ) cs ON true
+
+      LEFT JOIN container_purchase_details cpd
+        ON cm.cid = cpd.cid
+
+      LEFT JOIN container_hire_details chd
+        ON cm.cid = chd.cid
+
+      LEFT JOIN LATERAL (
+        SELECT cch.active
+        FROM container_consignment_history cch
+        WHERE cch.container_id = cm.cid
+        ORDER BY cch.id DESC
+        LIMIT 1
+      ) cch ON true
+    `;
+
+    let selectClause = `
+      SELECT 
+        cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
+        COALESCE(cs.location, 'karachi_port') as location,
+        CASE 
+          WHEN cs.availability IS NOT NULL THEN cs.availability
+          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
+          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
+          ELSE 'Available'
+        END as derived_status,
+        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
+        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,
+        cm.created_time
+    `;
+
+    let orderJoin = "";
+    if (includeOrder === "true") {
+      selectClause += `,
+        o.id as associated_order_id,
+        o.booking_ref as associated_booking_ref,
+        o.status as associated_order_status,
+        o.place_of_loading as order_place_of_loading,
+        o.final_destination as order_final_destination
+      `;
+      orderJoin = `
+        LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
+      `;
+      baseFrom += orderJoin;
+    }
+
+    // Use CTE to compute derived_status
+    const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
+
+    // Prepare params for limit/offset (always added)
+    let fullParams = [...baseValues];
+    let statusWhere = "";
+
+    if (status && status !== "") {
+      // Filter by specific status
+      const statusParamIndex = baseValues.length + 1;
+      statusWhere = `WHERE derived_status = $${statusParamIndex}`;
+      fullParams.push(status);
+    }
+
+    // Add limit and offset
+    const limitParamIndex = fullParams.length + 1;
+    const offsetParamIndex = limitParamIndex + 1;
+    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
+
+    let fullQuery;
+    if (status && status !== "") {
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ${statusWhere}
+        ORDER BY created_time DESC
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    } else {
+      // No status filter: show all
+      fullQuery = `
+        WITH container_summary AS (${innerQuery})
+        SELECT * FROM container_summary 
+        ORDER BY created_time DESC
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `;
+    }
+
+    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
+    let countParams = [...baseValues];
+    let countStatusWhere = "";
+    if (status && status !== "") {
+      const countStatusIndex = baseValues.length + 1;
+      countStatusWhere = `WHERE derived_status = $${countStatusIndex}`;
+      countParams.push(status);
+    }
+    const countQuery = `
+      WITH container_summary AS (${innerQuery})
+      SELECT COUNT(*) as total FROM container_summary
+      ${countStatusWhere}
+    `;
+
+    console.log("Generated Query:", fullQuery); // Add logging for debugging
+    console.log("Generated Count Query:", countQuery);
+    console.log("Full Params:", fullParams);
+    console.log("Count Params:", countParams);
+
+    const rowsResult = await pool.query(fullQuery, fullParams);
+    const countResult = await pool.query(countQuery, countParams);
+
+    const rows = rowsResult.rows;
+
+    console.log(
+      "Fetched containers:",
+      rows.length,
+      "Total:",
+      parseInt(countResult.rows[0].total),
+      "Filters:",
+      { ...req.query, status },
+    );
+    res.json({
+      data: rows,
+      total: parseInt(countResult.rows[0].total || 0),
+      page: parseInt(page),
+      limit: parseInt(limit),
+    });
+  } catch (err) {
+    console.error("pool error:", err.message, "Query params:", req.query);
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to fetch containers" });
+  }
+}
+
+export async function getUnassignedOrders(req, res) {
+  try {
+    const { cid } = req.params;
+
+    if (!cid || isNaN(parseInt(cid))) {
+      return res.status(400).json({ error: "Valid CID is required" });
+    }
+
+    const containerId = parseInt(cid);
+
+    const query = `
+      SELECT
+        cah.created_at          AS event_time,
+        'ASSIGNMENT'            AS event_type,
+        cah.status              AS event_status,
+        cah.assigned_qty,
+        cah.assigned_weight_kg,
+        cah.action_type,
+        cah.loaded_at,
+        cah.notes,
+        cah.changed_by,
+        cah.previous_status,
+        cah.order_id,
+        cah.receiver_id,
+        cah.detail_id,
+        cm.container_number,
+        cm.owner_type,
+        o.booking_ref           AS job_no,
+        o.rgl_booking_number    AS form_no,
+        o.place_of_loading      AS pol,
+        o.final_destination     AS pod,
+        o.created_at            AS start_date,
+        o.updated_at            AS end_date,
+        o.id                    AS job_id
+      FROM container_assignment_history cah
+      JOIN container_master cm ON cah.cid = cm.cid
+      LEFT JOIN orders o
+        ON cah.order_id = o.id
+        AND o.status != 'Cancelled'
+      WHERE cah.cid = $1
+        AND o.id IS NOT NULL          -- was con.id, which doesn't exist
+        AND cah.assigned_qty > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM consignments c
+          WHERE c.orders @> to_jsonb(cah.order_id)
+        )
+      ORDER BY cah.created_at DESC
+    `;
+
+    const result = await pool.query(query, [containerId]);
+
+    const orders = result.rows.map((row) => {
+      const eventSummary = `${row.action_type || "ASSIGNMENT"} ${row.assigned_qty || 0} items (${row.assigned_weight_kg || 0} kg) — Prev: ${row.previous_status || "N/A"}`;
+
+      return {
+        eventTime: row.event_time
+          ? row.event_time.toISOString().split("T")[0]
+          : null,
+        eventType: row.event_type,
+        eventSummary,
+        assignedQty: Number(row.assigned_qty || 0),
+        assignedWeightKg: Number(row.assigned_weight_kg || 0),
+        actionType: row.action_type || null,
+        previousStatus: row.previous_status || null,
+        loadedAt: row.loaded_at
+          ? row.loaded_at.toISOString().split("T")[0]
+          : null,
+        orderId: row.order_id || null,
+        bookingRef: row.job_no || null,
+        formNo: row.form_no || null,
+        pol:
+          row.pol || (row.owner_type === "soc" ? "Self Depot" : "Vendor Depot"),
+        pod: row.pod || "Destination Depot",
+        startDate: row.start_date
+          ? row.start_date.toISOString().split("T")[0]
+          : row.event_time?.toISOString().split("T")[0] || null,
+        endDate: row.end_date
+          ? row.end_date.toISOString().split("T")[0]
+          : row.event_time?.toISOString().split("T")[0] || null,
+        linkedOrders: row.job_no ? `ORD-${row.job_id}` : "N/A",
+        remarks: row.notes || eventSummary,
+        changedBy: row.changed_by || "System",
+        receiverId: row.receiver_id || null,
+        detailId: row.detail_id || null,
+      };
+    });
+
+    console.log(
+      `[unassigned-orders] container ${containerId}: ${orders.length} events without a consignment`,
+    );
+
+    return res.json({ total: orders.length, orders });
+  } catch (err) {
+    console.error("Error fetching unassigned orders:", err);
+    return res.status(500).json({
+      error: "Failed to fetch unassigned orders",
+      details: err.message,
+    });
+  }
+}
+
+export async function updateContainerStatus(req, res) {
+  let client;
+
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const { cid } = req.params;
+
+    const {
+      current_status,
+      derived_status,
+      location,
+      container_status,
+      created_by = req.user?.email || "system",
+    } = req.body;
+
+    if (derived_status || location) {
+      await client.query(
+        `
+        UPDATE container_status
+        SET
+          availability = COALESCE($1, availability),
+          location = COALESCE($2, location),
+          status_notes = $3,
+          created_by = $4,
+          created_time = NOW()
+        WHERE cid = $5
+        `,
+        [
+          derived_status,
+          location,
+          `Updated to ${derived_status} at ${location}`,
+          created_by,
+          cid,
+        ],
+      );
+    }
+
+    if (container_status && current_status) {
+      const statusResult = await client.query(
+        `
+        SELECT order_status, days_offset
+        FROM statuses
+        WHERE container_status = $1
+        `,
+        [container_status],
+      );
+
+      const order_status = statusResult.rows[0]?.order_status ?? null;
+      const days_offset = statusResult.rows[0]?.days_offset ?? null;
+
+      console.log(
+        `[updateContainerStatus] container_status="${container_status}" → order_status="${order_status}", days_offset=${days_offset}`,
+      );
+
+      let eta = null;
+      let daysUntil = null;
+      if (order_status) {
+        const result = await calculateETA(client, order_status);
+        eta = result.eta;
+        daysUntil = result.daysUntil;
+      }
+
+      await client.query(
+        `
+          UPDATE container_master
+          SET status = $1
+          WHERE cid = $2
+        `,
+        [container_status, cid],
+      );
+
+      const assignmentResult = await client.query(
+        `
+          UPDATE container_assignment_history
+          SET status = $1
+          WHERE cid = $2
+            AND action_type = 'ASSIGN'
+            AND status = $3
+          RETURNING receiver_id
+        `,
+        [container_status, cid, current_status],
+      );
+
+      const receiverIds = [
+        ...new Set(
+          assignmentResult.rows.map((row) => row.receiver_id).filter(Boolean),
+        ),
+      ];
+
+      for (const receiverId of receiverIds) {
+        const receiverResult = await client.query(
+          `
+          SELECT
+            id,
+            receiver_ref,
+            status
+          FROM receivers
+          WHERE id = $1
+          `,
+          [receiverId],
+        );
+
+        const receiver = receiverResult.rows[0];
+
+        if (!receiver) continue;
+
+        const oldStatus = receiver.status || null;
+
+        const itemsResult = await client.query(
+          `
+          SELECT
+            oi.order_id,
+            oi.sender_id,
+            oi.receiver_id,
+            oi.item_ref,
+            s.sender_ref,
+            s.consignment_number
+          FROM order_items oi
+          LEFT JOIN senders s
+            ON s.id = oi.sender_id
+          WHERE oi.receiver_id = $1
+          `,
+          [receiverId],
+        );
+
+        for (const item of itemsResult.rows) {
+          await client.query(
+            `
+            INSERT INTO order_tracking (
+              order_id,
+              sender_id,
+              sender_ref,
+              receiver_id,
+              receiver_ref,
+              container_id,
+              consignment_number,
+              status,
+              old_status,
+              item_ref,
+              created_by,
+              created_time
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              $11,
+              NOW()
+            )
+            `,
+            [
+              item.order_id,
+              item.sender_id,
+              item.sender_ref,
+              item.receiver_id,
+              receiver.receiver_ref,
+              cid,
+              item.consignment_number,
+              container_status,
+              oldStatus,
+              item.item_ref,
+              created_by,
+            ],
+          );
+        }
+
+        await client.query(
+          `
+          UPDATE receivers
+            SET status = $1,
+                eta = $2
+          WHERE id = $3
+          `,
+          [order_status, eta, receiverId],
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      success: true,
+      message: "Container status updated successfully",
+    });
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+
+    console.error("Container status update failed:", err);
+
+    return res.status(500).json({
+      error: "Failed to update container status",
+      details: err.message,
+    });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }

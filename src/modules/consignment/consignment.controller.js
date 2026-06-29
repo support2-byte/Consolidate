@@ -1,5 +1,6 @@
 import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
+import { calculateETA } from "../../services/calculateEta.js";
 
 // Helper: Normalize date to ISO string or null
 // function normalizeDate(dateString) {
@@ -122,25 +123,6 @@ function validateOrders(orders) {
 //   };
 //   return colors[status] || 'default';
 // }
-// === Valid Consignment Statuses (must match your PostgreSQL enum exactly) ===
-export const VALID_CONSIGNMENT_STATUSES = [
-  "Draft",
-  "Submitted",
-  "In Transit",
-  "Delivered",
-  "Cancelled",
-  "Drafts Cleared",
-  "Submitted On Vessel",
-  "In Transit On Vessel",
-  "Customs Cleared",
-  "Under Shipment Processing",
-  "Arrived at Facility",
-  "Ready for Delivery",
-  "Arrived at Destination",
-  "HOLD for Delivery",
-  "HOLD", // Add this if you ever use plain 'HOLD'
-  // Note: 'Loaded Into Container' is NOT a consignment status — it's for receivers
-];
 
 // === Status Color Mapping (Used everywhere: consignment, container, receiver cards) ===
 export function getStatusColor(status) {
@@ -336,62 +318,7 @@ async function tableExists(client, tableName) {
     return false;
   }
 }
-export async function calculateETA(pool, status) {
-  const isProd = process.env.NODE_ENV === "production";
-  const today = isProd ? new Date() : new Date("2025-12-26"); // Fixed for testing
-  try {
-    const { rows } = await pool.query(
-      "SELECT days_offset FROM status_config WHERE status = $1 LIMIT 1",
-      [status],
-    );
-    let offsetDays;
-    if (rows.length === 0) {
-      // Map consignment statuses to table aliases (from your data)
-      const statusMapping = {
-        "Drafts Cleared": "Order Created", // 15 days
-        "Submitted On Vessel": "Loaded Into Container", // 9 days
-        "Customs Cleared": "Shipment Processing", // 7 days
-        Submitted: "Submitted", // 10 days (exact)
-        "Under Shipment Processing": "Shipment Processing", // 7 days
-        "In Transit On Vessel": "Shipment In Transit", // 4 days
-        "In Transit": "In Transit", // 5 days (exact)
-        "Arrived at Facility": "Arrived at Sort Facility", // 1 day
-        "Ready for Delivery": "Ready for Delivery", // 0 days
-        "Arrived at Destination": "Shipment Delivered", // 0 days
-        Delivered: "Delivered", // 0 days
-        "HOLD for Delivery": "Under Processing", // 2 days fallback
-        HOLD: 0, // Terminal
-        Cancelled: 0, // Terminal
-      };
-      const mappedStatus = statusMapping[status] || status;
-      const mappedRows = await pool.query(
-        "SELECT days_offset FROM status_config WHERE status = $1 LIMIT 1",
-        [mappedStatus],
-      );
-      if (mappedRows.rows.length === 0) {
-        const defaultOffsets = { "Drafts Cleared": 30 }; // Custom fallback
-        offsetDays = defaultOffsets[status] || 0;
-        console.warn(
-          `No mapped config for '${status}' (tried '${mappedStatus}'); using default ${offsetDays} days`,
-        );
-      } else {
-        offsetDays = mappedRows.rows[0].days_offset || 0;
-        console.log(
-          `Mapped '${status}' to '${mappedStatus}' with offset ${offsetDays} days`,
-        );
-      }
-    } else {
-      offsetDays = rows[0].days_offset || 0;
-    }
-    const newDate = new Date(
-      today.getTime() + offsetDays * (1000 * 60 * 60 * 24),
-    );
-    return newDate.toISOString();
-  } catch (err) {
-    console.error(`Error calculating ETA for status ${status}:`, err);
-    return today.toISOString(); // Graceful fallback
-  }
-}
+
 // Assuming pg client/pool; call with client for tx safety
 // async function safeLogToTracking(client, consignmentId, eventType, logData = {}) {
 //   // Validate event_type against schema CHECK (optional, but prevents 23514 errors)
@@ -464,38 +391,36 @@ export async function calculateETA(pool, status) {
 // }
 
 export async function getConsignmentById(req, res) {
-  console.log("Fetching consignment:", req.params);
-
   try {
     const { id } = req.params;
     const { autoSync = "false" } = req.query;
     const enableAutoSync = autoSync === "true";
     let orderIds = [];
     const numericId = parseInt(id, 10);
+
     if (isNaN(numericId) || numericId <= 0) {
       return res.status(400).json({ error: "Invalid consignment ID." });
     }
 
     const client = await pool.connect();
     let consignment = null;
-    let containers = []; // declared in outer scope — always available
+    let containers = [];
 
     try {
       await client.query("BEGIN");
 
-      // 1. Fetch main consignment
       const consRes = await client.query(
         "SELECT * FROM consignments WHERE id = $1",
         [numericId],
       );
+
       if (consRes.rowCount === 0) {
         await client.query("ROLLBACK");
         return res.status(404).json({ error: "Consignment not found" });
       }
+
       consignment = consRes.rows[0];
 
-      // 2. Parse order IDs safely
-      // let orderIds = [];
       if (consignment.orders) {
         let rawOrders =
           typeof consignment.orders === "string"
@@ -508,43 +433,45 @@ export async function getConsignmentById(req, res) {
           : [];
       }
 
+      const statusRes = await client.query(
+        "SELECT order_status, sorting_number FROM statuses WHERE order_status IS NOT NULL",
+      );
+
+      const statusPriority = statusRes.rows.reduce((acc, row) => {
+        if (row.order_status) {
+          acc[row.order_status] = row.sorting_number || 0;
+        }
+        return acc;
+      }, {});
+
       let linkedOrders = [];
       let minReceiverEta = null;
       let mostAdvancedReceiverStatus = null;
 
       if (orderIds.length > 0) {
-        // Fetch orders
         const orderRes = await client.query(
-          `
-          SELECT 
-            id, 
-            sender_name AS shipper, 
-            receiver_name AS consignee, 
-            eta AS order_eta, 
-            etd, 
-            qty_delivered AS delivered, 
-            total_assigned_qty, 
+          `SELECT 
+            id,
+            sender_name AS shipper,
+            receiver_name AS consignee,
+            eta AS order_eta,
+            etd,
+            qty_delivered AS delivered,
+            total_assigned_qty,
             status AS order_status
-          FROM orders 
-          WHERE id = ANY($1::int[])
-        `,
+          FROM orders
+          WHERE id = ANY($1::int[])`,
           [orderIds],
         );
         linkedOrders = orderRes.rows;
 
-        // Fetch receivers
         const receiverRes = await client.query(
-          `
-          SELECT status, eta 
-          FROM receivers 
-          WHERE order_id = ANY($1::int[])
-        `,
+          `SELECT status, eta FROM receivers WHERE order_id = ANY($1::int[])`,
           [orderIds],
         );
 
         const receivers = receiverRes.rows;
 
-        // Compute min ETA
         const validEtas = receivers
           .filter((r) => r.eta)
           .map((r) => new Date(r.eta));
@@ -552,18 +479,6 @@ export async function getConsignmentById(req, res) {
           minReceiverEta = new Date(Math.min(...validEtas));
         }
 
-        // Most advanced receiver status
-        const statusPriority = {
-          "Shipment Delivered": 9,
-          "Ready for Delivery": 8,
-          "Under Processing": 7,
-          "Shipment In Transit": 6,
-          "Shipment Processing": 5,
-          "Loaded Into Container": 4,
-          "Ready for Loading": 3,
-          "Order Created": 2,
-          Created: 1,
-        };
         mostAdvancedReceiverStatus = receivers.reduce((best, curr) => {
           const p = statusPriority[curr.status] || 0;
           const bp = statusPriority[best?.status] || 0;
@@ -571,7 +486,6 @@ export async function getConsignmentById(req, res) {
         }, null)?.status;
       }
 
-      // Enhance consignment fields
       consignment.statusColor = getStatusColor(consignment.status);
 
       if (linkedOrders.length > 0) {
@@ -638,309 +552,62 @@ export async function getConsignmentById(req, res) {
     } finally {
       client.release();
     }
-    // ────────────────────────────────────────────────────────────────
-    // Containers – separate non-transactional fetch
-    // ────────────────────────────────────────────────────────────────
-    // let containers = [];  // ← use let instead of const
 
     if (orderIds.length > 0) {
       const containerClient = await pool.connect();
       try {
-        console.log(
-          `Fetching containers for consignment ${numericId} with order IDs:`,
-          orderIds,
-        );
-
         const containerRes = await containerClient.query(
-          `
-      SELECT 
-        cm.cid AS id,
-        cm.container_size          AS size,
-        cm.container_number        AS "containerNo",
-        cm.container_type          AS "containerType",
-        cm.owner_type              AS ownership,
-        COALESCE(cm.location, 'N/A') AS location,
-        
-        COALESCE(
-          (SELECT cs.availability 
-           FROM container_status cs 
-           WHERE cs.cid = cm.cid 
-           ORDER BY cs.created_time DESC 
-           LIMIT 1),
-          cm.derived_status,
-          'Available'
-        ) AS derived_status
-      FROM container_master cm
-      WHERE cm.container_number IN (
-        SELECT DISTINCT TRIM(value::text)
-        FROM receivers r,
-             jsonb_array_elements_text(
-               CASE 
-                 WHEN jsonb_typeof(r.containers) = 'array' THEN r.containers
-                 WHEN r.containers IS NOT NULL THEN jsonb_build_array(r.containers)
-                 ELSE '[]'::jsonb
-               END
-             ) AS value
-        WHERE r.order_id = ANY($1::int[])
-          AND r.containers IS NOT NULL
-          AND TRIM(value::text) != ''
-      )
-    `,
-          [orderIds],
+          `SELECT
+            cm.cid                            AS id,
+            cm.container_size                 AS size,
+            cm.container_number               AS "containerNo",
+            cm.container_type                 AS "containerType",
+            cm.owner_type                     AS ownership,
+            COALESCE(cm.status, 'Available')  AS status,
+            COALESCE(
+              (SELECT cs.location
+              FROM container_status cs
+              WHERE cs.cid = cm.cid
+                AND cs.location IS NOT NULL
+                AND cs.location != ''
+              ORDER BY cs.created_time DESC
+              LIMIT 1),
+              'N/A'
+            ) AS location
+          FROM container_master cm
+          WHERE cm.cid IN (
+            SELECT DISTINCT cch.container_id
+            FROM container_consignment_history cch
+            WHERE cch.consignment_id = $1
+              AND cch.container_id IS NOT NULL
+          )`,
+          [numericId],
         );
 
-        containers = containerRes.rows.map((row) => {
-          const ds = row.derived_status || "Available";
-          return {
-            id: row.id,
-            size: row.size,
-            containerNo: row.containerNo,
-            containerType: row.containerType,
-            ownership: row.ownership,
-            location: row.location,
-            derived_status: ds,
-            derived_status_color: getStatusColor(ds),
-            status: ds,
-            statusColor: getStatusColor(ds),
-          };
-        });
-
-        console.log(
-          `Fetched ${containers.length} containers for consignment ${numericId}`,
-        );
+        containers = containerRes.rows.map((row) => ({
+          id: row.id,
+          size: row.size,
+          containerNo: row.containerNo,
+          containerType: row.containerType,
+          ownership: row.ownership,
+          location: row.location,
+          status: row.status,
+          statusColor: getStatusColor(row.status),
+        }));
       } catch (containerErr) {
-        console.error(
-          `Failed to fetch containers for consignment ${numericId}:`,
-          containerErr.message,
-          containerErr.stack,
-        );
-        containers = []; // safe fallback
+        containers = [];
       } finally {
         containerClient.release();
       }
-    } else {
-      console.log(
-        `No order IDs → skipping containers for consignment ${numericId}`,
-      );
     }
 
-    // Attach containers
     consignment.containers = containers;
     res.json({ data: consignment });
   } catch (err) {
-    console.error("Error fetching consignment:", err.stack || err);
     res.status(500).json({ error: "Failed to fetch consignment" });
   }
 }
-export async function updateConsignmentStatus(req, res) {
-  console.log("Update Status Request:", { params: req.params, body: req.body });
-  try {
-    const { id } = req.params;
-    const numericId = parseInt(id, 10);
-    if (isNaN(numericId) || numericId <= 0) {
-      return res
-        .status(400)
-        .json({ error: "Invalid consignment ID. Must be a positive integer." });
-    }
 
-    const { status, reason } = req.body;
-
-    if (!status) {
-      return res
-        .status(400)
-        .json({ error: "Status is required in request body" });
-    }
-
-    if (!validConsignmentStatuses.includes(status)) {
-      return res.status(400).json({
-        error: `Invalid status: ${status}. Must be one of: ${validConsignmentStatuses.join(", ")}`,
-      });
-    }
-
-    // Optional: Require reason for terminal/sensitive changes
-    const sensitiveStatuses = ["HOLD", "Cancelled"];
-    if (sensitiveStatuses.includes(status) && !reason) {
-      return res
-        .status(400)
-        .json({ error: `Reason is required for status: ${status}` });
-    }
-
-    // Validate consignment exists
-    const { rows } = await pool.query(
-      "SELECT status FROM consignments WHERE id = $1",
-      [numericId],
-    );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Consignment not found" });
-    }
-
-    const currentStatus = rows[0].status;
-    if (currentStatus === status) {
-      return res.status(200).json({ message: "Status unchanged" });
-    }
-
-    // Enhanced transition validation (basic state machine)
-    const allowedTransitions = {
-      "Drafts Cleared": ["Submitted On Vessel", "Submitted", "Customs Cleared"],
-      "Submitted On Vessel": [
-        "In Transit On Vessel",
-        "Under Shipment Processing",
-      ],
-      "In Transit On Vessel": ["Arrived at Facility", "Ready for Delivery"],
-      "Ready for Delivery": ["Delivered", "HOLD for Delivery"],
-      // Terminal: Only self or other terminal
-      Delivered: ["Delivered", "HOLD"],
-      Cancelled: ["Cancelled"],
-      HOLD: ["HOLD", "HOLD for Delivery", "Delivered"],
-      // Add more as needed; fallback allows any non-terminal
-    };
-    const terminalStatuses = ["Delivered", "Cancelled", "HOLD"];
-    if (
-      terminalStatuses.includes(currentStatus) &&
-      !terminalStatuses.includes(status)
-    ) {
-      return res.status(400).json({
-        error: `Cannot advance from terminal status: ${currentStatus}`,
-      });
-    }
-    if (
-      !terminalStatuses.includes(currentStatus) &&
-      allowedTransitions[currentStatus] &&
-      !allowedTransitions[currentStatus].includes(status)
-    ) {
-      return res.status(400).json({
-        error: `Invalid transition from ${currentStatus} to ${status}. Allowed: ${allowedTransitions[currentStatus].join(", ")}`,
-      });
-    }
-
-    // Compute newEta once using pool (set to null for terminal)
-    let newEta;
-    if (terminalStatuses.includes(status)) {
-      newEta = null; // Or new Date('2025-12-26') for Delivered testing
-    } else {
-      newEta = await calculateETA(pool, status);
-    }
-
-    let updateError = null; // Flag for error handling
-    await withTransaction(async (client) => {
-      try {
-        // Update status, ETA, and timestamp
-        await client.query(
-          "UPDATE consignments SET status = $1, eta = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
-          [status, newEta, numericId],
-        );
-
-        // Isolated logging (non-critical)
-        try {
-          await safeLogToTracking(client, numericId, "status_updated", {
-            from: currentStatus,
-            to: status,
-            newEta,
-            reason: reason || "Manual update",
-          });
-        } catch (logErr) {
-          console.warn(
-            `Failed to log tracking for consignment ${numericId}:`,
-            logErr,
-          );
-          // Continue without abort
-        }
-
-        // Isolated notification (non-critical)
-        try {
-          const updated = await client.query(
-            "SELECT * FROM consignments WHERE id = $1",
-            [numericId],
-          );
-          await sendNotification(
-            updated.rows[0],
-            `status_updated_to_${status}`,
-            { reason },
-          );
-        } catch (notifErr) {
-          console.warn(
-            `Failed to send notification for consignment ${numericId}:`,
-            notifErr,
-          );
-          // Continue without abort
-        }
-
-        // Optional: Sync linked orders' statuses (skip for partial/terminal to avoid overwriting)
-        if (!["Partially Delivered", ...terminalStatuses].includes(status)) {
-          try {
-            let orderIdsQuery = await client.query(
-              "SELECT orders FROM consignments WHERE id = $1",
-              [numericId],
-            );
-            let rawOrders = orderIdsQuery.rows[0]?.orders;
-            if (typeof rawOrders === "string") {
-              try {
-                rawOrders = JSON.parse(rawOrders);
-              } catch (parseErr) {
-                console.warn(
-                  `Failed to parse orders for sync in update:`,
-                  parseErr,
-                );
-                rawOrders = [];
-              }
-            }
-            const syncOrderIds = extractOrderIds(rawOrders)
-              .map((oid) => parseInt(oid, 10))
-              .filter((oid) => !isNaN(oid) && oid > 0);
-            // Log for debugging
-            console.log(
-              `Sync orderIds for consignment ${numericId}:`,
-              syncOrderIds,
-            );
-            if (syncOrderIds.length > 0) {
-              await client.query(
-                "UPDATE orders SET status = $1 WHERE id = ANY($2::int[])",
-                [status, syncOrderIds],
-              );
-            }
-          } catch (syncErr) {
-            console.warn(
-              `Failed to sync orders for consignment ${numericId}:`,
-              syncErr,
-            );
-            // Don't rollback—log only
-          }
-        }
-      } catch (updateErr) {
-        updateError = updateErr; // Capture error without throwing yet
-        if (updateErr.code === "22P02") {
-          // Enum violation
-          console.warn(
-            `Enum constraint violation for status '${status}' on consignment ${numericId}; skipping update. Add to enum: ALTER TYPE consignment_status ADD VALUE '${status}';`,
-          );
-        } else {
-          throw updateErr; // Re-throw non-enum errors to abort tx
-        }
-      }
-    });
-
-    // Single response point outside transaction (avoids headers-sent error)
-    if (updateError && updateError.code === "22P02") {
-      return res.status(409).json({
-        error: `Status '${status}' not recognized in DB enum. Admin fix needed.`,
-      });
-    }
-
-    res.json({
-      message: `Status updated to ${status}`,
-      data: {
-        newStatus: status,
-        previousStatus: currentStatus,
-        reason: reason || null,
-        newEta,
-      },
-    });
-  } catch (err) {
-    console.error("Error updating status:", err);
-    res.status(500).json({ error: "Failed to update status" });
-  }
-}
-// Helper: Send notification (placeholder—integrate with your GAS/notifications module)
 async function sendNotification(consignmentData, event = "created") {
   // e.g., await emailService.send({ to: consignmentData.consignee.email, subject: `Consignment ${consignmentData.consignment_number} ${event}` });
   console.log(
@@ -1288,20 +955,22 @@ export async function getConsignments(req, res) {
 
     let baseQuery = `
       SELECT 
-        cons.id, 
-        cons.consignment_number, 
-        cons.status, 
-        COALESCE(s.name, cons.shipper) AS shipper,  -- Prefer joined name, fallback to denormalized
-        COALESCE(c.name, cons.consignee) AS consignee, 
-        cons.eta, 
+        cons.id,
+        cons.consignment_number,
+        cons.status,
+        COALESCE(shipper_tp.company_name, cons.shipper) AS shipper,
+        COALESCE(consignee_tp.company_name, cons.consignee) AS consignee,
+        cons.eta,
         cons.created_at,
-        cons.gross_weight, 
-        cons.orders, 
-        cons.delivered, 
+        cons.gross_weight,
+        cons.orders,
+        cons.delivered,
         cons.pending
       FROM consignments cons
-      LEFT JOIN shippers s ON cons.shipper_id = s.id  -- LEFT JOIN to handle missing refs
-      LEFT JOIN consignees c ON cons.consignee_id = c.id
+      LEFT JOIN third_parties shipper_tp
+        ON cons.shipper_id = shipper_tp.id
+      LEFT JOIN third_parties consignee_tp
+        ON cons.consignee_id = consignee_tp.id
     `;
     let whereClauses = [];
     let queryParams = [];
@@ -1358,34 +1027,14 @@ export async function getConsignments(req, res) {
   }
 }
 
-// === Mapping: Consignment Status → Receiver/Shipment Status for ETA lookup ===
-const CONSIGNMENT_TO_RECEIVER_STATUS = {
-  "Drafts Cleared": "Ready for Loading", // → 12 days
-  "Submitted On Vessel": "Shipment Processing", // → 7 days
-  "Customs Cleared": "Shipment Processing", // → 7 days
-  Submitted: "Shipment Processing",
-  "Under Shipment Processing": "Shipment Processing",
-  "In Transit": "Shipment In Transit", // → 4 days
-  "In Transit On Vessel": "Shipment In Transit",
-  "Arrived at Facility": "Arrived at Sort Facility", // → 1 day
-  "Ready for Delivery": "Ready for Delivery", // → 0 days
-  "Arrived at Destination": "Under Processing", // → 2 days
-  Delivered: "Shipment Delivered", // → 0 days
-  "HOLD for Delivery": "Ready for Delivery",
-  HOLD: "Ready for Delivery",
-  Cancelled: "Shipment Delivered",
-  // Legacy
-  Draft: "Ready for Loading",
-};
-
 export async function createConsignment(req, res) {
   console.log("Create Consignment Request Body:", req.body);
 
   try {
     const data = req.body;
 
-    // Normalize input (status is NO longer accepted from input)
     const input = {
+      user_id: data.user_id,
       consignment_number: data.consignment_number || data.consignmentNumber,
       remarks: data.remarks || "",
       shipper: data.shipper || "",
@@ -1404,7 +1053,7 @@ export async function createConsignment(req, res) {
       payment_type: data.payment_type || data.paymentType || "Collect",
       vessel: data.vessel ? parseInt(data.vessel) : null,
       voyage: data.voyage || "",
-      eta: data.eta?.trim() || null, // Optional: only if provided
+      eta: data.eta?.trim() || null,
       shipping_line: data.shipping_line || data.shippingLine || "",
       seal_no: data.seal_no || data.sealNo || "",
       net_weight: data.net_weight || data.netWeight || 0,
@@ -1418,7 +1067,6 @@ export async function createConsignment(req, res) {
         : [],
     };
 
-    // Validation (remove status from validation)
     const validationErrors = validateConsignmentFields(input);
     if (validationErrors.length > 0) {
       return res
@@ -1434,14 +1082,11 @@ export async function createConsignment(req, res) {
       });
     }
 
-    // ETA: only normalize if provided
     const finalEta = input.eta ? normalizeDate(input.eta) : null;
 
-    // Prepare data for insert
-    // Status is now hardcoded as 'Draft Cleared'
     const dbData = {
       consignment_number: input.consignment_number,
-      status: "Drafts Cleared", // ← Hardcoded in backend
+      status: "Draft",
       remarks: input.remarks,
       shipper: input.shipper,
       consignee: input.consignee,
@@ -1459,7 +1104,7 @@ export async function createConsignment(req, res) {
       payment_type: input.payment_type,
       vessel: input.vessel,
       voyage: input.voyage,
-      eta: finalEta, // ← Only if provided
+      eta: finalEta,
       shipping_line_name: input.shipping_line,
       seal_no: input.seal_no,
       net_weight: input.net_weight,
@@ -1471,7 +1116,6 @@ export async function createConsignment(req, res) {
       orders: JSON.stringify(input.orders),
     };
 
-    // Dynamic INSERT – use withUserAudit for auto created_by / updated_by
     const keys = Object.keys(dbData);
     const values = Object.values(dbData);
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(", ");
@@ -1483,13 +1127,142 @@ export async function createConsignment(req, res) {
     let newConsignment = null;
 
     await withTransaction(async (client) => {
-      // Use withUserAudit – it will automatically add created_by, updated_by, created_at, updated_at
       const result = await withUserAudit(req, insertQuery, values);
       newConsignment = result.rows[0];
     });
 
-    // Optional: Add status color if needed in response
-    // newConsignment.statusColor = getStatusColor(newConsignment.status);
+    let ccNew = [];
+
+    await withTransaction(async (client) => {
+      if (input.containers.length > 0) {
+        const values = [];
+        const placeholders = [];
+
+        input.containers.forEach((container, index) => {
+          const offset = index * 4;
+
+          placeholders.push(
+            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`,
+          );
+
+          values.push(
+            newConsignment.id,
+            container.cid,
+            new Date(),
+            input.eform_date,
+            parseInt(input.user_id),
+            true,
+          );
+        });
+
+        const query = `
+          INSERT INTO container_consignment_history
+          (
+            consignment_id,
+            container_id,
+            assigned_at,
+            created_at,
+            created_by,
+            active
+          )
+          VALUES
+          ${placeholders.join(",")}
+          RETURNING *`;
+
+        const result = await client.query(query, values);
+        ccNew = result.rows;
+      }
+    });
+
+    await withTransaction(async (client) => {
+      if (ccNew.length > 0) {
+        const values = [];
+        const tuples = [];
+
+        ccNew.forEach((row, index) => {
+          const offset = index * 2;
+
+          tuples.push(`($${offset + 1}, $${offset + 2})`);
+
+          values.push(parseInt(row.container_id), parseInt(row.consignment_id));
+        });
+
+        const orderIds = input.orders.map((id) => parseInt(id));
+
+        await client.query(
+          `
+          UPDATE container_assignment_history cah
+          SET consignment_id = v.consignment_id::integer
+          FROM (
+            VALUES ${tuples.join(",")}
+          ) AS v(cid, consignment_id)
+          WHERE cah.cid = v.cid::integer
+            AND cah.action_type = 'ASSIGN'
+            AND cah.order_id = ANY($${values.length + 1}::int[])
+          `,
+          [...values, orderIds],
+        );
+
+        const currentStatusResult = await client.query(
+          `
+          SELECT status
+            FROM container_assignment_history
+            WHERE consignment_id = $1
+          LIMIT 1
+        `,
+          [newConsignment.id],
+        );
+
+        const currentStatus = currentStatusResult.rows?.[0]?.status || null;
+
+        const statusesResult = await client.query(`
+          SELECT
+            container_status,
+            sorting_number
+          FROM statuses
+          WHERE status = true
+            AND container_status IS NOT NULL
+          ORDER BY sorting_number ASC
+        `);
+
+        const statuses = statusesResult.rows;
+
+        let nextStatus = null;
+
+        if (currentStatus) {
+          const currentIndex = statuses.findIndex(
+            (s) => s.container_status === currentStatus,
+          );
+
+          if (currentIndex !== -1 && currentIndex < statuses.length - 1) {
+            nextStatus = statuses[currentIndex + 1].container_status;
+          }
+        }
+        if (nextStatus) {
+          await client.query(
+            `
+            UPDATE container_assignment_history
+              SET status = $1
+            WHERE consignment_id = $2
+            `,
+            [nextStatus, newConsignment.id],
+          );
+        }
+
+        const containerIds = ccNew.map((row) => parseInt(row.container_id));
+
+        await client.query(
+          `
+          UPDATE container_status
+          SET
+            availability = 'Occupied',
+            created_time = NOW()
+          WHERE cid = ANY($1::int[])
+          `,
+          [containerIds],
+        );
+      }
+    });
 
     res.status(201).json({
       message: "Consignment created successfully",
@@ -1510,12 +1283,12 @@ export async function createConsignment(req, res) {
     });
   }
 }
+
 export async function updateConsignment(req, res) {
-  const { id } = req.params; // Assume ID from params
+  const { id } = req.params;
   try {
     const data = req.body;
 
-    // Map mixed-case input to consistent snake_case for validation and DB
     const normalizedInput = {
       consignment_number: data.consignment_number || data.consignmentNumber,
       status: data.status,
@@ -1542,7 +1315,7 @@ export async function updateConsignment(req, res) {
       delivered: data.delivered || 0,
       pending: data.pending || 0,
       containers: data.containers || [],
-      orders: data.orders || [], // Keep as-is: array of IDs (numbers) or objects
+      orders: data.orders || [],
     };
 
     const validationErrors = validateConsignmentFields(normalizedInput);
@@ -1573,6 +1346,7 @@ export async function updateConsignment(req, res) {
     } else {
       orderErrors = [{ index: -1, errors: ["orders: Must be an array"] }];
     }
+
     if (containerErrors.length > 0 || orderErrors.length > 0) {
       return res.status(400).json({
         error: "Array validation failed",
@@ -1580,13 +1354,23 @@ export async function updateConsignment(req, res) {
       });
     }
 
-    // Auto-calculate ETA if missing or if status changed
-    let computedETA = normalizedInput.eta;
-    if (!computedETA || data.status !== undefined) {
-      // Will be computed inside transaction
+    const userId = data.user_id || req.user?.id;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ error: "user_id is required for audit trail" });
     }
 
-    // Normalize dates and stringify JSON fields
+    const newContainerIds = new Set(
+      normalizedInput.containers
+        .map((c) => (c.cid != null ? parseInt(c.cid, 10) : null))
+        .filter((cid) => cid != null && !isNaN(cid)),
+    );
+
+    console.log("New container IDs from request:", [...newContainerIds]);
+
+    let computedETA = normalizedInput.eta;
+
     const normalizedData = {
       consignment_number: normalizedInput.consignment_number,
       status: normalizedInput.status,
@@ -1616,7 +1400,6 @@ export async function updateConsignment(req, res) {
       orders: JSON.stringify(normalizedInput.orders),
     };
 
-    // Build SET clause carefully: use only keys from normalizedData
     const updateFields = Object.keys(normalizedData).filter(
       (key) => !["id", "created_at", "updated_at"].includes(key),
     );
@@ -1629,47 +1412,110 @@ export async function updateConsignment(req, res) {
     const query = `UPDATE consignments SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
 
     let updatedConsignment;
+    let containerDiffSummary = { released: [], added: [] };
+
     await withTransaction(async (client) => {
-      // Auto-calculate ETA inside transaction if needed
       if (!computedETA || data.status !== undefined) {
-        computedETA = await calculateETA(
-          client,
-          normalizedInput.status || data.status,
+        const statusRow = await client.query(
+          `SELECT order_status
+            FROM statuses
+            WHERE consignment_status = $1
+              AND status = true
+            LIMIT 1`,
+          [normalizedInput.status || data.status],
         );
+
+        const resolvedStatus =
+          statusRow.rows[0]?.order_status ??
+          normalizedInput.status ??
+          data.status;
+
+        const etaResult = await calculateETA(client, resolvedStatus);
+        computedETA = etaResult.eta;
+
         const etaIndex = updateFields.findIndex((f) => f === "eta");
         if (etaIndex !== -1) {
           values[etaIndex + 1] = normalizeDate(computedETA);
         }
       }
 
-      // Use withUserAudit → automatically adds updated_by = req.user.email (and updated_at if missing)
       const updateResult = await withUserAudit(req, query, values);
       if (updateResult.rowCount === 0) {
         throw new Error("Consignment not found");
       }
       updatedConsignment = updateResult.rows[0];
 
-      // Log to tracking if status changed
+      const activeContainersResult = await client.query(
+        `SELECT id, container_id 
+         FROM container_consignment_history
+         WHERE consignment_id = $1 AND active = true`,
+        [id],
+      );
+
+      const activeContainerIds = new Set(
+        activeContainersResult.rows.map((r) => r.container_id),
+      );
+
+      const deleteResult = await client.query(
+        `
+          DELETE FROM container_consignment_history
+          WHERE consignment_id = $1
+          RETURNING container_id`,
+        [id],
+      );
+
+      containerDiffSummary.released = deleteResult.rows.map(
+        (r) => r.container_id,
+      );
+
+      for (const cid of newContainerIds) {
+        const insertResult = await client.query(
+          `
+          INSERT INTO container_consignment_history
+            (
+              container_id,
+              consignment_id,
+              assigned_at,
+              created_at,
+              created_by,
+              active
+            )
+          VALUES
+            (
+              $1,
+              $2,
+              NOW(),
+              NOW(),
+              $3,
+              true
+            )
+          RETURNING container_id`,
+          [cid, id, userId],
+        );
+
+        if (insertResult.rowCount > 0) {
+          containerDiffSummary.added.push(cid);
+        }
+      }
+
       if (data.status !== undefined) {
         const logResult = await logToTracking(client, id, "status_updated", {
           newStatus: normalizedInput.status,
           eta: computedETA,
         });
         if (!logResult.success) {
-          console.warn(`Logging failed for ${id}:`, logResult.error);
+          console.warn(
+            `Tracking log failed for consignment ${id}:`,
+            logResult.error,
+          );
         }
       }
-
-      console.log(
-        `Skipped orders/containers cascade for consignment ${id} (JSON-driven relationship)`,
-      );
 
       if (["In Transit", "Delivered"].includes(normalizedInput.status)) {
         await sendNotification(updatedConsignment, "updated");
       }
     });
 
-    // Compute and add client-side fields to response
     const responseData = {
       ...updatedConsignment,
       statusColor: getStatusColor(updatedConsignment.status),
@@ -1678,14 +1524,25 @@ export async function updateConsignment(req, res) {
       paymentType: updatedConsignment.payment_type || "",
       shippingLine: updatedConsignment.shipping_line || null,
       netWeight: updatedConsignment.net_weight || "0.00",
+      containerDiff: {
+        released: containerDiffSummary.released,
+        added: containerDiffSummary.added,
+        noChange: [...newContainerIds].filter(
+          (cid) => !containerDiffSummary.added.includes(cid),
+        ),
+      },
     };
 
-    console.log("Consignment updated with ID:", updatedConsignment.id);
-    res
-      .status(200)
-      .json({ message: "Consignment updated", data: responseData });
+    console.log("Consignment updated successfully, ID:", updatedConsignment.id);
+    console.log("Container diff:", containerDiffSummary);
+
+    res.status(200).json({
+      message: "Consignment updated",
+      data: responseData,
+    });
   } catch (err) {
     console.error("Error updating consignment:", err);
+
     if (err.message === "Consignment not found") {
       return res.status(404).json({ error: "Consignment not found" });
     }
@@ -1694,11 +1551,410 @@ export async function updateConsignment(req, res) {
         .status(409)
         .json({ error: "Consignment number already exists" });
     }
-    res
-      .status(500)
-      .json({ error: "Failed to update consignment", details: err.message });
+    if (err.code === "23503") {
+      return res.status(400).json({
+        error: "Foreign key violation — container or user ID not found",
+        details: err.detail,
+      });
+    }
+
+    res.status(500).json({
+      error: "Failed to update consignment",
+      details: err.message,
+    });
   }
 }
+
+// export async function updateConsignment(req, res) {
+//   const { id } = req.params;
+//   try {
+//     const data = req.body;
+
+//     const normalizedInput = {
+//       consignment_number: data.consignment_number || data.consignmentNumber,
+//       status: data.status,
+//       remarks: data.remarks,
+//       shipper: data.shipper,
+//       shipper_address: data.shipper_address || data.shipperAddress,
+//       consignee: data.consignee,
+//       consignee_address: data.consignee_address || data.consigneeAddress,
+//       origin: data.origin,
+//       destination: data.destination,
+//       eform: data.eform,
+//       eform_date: data.eform_date || data.eformDate,
+//       bank: data.bank,
+//       consignment_value: data.consignment_value || data.consignmentValue,
+//       paymentType: data.paymentType || data.payment_type,
+//       vessel: data.vessel,
+//       voyage: data.voyage,
+//       eta: data.eta,
+//       shipping_line_name: data.shippingLine || data.shipping_line,
+//       seal_no: data.seal_no || data.sealNo,
+//       netWeight: data.netWeight || data.net_weight,
+//       gross_weight: data.gross_weight || data.grossWeight,
+//       currency_code: data.currency_code || data.currencyCode,
+//       delivered: data.delivered || 0,
+//       pending: data.pending || 0,
+//       containers: data.containers || [],
+//       orders: data.orders || [],
+//     };
+
+//     const validationErrors = validateConsignmentFields(normalizedInput);
+//     if (validationErrors.length > 0) {
+//       return res
+//         .status(400)
+//         .json({ error: "Validation failed", details: validationErrors });
+//     }
+
+//     const containerErrors = validateContainers(normalizedInput.containers);
+//     let orderErrors = [];
+//     if (Array.isArray(normalizedInput.orders)) {
+//       if (normalizedInput.orders.every((o) => typeof o === "number" && o > 0)) {
+//         if (
+//           normalizedInput.orders.length > 0 &&
+//           normalizedInput.orders.some((id) => isNaN(id) || id <= 0)
+//         ) {
+//           orderErrors = [
+//             {
+//               index: -1,
+//               errors: ["orders: All IDs must be positive integers"],
+//             },
+//           ];
+//         }
+//       } else {
+//         orderErrors = validateOrders(normalizedInput.orders);
+//       }
+//     } else {
+//       orderErrors = [{ index: -1, errors: ["orders: Must be an array"] }];
+//     }
+
+//     if (containerErrors.length > 0 || orderErrors.length > 0) {
+//       return res.status(400).json({
+//         error: "Array validation failed",
+//         details: [...containerErrors, ...orderErrors],
+//       });
+//     }
+
+//     const userId = data.user_id || req.user?.id;
+//     if (!userId) {
+//       return res
+//         .status(400)
+//         .json({ error: "user_id is required for audit trail" });
+//     }
+
+//     const newContainerIds = new Set(
+//       normalizedInput.containers
+//         .map((c) => (c.cid != null ? parseInt(c.cid, 10) : null))
+//         .filter((cid) => cid != null && !isNaN(cid)),
+//     );
+
+//     let computedETA = normalizedInput.eta;
+
+//     const normalizedData = {
+//       consignment_number: normalizedInput.consignment_number,
+//       status: normalizedInput.status,
+//       remarks: normalizedInput.remarks,
+//       shipper: normalizedInput.shipper,
+//       shipper_address: normalizedInput.shipper_address,
+//       consignee: normalizedInput.consignee,
+//       consignee_address: normalizedInput.consignee_address,
+//       origin: normalizedInput.origin,
+//       destination: normalizedInput.destination,
+//       eform: normalizedInput.eform,
+//       eform_date: normalizeDate(normalizedInput.eform_date),
+//       bank: normalizedInput.bank,
+//       consignment_value: normalizedInput.consignment_value,
+//       payment_type: normalizedInput.paymentType,
+//       vessel: normalizedInput.vessel,
+//       voyage: normalizedInput.voyage,
+//       eta: normalizeDate(computedETA),
+//       shipping_line_name: normalizedInput.shipping_line_name,
+//       seal_no: normalizedInput.seal_no,
+//       net_weight: normalizedInput.netWeight,
+//       gross_weight: normalizedInput.gross_weight,
+//       currency_code: normalizedInput.currency_code,
+//       delivered: normalizedInput.delivered,
+//       pending: normalizedInput.pending,
+//       containers: JSON.stringify(normalizedInput.containers),
+//       orders: JSON.stringify(normalizedInput.orders),
+//     };
+
+//     const updateFields = Object.keys(normalizedData).filter(
+//       (key) => !["id", "created_at", "updated_at"].includes(key),
+//     );
+//     const setClauseParts = updateFields.map((key, index) => {
+//       const dbKey = key.replace(/([A-Z])/g, "_$1").toLowerCase();
+//       return `${dbKey} = $${index + 2}`;
+//     });
+//     const setClause = setClauseParts.join(", ");
+//     const values = [id, ...updateFields.map((key) => normalizedData[key])];
+//     const query = `UPDATE consignments SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
+
+//     let updatedConsignment;
+//     let containerDiffSummary = { released: [], added: [] };
+
+//     await withTransaction(async (client) => {
+//       if (!computedETA || data.status !== undefined) {
+//         const statusRow = await client.query(
+//           `SELECT order_status
+//             FROM statuses
+//             WHERE consignment_status = $1
+//               AND status = true
+//             LIMIT 1`,
+//           [normalizedInput.status || data.status],
+//         );
+
+//         const resolvedStatus =
+//           statusRow.rows[0]?.order_status ??
+//           normalizedInput.status ??
+//           data.status;
+
+//         const etaResult = await calculateETA(client, resolvedStatus);
+//         computedETA = etaResult.eta;
+
+//         const etaIndex = updateFields.findIndex((f) => f === "eta");
+//         if (etaIndex !== -1) {
+//           values[etaIndex + 1] = normalizeDate(computedETA);
+//         }
+//       }
+
+//       const updateResult = await withUserAudit(req, query, values);
+//       if (updateResult.rowCount === 0) {
+//         throw new Error("Consignment not found");
+//       }
+//       updatedConsignment = updateResult.rows[0];
+
+//       const activeContainersResult = await client.query(
+//         `SELECT id, container_id
+//          FROM container_consignment_history
+//          WHERE consignment_id = $1 AND active = true`,
+//         [id],
+//       );
+
+//       const activeContainerIds = new Set(
+//         activeContainersResult.rows.map((r) => r.container_id),
+//       );
+
+//       const removedContainerIds = [...activeContainerIds].filter(
+//         (cid) => !newContainerIds.has(cid),
+//       );
+
+//       const addedContainerIds = [...newContainerIds].filter(
+//         (cid) => !activeContainerIds.has(cid),
+//       );
+
+//       if (removedContainerIds.length > 0) {
+//         const deleteFromHistory = await client.query(
+//           `DELETE FROM container_consignment_history
+//            WHERE consignment_id = $1
+//              AND container_id = ANY($2::int[])
+//            RETURNING container_id`,
+//           [id, removedContainerIds],
+//         );
+//         containerDiffSummary.released = deleteFromHistory.rows.map(
+//           (r) => r.container_id,
+//         );
+
+//         await client.query(
+//           `UPDATE container_assignment_history
+//            SET consignment_id = NULL
+//            WHERE cid = ANY($1::int[])
+//              AND consignment_id = $2`,
+//           [removedContainerIds, id],
+//         );
+
+//         await client.query(
+//           `UPDATE container_status
+//            SET
+//              availability = 'Available',
+//              created_time = NOW()
+//            WHERE cid = ANY($1::int[])`,
+//           [removedContainerIds],
+//         );
+//       }
+
+//       if (addedContainerIds.length > 0) {
+//         const ccInsertValues = [];
+//         const ccInsertPlaceholders = [];
+
+//         addedContainerIds.forEach((cid, index) => {
+//           const offset = index * 6;
+//           ccInsertPlaceholders.push(
+//             `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`,
+//           );
+//           ccInsertValues.push(
+//             parseInt(id),
+//             cid,
+//             new Date(),
+//             new Date(),
+//             parseInt(userId),
+//             true,
+//           );
+//         });
+
+//         const ccInsertQuery = `
+//           INSERT INTO container_consignment_history
+//             (consignment_id, container_id, assigned_at, created_at, created_by, active)
+//           VALUES
+//             ${ccInsertPlaceholders.join(",")}
+//           RETURNING *`;
+
+//         const ccInsertResult = await client.query(
+//           ccInsertQuery,
+//           ccInsertValues,
+//         );
+//         const ccNewRows = ccInsertResult.rows;
+
+//         containerDiffSummary.added = ccNewRows.map((r) => r.container_id);
+
+//         if (ccNewRows.length > 0) {
+//           const assignTuples = [];
+//           const assignValues = [];
+
+//           ccNewRows.forEach((row, index) => {
+//             const offset = index * 2;
+//             assignTuples.push(`($${offset + 1}, $${offset + 2})`);
+//             assignValues.push(
+//               parseInt(row.container_id),
+//               parseInt(row.consignment_id),
+//             );
+//           });
+
+//           const orderIds = normalizedInput.orders.map((o) =>
+//             typeof o === "number" ? o : parseInt(o),
+//           );
+
+//           await client.query(
+//             `UPDATE container_assignment_history cah
+//              SET consignment_id = v.consignment_id::integer
+//              FROM (
+//                VALUES ${assignTuples.join(",")}
+//              ) AS v(cid, consignment_id)
+//              WHERE cah.cid = v.cid::integer
+//                AND cah.action_type = 'ASSIGN'
+//                AND cah.order_id = ANY($${assignValues.length + 1}::int[])`,
+//             [...assignValues, orderIds],
+//           );
+
+//           const currentStatusResult = await client.query(
+//             `SELECT status
+//              FROM container_assignment_history
+//              WHERE consignment_id = $1
+//              LIMIT 1`,
+//             [parseInt(id)],
+//           );
+
+//           const currentStatus = currentStatusResult.rows?.[0]?.status || null;
+
+//           const statusesResult = await client.query(`
+//             SELECT
+//               container_status,
+//               sorting_number
+//             FROM statuses
+//             WHERE status = true
+//               AND container_status IS NOT NULL
+//             ORDER BY sorting_number ASC
+//           `);
+
+//           const statuses = statusesResult.rows;
+//           let nextStatus = null;
+
+//           if (currentStatus) {
+//             const currentIndex = statuses.findIndex(
+//               (s) => s.container_status === currentStatus,
+//             );
+//             if (currentIndex !== -1 && currentIndex < statuses.length - 1) {
+//               nextStatus = statuses[currentIndex + 1].container_status;
+//             }
+//           }
+
+//           if (nextStatus) {
+//             const addedContainerIdInts = ccNewRows.map((r) =>
+//               parseInt(r.container_id),
+//             );
+//             await client.query(
+//               `UPDATE container_assignment_history
+//                SET status = $1
+//                WHERE consignment_id = $2
+//                  AND cid = ANY($3::int[])`,
+//               [nextStatus, parseInt(id), addedContainerIdInts],
+//             );
+//           }
+
+//           await client.query(
+//             `UPDATE container_status
+//              SET
+//                availability = 'Occupied',
+//                created_time = NOW()
+//              WHERE cid = ANY($1::int[])`,
+//             [addedContainerIds],
+//           );
+//         }
+//       }
+
+//       if (data.status !== undefined) {
+//         const logResult = await logToTracking(client, id, "status_updated", {
+//           newStatus: normalizedInput.status,
+//           eta: computedETA,
+//         });
+//         if (!logResult.success) {
+//           console.warn(
+//             `Tracking log failed for consignment ${id}:`,
+//             logResult.error,
+//           );
+//         }
+//       }
+
+//       if (["In Transit", "Delivered"].includes(normalizedInput.status)) {
+//         await sendNotification(updatedConsignment, "updated");
+//       }
+//     });
+
+//     const responseData = {
+//       ...updatedConsignment,
+//       statusColor: getStatusColor(updatedConsignment.status),
+//       shipperAddress: updatedConsignment.shipper_address || "",
+//       consigneeAddress: updatedConsignment.consignee_address || "",
+//       paymentType: updatedConsignment.payment_type || "",
+//       shippingLine: updatedConsignment.shipping_line || null,
+//       netWeight: updatedConsignment.net_weight || "0.00",
+//       containerDiff: {
+//         released: containerDiffSummary.released,
+//         added: containerDiffSummary.added,
+//         noChange: [...newContainerIds].filter(
+//           (cid) => !containerDiffSummary.added.includes(cid),
+//         ),
+//       },
+//     };
+
+//     res.status(200).json({
+//       message: "Consignment updated",
+//       data: responseData,
+//     });
+//   } catch (err) {
+//     console.error("Error updating consignment:", err);
+
+//     if (err.message === "Consignment not found") {
+//       return res.status(404).json({ error: "Consignment not found" });
+//     }
+//     if (err.code === "23505") {
+//       return res
+//         .status(409)
+//         .json({ error: "Consignment number already exists" });
+//     }
+//     if (err.code === "23503") {
+//       return res.status(400).json({
+//         error: "Foreign key violation — container or user ID not found",
+//         details: err.detail,
+//       });
+//     }
+
+//     res.status(500).json({
+//       error: "Failed to update consignment",
+//       details: err.message,
+//     });
+//   }
+// }
 
 export async function deleteConsignment(req, res) {
   try {
@@ -1722,24 +1978,5 @@ export async function deleteConsignment(req, res) {
       return res.status(404).json({ error: "Consignment not found" });
     }
     res.status(500).json({ error: "Failed to delete consignment" });
-  }
-}
-
-export async function calculateETAEndpoint(req, res) {
-  const { status } = req.query;
-  try {
-    const { rows } = await pool.query(
-      "SELECT days_offset FROM status_config WHERE status = $1 LIMIT 1",
-      [status],
-    );
-    let days_offset = 0;
-    if (rows.length > 0) {
-      days_offset = rows[0].days_offset || 0;
-    }
-    const eta = await calculateETA(pool, status); // Reuses the full logic (with mapping/fallbacks)
-    res.json({ eta, days_offset });
-  } catch (err) {
-    console.error(`ETA endpoint error for status ${status}:`, err);
-    res.status(500).json({ error: "ETA calculation failed" });
   }
 }
