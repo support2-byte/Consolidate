@@ -924,40 +924,43 @@ export const getOrders = async (req, res) => {
                             jsonb_build_object(
                               'container',
                               jsonb_build_object(
-                                'cid',
-                                (cd->'container'->>'cid')::int,
-
-                                'container_number',
-                                cd->'container'->>'container_number'
+                                'cid', cm.cid,
+                                'container_number', cm.container_number
                               ),
 
                               'status',
-                              COALESCE(cs.availability,'Created'),
+                              COALESCE(cs.availability, 'Created'),
 
                               'assign_total_box',
-                              COALESCE(cd->>'assign_total_box','0'),
+                              COALESCE(oi.assigned_boxes::text, '0'),
 
                               'assign_weight',
-                              COALESCE(cd->>'assign_weight','0'),
+                              COALESCE(oi.assigned_weight_kg::text, '0'),
 
                               'remaining_items',
-                              COALESCE(cd->>'remaining_items','0'),
+                              COALESCE((COALESCE(oi.total_number,0) - COALESCE(oi.assigned_boxes,0))::text, '0'),
 
                               'total_number',
-                              COALESCE((cd->>'total_number')::int,0)
+                              COALESCE(oi.total_number::int, 0)
                             )
                           )
-                          FROM jsonb_array_elements(
-                            COALESCE(oi.container_details,'[]'::jsonb)
-                          ) cd
+                          FROM receivers r2
+                          CROSS JOIN LATERAL jsonb_array_elements_text(
+                            COALESCE(r2.containers, '[]'::jsonb)
+                          ) AS container_num
+
+                          JOIN container_master cm
+                            ON cm.container_number = container_num
 
                           LEFT JOIN LATERAL (
                             SELECT availability
                             FROM container_status
-                            WHERE cid = (cd->'container'->>'cid')::int
+                            WHERE cid = cm.cid
                             ORDER BY sid DESC
                             LIMIT 1
                           ) cs ON true
+
+                          WHERE r2.id = oi.receiver_id
                         ),
                         '[]'::jsonb
                       )
