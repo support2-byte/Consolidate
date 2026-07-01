@@ -568,40 +568,31 @@ export async function getConsignmentById(req, res) {
 
         const containerRes = await containerClient.query(
           `
-      SELECT 
-        cm.cid AS id,
-        cm.container_size          AS size,
-        cm.container_number        AS "containerNo",
-        cm.container_type          AS "containerType",
-        cm.owner_type              AS ownership,
-        COALESCE(cm.location, 'N/A') AS location,
-        
-        COALESCE(
-          (SELECT cs.availability 
-           FROM container_status cs 
-           WHERE cs.cid = cm.cid 
-           ORDER BY cs.created_time DESC 
-           LIMIT 1),
-          cm.derived_status,
-          'Available'
-        ) AS derived_status
-      FROM container_master cm
-      WHERE cm.container_number IN (
-        SELECT DISTINCT TRIM(value::text)
-        FROM receivers r,
-             jsonb_array_elements_text(
-               CASE 
-                 WHEN jsonb_typeof(r.containers) = 'array' THEN r.containers
-                 WHEN r.containers IS NOT NULL THEN jsonb_build_array(r.containers)
-                 ELSE '[]'::jsonb
-               END
-             ) AS value
-        WHERE r.order_id = ANY($1::int[])
-          AND r.containers IS NOT NULL
-          AND TRIM(value::text) != ''
-      )
-    `,
-          [orderIds],
+          SELECT 
+            cm.cid AS id,
+            cm.container_size          AS size,
+            cm.container_number        AS "containerNo",
+            cm.container_type          AS "containerType",
+            cm.owner_type               AS ownership,
+            COALESCE(cm.location, 'N/A') AS location,
+            COALESCE(
+              (SELECT cs.availability 
+              FROM container_status cs 
+              WHERE cs.cid = cm.cid 
+              ORDER BY cs.created_time DESC 
+              LIMIT 1),
+              cm.derived_status,
+              'Available'
+            ) AS derived_status
+          FROM container_master cm
+          WHERE cm.cid IN (
+            SELECT cch.container_id
+            FROM container_consignment_history cch
+            WHERE cch.consignment_id = $1
+              AND cch.active = true
+          )
+          `,
+          [numericId],
         );
 
         containers = containerRes.rows.map((row) => {
@@ -1396,7 +1387,7 @@ export async function createConsignment(req, res) {
         const placeholders = [];
 
         input.containers.forEach((container, index) => {
-          const offset = index * 4;
+          const offset = index * 6;
 
           placeholders.push(
             `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`,
@@ -1755,6 +1746,29 @@ export async function updateConsignment(req, res) {
         }
       }
 
+      if (Array.isArray(data.assignments)) {
+        const byOrderItem = data.assignments.reduce((acc, a) => {
+          if (!a.shippingDetailId) return acc;
+          (acc[a.shippingDetailId] ||= []).push(a);
+          return acc;
+        }, {});
+
+        for (const [orderItemId, itemAssignments] of Object.entries(
+          byOrderItem,
+        )) {
+          const newContainerDetails = itemAssignments.map((a) => ({
+            container: { cid: a.containerCid, container_number: a.containerNo },
+            assign_weight: a.assignedWeight,
+            assign_total_box: a.assignedBoxes,
+          }));
+
+          await client.query(
+            `UPDATE order_items SET container_details = $1 WHERE id = $2`,
+            [JSON.stringify(newContainerDetails), orderItemId],
+          );
+        }
+      }
+
       if (data.status !== undefined) {
         const logResult = await logToTracking(client, id, "status_updated", {
           newStatus: normalizedInput.status,
@@ -1789,9 +1803,6 @@ export async function updateConsignment(req, res) {
         ),
       },
     };
-
-    console.log("Consignment updated successfully, ID:", updatedConsignment.id);
-    console.log("Container diff:", containerDiffSummary);
 
     res.status(200).json({
       message: "Consignment updated",
