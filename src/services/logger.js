@@ -1,4 +1,5 @@
 import winston from "winston";
+import chalk from "chalk";
 
 const logLevels = {
   error: 0,
@@ -17,9 +18,19 @@ const logger = winston.createLogger({
   transports: [
     new winston.transports.Console({
       format: winston.format.combine(
-        winston.format.colorize(),
+        winston.format.timestamp(),
+        winston.format.colorize({ level: true }),
         winston.format.printf(({ timestamp, level, message, ...meta }) => {
-          return `${timestamp} [${level}] ${message} ${JSON.stringify(meta)}`;
+          const metaString =
+            Object.keys(meta).length > 0
+              ? chalk.hex("#8B5CF6")(
+                  JSON.stringify(meta, null, 2).replace(/\r?\n\s*/g, " "),
+                )
+              : "";
+
+          return `${chalk.dim(timestamp)} [${level}] ${chalk.cyan(message)}${
+            metaString ? ` ${metaString}` : ""
+          }`;
         }),
       ),
     }),
