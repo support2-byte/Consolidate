@@ -1,4 +1,5 @@
 import { transporter } from "../middleware/nodeMailer.js";
+import logger from "./logger.js";
 
 function buildHtml({ title, description, submittedAt }) {
   const date = new Date(submittedAt).toLocaleString();
@@ -192,15 +193,22 @@ function buildText({ title, description, submittedAt }) {
 }
 
 export async function sendBugReportEmail({ title, description, submittedAt }) {
+  const recipients = [process.env.GMAIL_USER, "saadsaifullah.rgsl@gmail.com"];
+
   const mailOptions = {
-    // from: `"Bug Reports" <${process.env.SMTP_USER}>`,
-    to: process.env.GMAIL_USER,
+    to: recipients.join(", "),
     subject: `Bug Report: ${title}`,
     text: buildText({ title, description, submittedAt }),
     html: buildHtml({ title, description, submittedAt }),
   };
 
   const info = await transporter.sendMail(mailOptions);
-  console.log(`[mailer] Bug report email sent: ${info.messageId}`);
+
+  logger.info("Bug report email sent", {
+    messageId: info.messageId,
+    title,
+    recipients,
+  });
+
   return info;
 }
