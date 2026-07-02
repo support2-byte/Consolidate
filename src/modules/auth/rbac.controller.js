@@ -1,5 +1,5 @@
 // src/controllers/rbac.controller.js
-import pool from '../../db/pool.js';
+import pool from "../../db/pool.js";
 
 // Helper: Compute final effective permissions (role + overrides)
 function computeEffectivePermissions(rolePerms, overrides) {
@@ -14,7 +14,7 @@ function computeEffectivePermissions(rolePerms, overrides) {
           effective[module].push(action);
         }
       } else {
-        effective[module] = effective[module].filter(a => a !== action);
+        effective[module] = effective[module].filter((a) => a !== action);
       }
     });
   });
@@ -28,35 +28,41 @@ function computeEffectivePermissions(rolePerms, overrides) {
 // ────────────────────────────────────────────────────────────────
 export async function getMyPermissions(req, res) {
   if (!req.user) {
-    return res.status(401).json({ success: false, error: 'Unauthorized' });
+    return res.status(401).json({ success: false, error: "Unauthorized" });
   }
 
   const userId = req.user.id;
 
   try {
     // Get the user's role ID (integer) and the corresponding role name (string)
-    const userRes = await pool.query(`
+    const userRes = await pool.query(
+      `
       SELECT 
         u.role AS role_id,
         COALESCE(r.name, 'unknown') AS role_name
       FROM users u
       LEFT JOIN roles r ON r.id = u.role
       WHERE u.id = $1
-    `, [userId]);
+    `,
+      [userId],
+    );
 
     if (userRes.rows.length === 0) {
-      return res.json({ success: true, permissions: {}, role: 'none' });
+      return res.json({ success: true, permissions: {}, role: "none" });
     }
 
     const { role_id, role_name } = userRes.rows[0];
 
-    if (!role_name || role_name === 'unknown') {
-      console.warn(`[getMyPermissions] No valid role name for user ${userId} (role_id: ${role_id})`);
-      return res.json({ success: true, permissions: {}, role: 'none' });
+    if (!role_name || role_name === "unknown") {
+      console.warn(
+        `[getMyPermissions] No valid role name for user ${userId} (role_id: ${role_id})`,
+      );
+      return res.json({ success: true, permissions: {}, role: "none" });
     }
 
     // Fetch permissions using the role name (string)
-    const permRes = await pool.query(`
+    const permRes = await pool.query(
+      `
       SELECT 
         m.code AS module,
         COALESCE(
@@ -70,35 +76,42 @@ export async function getMyPermissions(req, res) {
       WHERE r.name = $1
       GROUP BY m.code
       ORDER BY m.code
-    `, [role_name]);
+    `,
+      [role_name],
+    );
 
     const permissions = {};
-    permRes.rows.forEach(row => {
+    permRes.rows.forEach((row) => {
       permissions[row.module] = row.actions;
     });
 
     console.log(
       "[getMyPermissions] Success for user",
       userId,
-      "role_id:", role_id,
-      "role_name:", role_name,
-      "permissions:", permissions
+      "role_id:",
+      role_id,
+      "role_name:",
+      role_name,
+      "permissions:",
+      permissions,
     );
 
     res.json({
       success: true,
       permissions,
-      role: role_name   // return string like "staff" instead of 4
+      role: role_name, // return string like "staff" instead of 4
     });
   } catch (err) {
-    console.error('[getMyPermissions] ERROR:', {
+    console.error("[getMyPermissions] ERROR:", {
       message: err.message,
       stack: err.stack,
       code: err.code,
       detail: err.detail,
-      userId
+      userId,
     });
-    res.status(500).json({ success: false, error: 'Failed to load permissions' });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to load permissions" });
   }
 }
 // ────────────────────────────────────────────────────────────────
@@ -114,8 +127,8 @@ export async function getModules(req, res) {
     `);
     res.json({ success: true, modules: rows });
   } catch (err) {
-    console.error('[getModules] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch modules' });
+    console.error("[getModules] Error:", err.message);
+    res.status(500).json({ success: false, error: "Failed to fetch modules" });
   }
 }
 
@@ -130,44 +143,59 @@ export async function createNotification(req, res) {
   } = req.body;
 
   if (!module_code || !type_code || !name) {
-    return res.status(400).json({ success: false, error: 'module_code, type_code, and name are required' });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: "module_code, type_code, and name are required",
+      });
   }
 
   try {
-    const result = await pool.query(`
+    const result = await pool.query(
+      `
       INSERT INTO notification_types (
         module_code, type_code, name, description, default_recipients, default_enabled
       ) VALUES ($1, $2, $3, $4, $5, $6)
       ON CONFLICT (module_code, type_code) DO NOTHING
       RETURNING id, module_code, type_code, name
-    `, [
-      module_code,
-      type_code,
-      name,
-      description || null,
-      default_recipients || 'customer',
-      enabled,
-    ]);
+    `,
+      [
+        module_code,
+        type_code,
+        name,
+        description || null,
+        default_recipients || "customer",
+        enabled,
+      ],
+    );
 
     if (result.rowCount === 0) {
-      return res.status(409).json({ success: false, error: 'Notification type already exists' });
+      return res
+        .status(409)
+        .json({ success: false, error: "Notification type already exists" });
     }
 
     // Optionally create default settings row
-    await pool.query(`
+    await pool.query(
+      `
       INSERT INTO notification_settings (type_id, enabled)
       VALUES ($1, $2)
       ON CONFLICT DO NOTHING
-    `, [result.rows[0].id, enabled]);
+    `,
+      [result.rows[0].id, enabled],
+    );
 
     res.status(201).json({
       success: true,
-      message: 'Notification type created',
+      message: "Notification type created",
       notification: result.rows[0],
     });
   } catch (err) {
-    console.error('[createNotification] Error:', err);
-    res.status(500).json({ success: false, error: 'Failed to create notification' });
+    console.error("[createNotification] Error:", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to create notification" });
   }
 }
 
@@ -205,8 +233,14 @@ export async function getNotifications(req, res) {
       groupedByModule: grouped, // { "orders": [...], "consignments": [...] }
     });
   } catch (err) {
-    console.error('[getNotifications] Error:', err.message, err.stack?.substring(0, 200));
-    res.status(500).json({ success: false, error: 'Failed to fetch notification types' });
+    console.error(
+      "[getNotifications] Error:",
+      err.message,
+      err.stack?.substring(0, 200),
+    );
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch notification types" });
   }
 }
 
@@ -214,11 +248,12 @@ export async function getNotificationById(req, res) {
   const { id } = req.params;
 
   if (!id || isNaN(id)) {
-    return res.status(400).json({ success: false, error: 'Invalid ID' });
+    return res.status(400).json({ success: false, error: "Invalid ID" });
   }
 
   try {
-    const result = await pool.query(`
+    const result = await pool.query(
+      `
       SELECT 
         nt.id,
         nt.module_code,
@@ -239,10 +274,14 @@ export async function getNotificationById(req, res) {
       FROM notification_types nt
       LEFT JOIN notification_settings ns ON ns.type_id = nt.id
       WHERE nt.id = $1
-    `, [Number(id)]);
+    `,
+      [Number(id)],
+    );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Notification not found' });
+      return res
+        .status(404)
+        .json({ success: false, error: "Notification not found" });
     }
 
     res.json({
@@ -250,8 +289,8 @@ export async function getNotificationById(req, res) {
       notification: result.rows[0],
     });
   } catch (err) {
-    console.error('[getNotificationById] SQL Error:', err.message, err.stack);
-    res.status(500).json({ success: false, error: 'Database error' });
+    console.error("[getNotificationById] SQL Error:", err.message, err.stack);
+    res.status(500).json({ success: false, error: "Database error" });
   }
 }
 export async function updateNotification(req, res) {
@@ -264,12 +303,13 @@ export async function updateNotification(req, res) {
     email_type,
     recipients,
     trigger_statuses,
-    template_html,  // ← ADD THIS
+    template_html, // ← ADD THIS
   } = req.body;
 
   // ... existing check if row exists ...
 
-  await pool.query(`
+  await pool.query(
+    `
     UPDATE notification_settings
     SET 
       enabled = COALESCE($1, enabled),
@@ -282,19 +322,21 @@ export async function updateNotification(req, res) {
       template_html = COALESCE($8, template_html),   -- ← ADD THIS
       updated_at = NOW()
     WHERE type_id = $9
-  `, [
-    enabled,
-    subject,
-    heading,
-    additional_content,
-    email_type,
-    recipients,
-    trigger_statuses,
-    template_html,   // ← ADD THIS
-    id,
-  ]);
+  `,
+    [
+      enabled,
+      subject,
+      heading,
+      additional_content,
+      email_type,
+      recipients,
+      trigger_statuses,
+      template_html, // ← ADD THIS
+      id,
+    ],
+  );
 
-  res.json({ success: true, message: 'Notification settings updated' });
+  res.json({ success: true, message: "Notification settings updated" });
 }
 
 // export async function createNotificationType(req, res) {
@@ -341,10 +383,9 @@ export async function updateNotification(req, res) {
 //     res.status(500).json({ success: false, error: 'Failed to create notification type' });
 //   }
 // }
- 
 
 export async function getRoles(req, res) {
- try {
+  try {
     const result = await pool.query(`
       SELECT 
         id,
@@ -356,7 +397,7 @@ export async function getRoles(req, res) {
 
     res.json({
       success: true,
-      roles: result.rows,   // [{ id: 1, name: "admin", label: "Administrator" }, ...]
+      roles: result.rows, // [{ id: 1, name: "admin", label: "Administrator" }, ...]
     });
   } catch (err) {
     console.error("[GET /auth/roles] Error:", err.message);
@@ -379,8 +420,8 @@ export async function getActions(req, res) {
     `);
     res.json({ success: true, actions: rows });
   } catch (err) {
-    console.error('[getActions] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch actions' });
+    console.error("[getActions] Error:", err.message);
+    res.status(500).json({ success: false, error: "Failed to fetch actions" });
   }
 }
 
@@ -392,30 +433,31 @@ export async function getRolePermissions(req, res) {
   const { roleName } = req.params;
 
   if (!roleName) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Role name is required in URL parameter' 
+    return res.status(400).json({
+      success: false,
+      error: "Role name is required in URL parameter",
     });
   }
 
   try {
     // 1. Find role by name
     const roleRes = await pool.query(
-      'SELECT id, name FROM roles WHERE name = $1',
-      [roleName.trim()]
+      "SELECT id, name FROM roles WHERE name = $1",
+      [roleName.trim()],
     );
 
     if (roleRes.rows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: `Role '${roleName}' not found` 
+      return res.status(404).json({
+        success: false,
+        error: `Role '${roleName}' not found`,
       });
     }
 
     const { id: roleId, name: foundRoleName } = roleRes.rows[0];
 
     // 2. Fetch permissions
-    const permRes = await pool.query(`
+    const permRes = await pool.query(
+      `
       SELECT 
         m.code AS module,
         COALESCE(
@@ -428,16 +470,18 @@ export async function getRolePermissions(req, res) {
       WHERE rp.role_id = $1
       GROUP BY m.code
       ORDER BY m.code
-    `, [roleId]);
+    `,
+      [roleId],
+    );
 
     const permissions = {};
-    permRes.rows.forEach(row => {
+    permRes.rows.forEach((row) => {
       permissions[row.module] = row.actions;
     });
 
     console.log(
       `[getRolePermissions] Success for role '${foundRoleName}' (id ${roleId}):`,
-      `${permRes.rowCount} modules with permissions`
+      `${permRes.rowCount} modules with permissions`,
     );
 
     // Response – consistent and informative
@@ -445,12 +489,11 @@ export async function getRolePermissions(req, res) {
       success: true,
       role: foundRoleName,
       roleId,
-      permissions,               // { "users": ["view", "create"], "orders": ["view"] }
+      permissions, // { "users": ["view", "create"], "orders": ["view"] }
       permissionCount: permRes.rowCount,
     });
-
   } catch (err) {
-    console.error('[getRolePermissions] Error:', {
+    console.error("[getRolePermissions] Error:", {
       message: err.message,
       code: err.code,
       detail: err.detail,
@@ -458,17 +501,17 @@ export async function getRolePermissions(req, res) {
       stack: err.stack?.substring(0, 300),
     });
 
-    if (err.code === '23505' || err.code === '42703') {
+    if (err.code === "23505" || err.code === "42703") {
       // Unique violation or column not found – likely schema issue
-      return res.status(500).json({ 
-        success: false, 
-        error: 'Database schema error – contact admin' 
+      return res.status(500).json({
+        success: false,
+        error: "Database schema error – contact admin",
       });
     }
 
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch role permissions' 
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch role permissions",
     });
   }
 }
@@ -483,48 +526,65 @@ export async function updateRolePermissions(req, res) {
   const { permissions } = req.body;
 
   if (!Array.isArray(permissions)) {
-    return res.status(400).json({ success: false, error: 'Invalid format: permissions must be array' });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: "Invalid format: permissions must be array",
+      });
   }
 
   try {
-    const roleRes = await pool.query('SELECT id FROM roles WHERE name = $1', [roleName]);
+    const roleRes = await pool.query("SELECT id FROM roles WHERE name = $1", [
+      roleName,
+    ]);
     if (roleRes.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Role not found' });
+      return res.status(404).json({ success: false, error: "Role not found" });
     }
 
     const roleId = roleRes.rows[0].id;
 
-    await pool.query('BEGIN');
+    await pool.query("BEGIN");
 
     // Clear existing
-    await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId]);
+    await pool.query("DELETE FROM role_permissions WHERE role_id = $1", [
+      roleId,
+    ]);
 
     // Insert new
     for (const { module, actions } of permissions) {
       if (!Array.isArray(actions)) continue;
 
-      const modRes = await pool.query('SELECT id FROM modules WHERE code = $1', [module]);
+      const modRes = await pool.query(
+        "SELECT id FROM modules WHERE code = $1",
+        [module],
+      );
       if (modRes.rows.length === 0) continue;
       const moduleId = modRes.rows[0].id;
 
       for (const actionCode of actions) {
-        const actRes = await pool.query('SELECT id FROM permission_actions WHERE code = $1', [actionCode]);
+        const actRes = await pool.query(
+          "SELECT id FROM permission_actions WHERE code = $1",
+          [actionCode],
+        );
         if (actRes.rows.length === 0) continue;
         const actionId = actRes.rows[0].id;
 
         await pool.query(
-          'INSERT INTO role_permissions (role_id, module_id, action_id) VALUES ($1, $2, $3)',
-          [roleId, moduleId, actionId]
+          "INSERT INTO role_permissions (role_id, module_id, action_id) VALUES ($1, $2, $3)",
+          [roleId, moduleId, actionId],
         );
       }
     }
 
-    await pool.query('COMMIT');
+    await pool.query("COMMIT");
     res.json({ success: true, message: `Permissions updated for ${roleName}` });
   } catch (err) {
-    await pool.query('ROLLBACK');
-    console.error('[updateRolePermissions] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to update permissions' });
+    await pool.query("ROLLBACK");
+    console.error("[updateRolePermissions] Error:", err.message);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to update permissions" });
   }
 }
 
@@ -537,7 +597,8 @@ export async function getUserPermissions(req, res) {
 
   try {
     // 1. Get user + role
-    const userRes = await pool.query(`
+    const userRes = await pool.query(
+      `
       SELECT 
         u.id, u.email, u.name,
         u.role AS role_id,
@@ -545,7 +606,9 @@ export async function getUserPermissions(req, res) {
       FROM users u
       LEFT JOIN roles r ON r.id = u.role
       WHERE u.id = $1
-    `, [userId]);
+    `,
+      [userId],
+    );
 
     if (userRes.rows.length === 0) {
       return res.status(404).json({ success: false, error: "User not found" });
@@ -554,7 +617,8 @@ export async function getUserPermissions(req, res) {
     const user = userRes.rows[0];
 
     // 2. Role-based permissions
-    const rolePermRes = await pool.query(`
+    const rolePermRes = await pool.query(
+      `
       SELECT 
         m.code AS module,
         COALESCE(ARRAY_AGG(DISTINCT pa.code ORDER BY pa.code), '{}') AS actions
@@ -563,15 +627,18 @@ export async function getUserPermissions(req, res) {
       JOIN permission_actions pa ON pa.id = rp.action_id
       WHERE rp.role_id = $1
       GROUP BY m.code
-    `, [user.role_id]);
+    `,
+      [user.role_id],
+    );
 
     const rolePermissions = {};
-    rolePermRes.rows.forEach(r => {
+    rolePermRes.rows.forEach((r) => {
       rolePermissions[r.module] = r.actions;
     });
 
     // 3. User overrides (this is the critical part)
-    const overrideRes = await pool.query(`
+    const overrideRes = await pool.query(
+      `
       SELECT 
         m.code AS module,
         pa.code AS action,
@@ -581,10 +648,12 @@ export async function getUserPermissions(req, res) {
       JOIN permission_actions pa ON pa.id = upo.action_id
       WHERE upo.user_id = $1
       ORDER BY m.code, pa.code
-    `, [userId]);
+    `,
+      [userId],
+    );
 
     const overrides = {};
-    overrideRes.rows.forEach(row => {
+    overrideRes.rows.forEach((row) => {
       if (!overrides[row.module]) overrides[row.module] = {};
       overrides[row.module][row.action] = row.granted;
     });
@@ -594,18 +663,21 @@ export async function getUserPermissions(req, res) {
       role: user.role_name,
       rolePermissionsCount: Object.keys(rolePermissions).length,
       overridesCount: Object.keys(overrides).length,
-      overridesData: overrides
+      overridesData: overrides,
     });
 
     // 4. Effective (combine role + overrides)
     const effective = {};
-    const allModules = new Set([...Object.keys(rolePermissions), ...Object.keys(overrides)]);
+    const allModules = new Set([
+      ...Object.keys(rolePermissions),
+      ...Object.keys(overrides),
+    ]);
     for (const mod of allModules) {
       const roleActs = rolePermissions[mod] || [];
       const ovr = overrides[mod] || {};
-      effective[mod] = roleActs.filter(act => ovr[act] !== false); // override false removes it
+      effective[mod] = roleActs.filter((act) => ovr[act] !== false); // override false removes it
       if (ovr) {
-        Object.keys(ovr).forEach(act => {
+        Object.keys(ovr).forEach((act) => {
           if (ovr[act] === true && !effective[mod].includes(act)) {
             effective[mod].push(act);
           }
@@ -622,12 +694,14 @@ export async function getUserPermissions(req, res) {
       user: {
         id: user.id,
         email: user.email,
-        name: user.name
-      }
+        name: user.name,
+      },
     });
   } catch (err) {
     console.error("[getUserPermissions] Error:", err.message, err.stack);
-    res.status(500).json({ success: false, error: "Failed to fetch permissions" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch permissions" });
   }
 }
 // GET /auth/admin/permissions/all
@@ -646,22 +720,24 @@ export async function getAllPossiblePermissions(req, res) {
       ORDER BY code
     `);
 
-    const modules = modulesRes.rows.map(r => r.module);
-    const actions = actionsRes.rows.map(r => r.action);
+    const modules = modulesRes.rows.map((r) => r.module);
+    const actions = actionsRes.rows.map((r) => r.action);
 
     res.json({
       success: true,
       modules,
       actions,
       // optional: full matrix if you prefer
-      allPermissions: modules.map(mod => ({
+      allPermissions: modules.map((mod) => ({
         module: mod,
-        possibleActions: actions
-      }))
+        possibleActions: actions,
+      })),
     });
   } catch (err) {
-    console.error('[getAllPossiblePermissions] Error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to load permission catalog' });
+    console.error("[getAllPossiblePermissions] Error:", err.message);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to load permission catalog" });
   }
 }
 // ────────────────────────────────────────────────────────────────
@@ -674,41 +750,55 @@ export async function updateUserPermission(req, res) {
   const { module, action, granted } = req.body;
 
   if (!module || !action || granted === undefined) {
-    return res.status(400).json({ success: false, error: "module, action, and granted are required" });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        error: "module, action, and granted are required",
+      });
   }
 
   try {
     // 1. Find module_id
     const moduleRes = await pool.query(
       "SELECT id FROM modules WHERE code = $1",
-      [module.trim()]
+      [module.trim()],
     );
     if (moduleRes.rows.length === 0) {
-      return res.status(400).json({ success: false, error: `Module "${module}" not found` });
+      return res
+        .status(400)
+        .json({ success: false, error: `Module "${module}" not found` });
     }
     const moduleId = moduleRes.rows[0].id;
 
     // 2. Find action_id
     const actionRes = await pool.query(
       "SELECT id FROM permission_actions WHERE code = $1",
-      [action.trim()]
+      [action.trim()],
     );
     if (actionRes.rows.length === 0) {
-      return res.status(400).json({ success: false, error: `Action "${action}" not found` });
+      return res
+        .status(400)
+        .json({ success: false, error: `Action "${action}" not found` });
     }
     const actionId = actionRes.rows[0].id;
 
     // 3. Upsert override (insert or update if exists)
-    await pool.query(`
+    await pool.query(
+      `
       INSERT INTO user_permission_overrides (user_id, module_id, action_id, granted)
       VALUES ($1, $2, $3, $4)
       ON CONFLICT (user_id, module_id, action_id)
       DO UPDATE SET granted = $4, updated_at = NOW()
-    `, [userId, moduleId, actionId, granted]);
+    `,
+      [userId, moduleId, actionId, granted],
+    );
 
     res.json({ success: true });
   } catch (err) {
     console.error("[updateUserPermission] Error:", err.message, err.stack);
-    res.status(500).json({ success: false, error: "Failed to update permission" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to update permission" });
   }
 }

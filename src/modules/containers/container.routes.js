@@ -15,6 +15,7 @@ import {
   releaseContainer,
   getAllContainersForConsignment,
   getUnassignedOrders,
+  updateContainerStatus,
   // getContainers
 } from "./container.controller.js";
 import { updateContainer } from "../orders/order.controller.js";
@@ -39,6 +40,7 @@ router.post("/", createContainer);
 router.get("/:cid", getContainerById);
 router.get("/:cid/usage-history", getUsageHistory);
 router.put("/:cid", updateContainer);
+router.put("/status/:cid/", updateContainerStatus);
 router.delete("/:cid", deleteContainer);
 router.get("/:cid/unassigned-orders", getUnassignedOrders);
 

@@ -11,6 +11,7 @@
     "axios": "^1.12.2",
     "axois": "^0.0.1-security",
     "bcryptjs": "^2.4.3",
+    "chalk": "^5.6.2",
     "cloudinary": "^1.41.3",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
@@ -21,9 +22,11 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "multer-storage-cloudinary": "^4.0.0",
+    "node-cron": "^4.5.0",
     "nodemailer": "^7.0.11",
     "pg": "^8.11.3",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

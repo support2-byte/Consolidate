@@ -1,5 +1,6 @@
 import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
+import { calculateETA } from "../../services/calculateEta.js";
 
 async function withTransaction(operation) {
   const client = await pool.connect();
@@ -115,7 +116,7 @@ export async function getStatuses(req, res) {
           ORDER BY css.sid DESC NULLS LAST
           LIMIT 1
         ) cs ON true
-        WHERE cm.status = 1
+        WHERE cm.status = 'Available'
       ) sub
       WHERE derived_status IS NOT NULL
       ORDER BY value
@@ -362,7 +363,7 @@ export async function createContainer(req, res) {
 
     // Check for duplicate container_number
     const checkQuery =
-      "SELECT cid FROM container_master WHERE container_number = $1 AND status = 1";
+      "SELECT cid FROM container_master WHERE container_number = $1";
     const checkResult = await client.query(checkQuery, [container_number]);
     if (checkResult.rowCount > 0) {
       await client.query("ROLLBACK");
@@ -372,7 +373,7 @@ export async function createContainer(req, res) {
     // Insert master
     const masterQuery = `
       INSERT INTO container_master (container_number, container_size, container_type, owner_type, remarks, status, created_by)
-      VALUES ($1, $2, $3, $4, $5, 1, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING cid
     `;
     const masterValues = [
@@ -381,6 +382,7 @@ export async function createContainer(req, res) {
       container_type,
       owner_type,
       remarks || "",
+      derived_status || availability || "Available",
       created_by,
     ];
     const masterResult = await client.query(masterQuery, masterValues);
@@ -752,201 +754,70 @@ export async function updateContainer(req, res) {
   }
 }
 
-export async function getAllContainers(req, res) {
-  console.log("getAllContainers called with query:", req.query);
+export const getAllContainers = async (req, res) => {
   try {
-    const {
-      container_number,
-      container_size,
-      container_type,
-      owner_type,
-      status = "",
-      location,
-      page = 1,
-      limit = 100,
-      includeOrder = "false",
-    } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    let whereClause = `cm.status = 1`;
-    let baseValues = [];
-
-    if (container_number) {
-      whereClause += ` AND cm.container_number ILIKE $${baseValues.length + 1}`;
-      baseValues.push(`%${container_number}%`);
-    }
-    if (container_size) {
-      whereClause += ` AND cm.container_size = $${baseValues.length + 1}`;
-      baseValues.push(container_size);
-    }
-    if (container_type) {
-      whereClause += ` AND cm.container_type = $${baseValues.length + 1}`;
-      baseValues.push(container_type);
-    }
-    if (owner_type) {
-      whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
-      baseValues.push(owner_type);
-    }
-    if (location) {
-      // FIXED: Better normalization to avoid double underscore
-      let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
-      if (normalizedLocation.endsWith("_port")) {
-        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
-      } else if (normalizedLocation.includes("port")) {
-        normalizedLocation = normalizedLocation
-          .replace(/_port$/, "port")
-          .replace(/port$/, "_port"); // Handle edge cases
-      } else {
-        normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
-      }
-      if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
-        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
-        baseValues.push(normalizedLocation);
-      } else {
-        return res.status(400).json({
-          error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
-        });
-      }
-    }
-    let baseFrom = `
+    const query = `
+      SELECT
+        cm.cid,
+        cm.container_number,
+        cm.container_size,
+        cm.container_type,
+        cm.owner_type,
+        cm.created_time,
+        COALESCE(cs.location, 'karachi_port') AS location,
+        COALESCE(cs.availability, 'Available') AS current_status,
+        CASE
+          WHEN lc.active = false THEN COALESCE(cm.status, '')
+          ELSE COALESCE(cas.status, cm.status, '')
+        END AS assignment_status,
+        COALESCE(cs.status_notes, '') AS status_notes,
+        CASE
+          WHEN lc.active = false OR lc.active IS NULL THEN ''
+          ELSE COALESCE(lc.consignment_number, '')
+        END AS consignment_number
       FROM container_master cm
       LEFT JOIN LATERAL (
-        SELECT location, availability
-        FROM container_status css
-        WHERE css.cid = cm.cid
-        ORDER BY css.sid DESC NULLS LAST
+        SELECT location, availability, status_notes
+        FROM container_status
+        WHERE cid = cm.cid
+        ORDER BY sid DESC
         LIMIT 1
       ) cs ON true
-      LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-      LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
       LEFT JOIN LATERAL (
-        SELECT
-          c.id,
-          c.consignment_number
+        SELECT c.consignment_number, cch.active
         FROM container_consignment_history cch
-        JOIN consignments c
-          ON c.id = cch.consignment_id
+        JOIN consignments c ON c.id = cch.consignment_id
         WHERE cch.container_id = cm.cid
         ORDER BY cch.id DESC
         LIMIT 1
       ) lc ON true
+      LEFT JOIN LATERAL (
+        SELECT cah.status
+        FROM container_assignment_history cah
+        WHERE cah.cid = cm.cid
+          AND cah.action_type = 'ASSIGN'
+        ORDER BY cah.id DESC
+        LIMIT 1
+      ) cas ON true
+      ORDER BY cm.created_time DESC
     `;
+    const result = await pool.query(query);
 
-    let selectClause = `
-      SELECT 
-        cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
-        COALESCE(cs.location, 'karachi_port') as location,
-        CASE 
-          WHEN cs.availability IS NOT NULL THEN cs.availability
-          WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
-          WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
-          ELSE 'Available'
-        END as derived_status,
-        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination,lc.id as consignment_id,
-        lc.consignment_number,
-        cm.created_time
-    `;
+    const data = result.rows.map((row) => ({
+      ...row,
+      assignment_status:
+        row.assignment_status === "Available" ? "" : row.assignment_status,
+    }));
 
-    let orderJoin = "";
-    if (includeOrder === "true") {
-      selectClause += `,
-        o.id as associated_order_id,
-        o.booking_ref as associated_booking_ref,
-        o.status as associated_order_status,
-        o.place_of_loading as order_place_of_loading,
-        o.final_destination as order_final_destination
-      `;
-      orderJoin = `
-        LEFT JOIN orders o ON o.associated_container = cm.container_number AND o.status != 'Cancelled'
-      `;
-      baseFrom += orderJoin;
-    }
-
-    // Use CTE to compute derived_status
-    const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
-
-    // Prepare params for limit/offset (always added)
-    let fullParams = [...baseValues];
-    let statusWhere = "";
-
-    if (status && status !== "") {
-      // Filter by specific status
-      const statusParamIndex = baseValues.length + 1;
-      statusWhere = `WHERE derived_status = $${statusParamIndex}`;
-      fullParams.push(status);
-    }
-
-    // Add limit and offset
-    const limitParamIndex = fullParams.length + 1;
-    const offsetParamIndex = limitParamIndex + 1;
-    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
-
-    let fullQuery;
-    if (status && status !== "") {
-      fullQuery = `
-        WITH container_summary AS (${innerQuery})
-        SELECT * FROM container_summary 
-        ${statusWhere}
-        ORDER BY created_time DESC
-        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-      `;
-    } else {
-      // No status filter: show all
-      fullQuery = `
-        WITH container_summary AS (${innerQuery})
-        SELECT * FROM container_summary 
-        ORDER BY created_time DESC
-        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-      `;
-    }
-
-    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
-    let countParams = [...baseValues];
-    let countStatusWhere = "";
-    if (status && status !== "") {
-      const countStatusIndex = baseValues.length + 1;
-      countStatusWhere = `WHERE derived_status = $${countStatusIndex}`;
-      countParams.push(status);
-    }
-    const countQuery = `
-      WITH container_summary AS (${innerQuery})
-      SELECT COUNT(*) as total FROM container_summary
-      ${countStatusWhere}
-    `;
-
-    console.log("Generated Query:", fullQuery); // Add logging for debugging
-    console.log("Generated Count Query:", countQuery);
-    console.log("Full Params:", fullParams);
-    console.log("Count Params:", countParams);
-
-    const rowsResult = await pool.query(fullQuery, fullParams);
-    const countResult = await pool.query(countQuery, countParams);
-
-    const rows = rowsResult.rows;
-
-    console.log(
-      "Fetched containers:",
-      rows.length,
-      "Total:",
-      parseInt(countResult.rows[0].total),
-      "Filters:",
-      { ...req.query, status },
-    );
-    res.json({
-      data: rows,
-      total: parseInt(countResult.rows[0].total || 0),
-      page: parseInt(page),
-      limit: parseInt(limit),
-    });
+    return res.status(200).json({ success: true, data });
   } catch (err) {
-    console.error("pool error:", err.message, "Query params:", req.query);
-    res
-      .status(500)
-      .json({ error: err.message || "Failed to fetch containers" });
+    console.error("Error fetching containers:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong!",
+    });
   }
-}
-
+};
 export async function getContainerById(req, res) {
   try {
     const { cid } = req.params;
@@ -961,8 +832,20 @@ export async function getContainerById(req, res) {
           WHEN chd.hire_end_date > CURRENT_DATE THEN 'Occupied'
           ELSE 'Available'
         END as derived_status,
-        cpd.manufacture_date, cpd.purchase_date, cpd.purchase_price, cpd.purchase_from, cpd.owned_by, cpd.available_at, cpd.currency,
-        chd.hire_start_date, chd.hire_end_date, chd.hired_by, chd.return_date, chd.free_days, chd.place_of_loading, chd.place_of_destination
+        cpd.manufacture_date::text, 
+        cpd.purchase_date::text, 
+        cpd.purchase_price, 
+        cpd.purchase_from, 
+        cpd.owned_by, 
+        cpd.available_at, 
+        cpd.currency,
+        chd.hire_start_date::text, 
+        chd.hire_end_date::text, 
+        chd.hired_by, 
+        chd.return_date::text, 
+        chd.free_days, 
+        chd.place_of_loading, 
+        chd.place_of_destination
     `;
     let fromClause = `
       FROM container_master cm
@@ -975,7 +858,7 @@ export async function getContainerById(req, res) {
       ) cs ON true
       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-      WHERE cm.cid = $1 AND cm.status = 1 AND (cs.location = 'karachi_port' OR cs.location = 'dubai_port')  -- NEW: Enforce valid locations
+      WHERE cm.cid = $1
     `;
 
     if (includeOrder === "true") {
@@ -1341,27 +1224,6 @@ export async function getUsageHistory(req, res) {
       `Fetched ${formattedHistory.length} combined events and ${formattedStatusHistory.length} status events for container ${containerId}`,
     );
 
-    console.log({
-      rawEvents: formattedHistory,
-      groupedByConsignment,
-      containerStatusHistory: {
-        totalRecords: formattedStatusHistory.length,
-        events: formattedStatusHistory,
-        summary: {
-          uniqueStatuses: [
-            ...new Set(formattedStatusHistory.map((s) => s.status)),
-          ],
-          firstStatus:
-            formattedStatusHistory[formattedStatusHistory.length - 1]?.status ||
-            "N/A",
-          latestStatus: formattedStatusHistory[0]?.status || "N/A",
-          totalLocations: [
-            ...new Set(formattedStatusHistory.map((s) => s.location)),
-          ].length,
-        },
-      },
-    });
-
     res.json({
       rawEvents: formattedHistory,
       groupedByConsignment,
@@ -1488,6 +1350,24 @@ export const releaseContainer = async (req, res) => {
       }
 
       releasedAssignment = result.rows[0];
+
+      await client.query(
+        `
+        UPDATE container_master
+          SET status = 'Available'
+        WHERE cid = $1
+        `,
+        [releasedAssignment.container_id],
+      );
+
+      await client.query(
+        `
+        UPDATE container_status
+          SET availability = 'Available'
+        WHERE cid = $1
+        `,
+        [releasedAssignment.container_id],
+      );
     });
 
     return res.status(200).json({
@@ -1530,8 +1410,7 @@ export async function getAllContainersForConsignment(req, res) {
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let whereClause = `
-      cm.status = 1
-      AND NOT EXISTS (
+      NOT EXISTS (
         SELECT 1
         FROM container_consignment_history cch
         WHERE cch.container_id = cm.cid
@@ -1815,5 +1694,216 @@ export async function getUnassignedOrders(req, res) {
       error: "Failed to fetch unassigned orders",
       details: err.message,
     });
+  }
+}
+
+export async function updateContainerStatus(req, res) {
+  let client;
+
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const { cid } = req.params;
+
+    const {
+      current_status,
+      derived_status,
+      location,
+      container_status,
+      created_by = req.user?.email || "system",
+    } = req.body;
+
+    if (derived_status || location) {
+      await client.query(
+        `
+        UPDATE container_status
+        SET
+          availability = COALESCE($1, availability),
+          location = COALESCE($2, location),
+          status_notes = $3,
+          created_by = $4,
+          created_time = NOW()
+        WHERE cid = $5
+        `,
+        [
+          derived_status,
+          location,
+          `Updated to ${derived_status} at ${location}`,
+          created_by,
+          cid,
+        ],
+      );
+    }
+
+    if (container_status && current_status) {
+      const statusResult = await client.query(
+        `
+        SELECT order_status, days_offset
+        FROM statuses
+        WHERE container_status = $1
+        `,
+        [container_status],
+      );
+
+      const order_status = statusResult.rows[0]?.order_status ?? null;
+      const days_offset = statusResult.rows[0]?.days_offset ?? null;
+
+      console.log(
+        `[updateContainerStatus] container_status="${container_status}" → order_status="${order_status}", days_offset=${days_offset}`,
+      );
+
+      let eta = null;
+      let daysUntil = null;
+      if (order_status) {
+        const result = await calculateETA(client, order_status);
+        eta = result.eta;
+        daysUntil = result.daysUntil;
+      }
+
+      await client.query(
+        `
+          UPDATE container_master
+          SET status = $1
+          WHERE cid = $2
+        `,
+        [container_status, cid],
+      );
+
+      const assignmentResult = await client.query(
+        `
+          UPDATE container_assignment_history
+          SET status = $1
+          WHERE cid = $2
+            AND action_type = 'ASSIGN'
+            AND status = $3
+          RETURNING receiver_id
+        `,
+        [container_status, cid, current_status],
+      );
+
+      const receiverIds = [
+        ...new Set(
+          assignmentResult.rows.map((row) => row.receiver_id).filter(Boolean),
+        ),
+      ];
+
+      for (const receiverId of receiverIds) {
+        const receiverResult = await client.query(
+          `
+          SELECT
+            id,
+            receiver_ref,
+            status
+          FROM receivers
+          WHERE id = $1
+          `,
+          [receiverId],
+        );
+
+        const receiver = receiverResult.rows[0];
+
+        if (!receiver) continue;
+
+        const oldStatus = receiver.status || null;
+
+        const itemsResult = await client.query(
+          `
+          SELECT
+            oi.order_id,
+            oi.sender_id,
+            oi.receiver_id,
+            oi.item_ref,
+            s.sender_ref,
+            s.consignment_number
+          FROM order_items oi
+          LEFT JOIN senders s
+            ON s.id = oi.sender_id
+          WHERE oi.receiver_id = $1
+          `,
+          [receiverId],
+        );
+
+        for (const item of itemsResult.rows) {
+          await client.query(
+            `
+            INSERT INTO order_tracking (
+              order_id,
+              sender_id,
+              sender_ref,
+              receiver_id,
+              receiver_ref,
+              container_id,
+              consignment_number,
+              status,
+              old_status,
+              item_ref,
+              created_by,
+              created_time
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              $11,
+              NOW()
+            )
+            `,
+            [
+              item.order_id,
+              item.sender_id,
+              item.sender_ref,
+              item.receiver_id,
+              receiver.receiver_ref,
+              cid,
+              item.consignment_number,
+              container_status,
+              oldStatus,
+              item.item_ref,
+              created_by,
+            ],
+          );
+        }
+
+        await client.query(
+          `
+          UPDATE receivers
+            SET status = $1,
+                eta = $2
+          WHERE id = $3
+          `,
+          [order_status, eta, receiverId],
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      success: true,
+      message: "Container status updated successfully",
+    });
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+
+    console.error("Container status update failed:", err);
+
+    return res.status(500).json({
+      error: "Failed to update container status",
+      details: err.message,
+    });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }

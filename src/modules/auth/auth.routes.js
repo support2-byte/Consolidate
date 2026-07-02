@@ -54,40 +54,55 @@ router.get("/roles", requireAuth, requireRole("admin"), getRoles);
 
 router.post("/users", requireAuth, requireRole("admin"), createUser);
 router.put("/users/:id", requireAuth, requireRole("admin"), updateUser);
-router.delete("/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
-  // Add delete logic here if not already in auth.controller
-  try {
-    await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
-    res.json({ success: true, message: "User deleted" });
-  } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to delete user" });
-  }
-});
+router.delete(
+  "/users/:id",
+  requireAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    // Add delete logic here if not already in auth.controller
+    try {
+      await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
+      res.json({ success: true, message: "User deleted" });
+    } catch (err) {
+      res.status(500).json({ success: false, error: "Failed to delete user" });
+    }
+  },
+);
 
 // Admin password reset
 router.post(
   "/admin/reset-user-password",
   requireAuth,
   // requireRole("admin"),
-  adminForceResetPassword
+  adminForceResetPassword,
 );
 router.post(
   "/admin/users/:id/reset-password",
   requireAuth,
   requireRole("admin"),
-  adminForceResetPassword
+  adminForceResetPassword,
 );
 
 // ────────────────────────────────────────────────────────────────
 // Admin-only: RBAC - Global Modules & Actions
 // ────────────────────────────────────────────────────────────────
-router.get("/admin/rbac/modules", requireAuth, requireRole("admin"), getModules);
-router.get("/admin/rbac/actions", requireAuth, requireRole("admin"), getActions);
+router.get(
+  "/admin/rbac/modules",
+  requireAuth,
+  requireRole("admin"),
+  getModules,
+);
+router.get(
+  "/admin/rbac/actions",
+  requireAuth,
+  requireRole("admin"),
+  getActions,
+);
 // In your router file (e.g., adminRoutes.js)
-router.get('/admin/notifications', getNotifications);
-router.get('/admin/notifications/:id', getNotificationById);
-router.patch('/admin/notifications/:id', updateNotification);
-router.post('/admin/notifications', createNotification); // optional
+router.get("/admin/notifications", getNotifications);
+router.get("/admin/notifications/:id", getNotificationById);
+router.patch("/admin/notifications/:id", updateNotification);
+router.post("/admin/notifications", createNotification); // optional
 // router.post('/admin/notifications', createNotification);
 // ────────────────────────────────────────────────────────────────
 // Admin-only: Role Permission Management
@@ -96,15 +111,20 @@ router.get(
   "/admin/rbac/roles/:roleName/permissions",
   requireAuth,
   requireRole("admin"),
-  getRolePermissions
+  getRolePermissions,
 );
 router.post(
   "/admin/rbac/roles/:roleName/permissions",
   requireAuth,
   requireRole("admin"),
-  updateRolePermissions
+  updateRolePermissions,
 );
-router.get("/admin/permissions/all", requireAuth, requireRole("admin"), getAllPossiblePermissions);
+router.get(
+  "/admin/permissions/all",
+  requireAuth,
+  requireRole("admin"),
+  getAllPossiblePermissions,
+);
 // ────────────────────────────────────────────────────────────────
 // Admin-only: Per-User Permission Overrides
 // ────────────────────────────────────────────────────────────────
@@ -112,13 +132,13 @@ router.get(
   "/admin/users/:userId/permissions",
   requireAuth,
   requireRole("admin"),
-  getUserPermissions
+  getUserPermissions,
 );
 router.post(
   "/admin/users/:userId/permissions",
   requireAuth,
   requireRole("admin"),
-  updateUserPermission
+  updateUserPermission,
 );
 
 export default router;

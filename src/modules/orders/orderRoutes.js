@@ -24,6 +24,7 @@ import {
   sendShipmentEmail,
   removeReceiver,
   removeOrderItem,
+  getAssignedOrderById,
 } from "./order.controller.js";
 
 const router = express.Router();
@@ -106,5 +107,7 @@ router.post("/notify/me", async (req, res) => {
 router.get("/", requireAuth, getOrders);
 router.get("/:id", requireAuth, getOrderById);
 router.get("/myOrderByRef", requireAuth, getMyOrdersByRef);
+
+router.get("/:id/assigned", requireAuth, getAssignedOrderById);
 
 export default router;
