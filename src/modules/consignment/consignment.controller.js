@@ -589,7 +589,6 @@ export async function getConsignmentById(req, res) {
             SELECT cch.container_id
             FROM container_consignment_history cch
             WHERE cch.consignment_id = $1
-              AND cch.active = true
           )
           `,
           [numericId],
