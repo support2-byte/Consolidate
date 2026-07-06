@@ -469,288 +469,163 @@ export async function createContainer(req, res) {
 
 export async function updateContainer(req, res) {
   let client;
+
   try {
     client = await pool.connect();
     await client.query("BEGIN");
 
     const { cid } = req.params;
     const updates = req.body;
-    const created_by = updates.created_by || "system"; // Assume created_by if not provided
-    console.log("updatess", updates);
 
-    // Fetch current owner_type
-    const currentResult = await client.query(
-      "SELECT owner_type FROM container_master WHERE cid = $1",
+    const n = (v) => (v === "" || v === undefined ? null : v);
+    const created_by = updates.created_by || req.user?.id || "system";
+
+    const current = await client.query(
+      `SELECT cid, owner_type FROM container_master WHERE cid = $1`,
       [cid],
     );
-    const current = currentResult.rows;
-    if (current.length === 0) {
+
+    if (current.rowCount === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Container not found" });
     }
-    const currentOwnerType = current[0].owner_type;
 
-    // Prevent changing owner_type
-    if (updates.owner_type && updates.owner_type !== currentOwnerType) {
+    if (
+      updates.owner_type &&
+      updates.owner_type !== current.rows[0].owner_type
+    ) {
       await client.query("ROLLBACK");
       return res
         .status(400)
-        .json({ error: "Cannot change owner_type; manual migration required" });
+        .json({ error: "Cannot change owner_type manually" });
     }
 
-    // If derived_status provided, treat as new availability
-    if (updates.derived_status) {
-      updates.availability = updates.derived_status;
-    }
-
-    // Validate updated fields (only if provided)
-    const updatedSocFields = {
-      location: updates.location,
-      manufacture_date: updates.manufacture_date,
-      purchase_date: updates.purchase_date,
-      purchase_price: updates.purchase_price,
-      purchase_from: updates.purchase_from,
-      owned_by: updates.owned_by,
-      available_at: updates.available_at,
-    };
-    const updatedCocFields = {
-      hire_start_date: updates.hire_start_date,
-      hire_end_date: updates.hire_end_date,
-      hired_by: updates.hired_by,
-      return_date: updates.return_date,
-      free_days: updates.free_days,
-      place_of_loading: updates.place_of_loading,
-      place_of_destination: updates.place_of_destination,
-    };
-
-    let updateErrors = [];
-    if (currentOwnerType === "soc") {
-      // For SOC, only validate provided fields
-      for (const [field, value] of Object.entries(updatedSocFields)) {
-        if (value !== undefined) {
-          if (
-            ["manufacture_date", "purchase_date"].includes(field) &&
-            !isValidDate(value)
-          ) {
-            updateErrors.push(`${field} (got: "${value}")`);
-          } else if (!value && !["location", "available_at"].includes(field)) {
-            // location and available_at can be empty
-            updateErrors.push(field);
-          }
-        }
-      }
-    } else {
-      for (const [field, value] of Object.entries(updatedCocFields)) {
-        if (value !== undefined) {
-          if (
-            ["hire_start_date", "hire_end_date", "return_date"].includes(
-              field,
-            ) &&
-            !isValidDate(value)
-          ) {
-            updateErrors.push(`${field} (got: "${value}")`);
-          } else if (!value && !["return_date"].includes(field)) {
-            // return_date optional
-            updateErrors.push(field);
-          } else if (field === "free_days" && isNaN(value)) {
-            updateErrors.push("free_days (must be number)");
-          }
-        }
-      }
-    }
-
-    if (updateErrors.length > 0) {
-      console.warn("Update validation failed for fields:", updateErrors);
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        error: "Invalid update fields",
-        details: updateErrors.join(", "),
-      });
-    }
-
-    // Check for duplicate container_number if updating it
-    if (updates.container_number) {
-      const checkQuery =
-        "SELECT cid FROM container_master WHERE container_number = $1 AND status = 1 AND cid != $2";
-      const checkResult = await client.query(checkQuery, [
-        updates.container_number,
+    await client.query(
+      `UPDATE container_master
+       SET
+         container_number    = $1,
+         container_size      = $2,
+         container_type      = $3,
+         remarks             = $4,
+         available_at        = $5,
+         location            = $6,
+         derived_status      = $7,
+         updated_at          = NOW()
+       WHERE cid = $8`,
+      [
+        n(updates.container_number),
+        n(updates.container_size),
+        n(updates.container_type),
+        n(updates.remarks),
+        n(updates.available_at),
+        n(updates.location),
+        n(updates.derived_status),
         cid,
-      ]);
-      if (checkResult.rowCount > 0) {
-        await client.query("ROLLBACK");
-        return res
-          .status(409)
-          .json({ error: "Container number already exists" });
-      }
-    }
-
-    // Update master (core fields) - add updated_at if schema has it
-    const masterKeys = [
-      "container_number",
-      "container_size",
-      "container_type",
-      "remarks",
-    ];
-    const masterUpdates = Object.keys(updates).filter((key) =>
-      masterKeys.includes(key),
+      ],
     );
-    if (masterUpdates.length > 0) {
-      const setClause = masterUpdates
-        .map((key, index) => `${key} = $${index + 1}`)
-        .join(", ");
-      const values = masterUpdates.map((key) => updates[key]);
-      values.push(cid);
-      const updateQuery = `UPDATE container_master SET ${setClause} WHERE cid = $${values.length}`;
-      await client.query(updateQuery, values);
-    }
 
-    // Insert new status history entry for availability/location changes (instead of update, to support history)
-    if (updates.availability !== undefined || updates.location !== undefined) {
-      let columns = ["cid"];
-      let placeholders = ["$1"];
-      let qvalues = [cid];
-      let notes = "Status updated";
+    await client.query(
+      "UPDATE container_status SET location = $1 WHERE cid = $2",
+      [n(updates.location), cid],
+    );
 
-      let paramIndex = qvalues.length + 1;
+    const purchaseExists = await client.query(
+      `SELECT pid FROM container_purchase_details WHERE cid = $1`,
+      [cid],
+    );
 
-      if (updates.availability !== undefined) {
-        columns.push("availability");
-        placeholders.push(`$${paramIndex}`);
-        qvalues.push(updates.availability);
-        notes += ` availability to ${updates.availability}`;
-        paramIndex++;
-      }
+    const purchaseParams = [
+      n(updates.manufacture_date),
+      n(updates.purchase_date),
+      n(updates.purchase_price) ?? 0,
+      n(updates.purchase_from),
+      n(updates.owned_by),
+      n(updates.available_at),
+      n(updates.currency),
+      created_by,
+    ];
 
-      if (updates.location !== undefined) {
-        columns.push("location");
-        placeholders.push(`$${paramIndex}`);
-        qvalues.push(updates.location);
-        notes += ` location to ${updates.location}`;
-        paramIndex++;
-      }
-
-      columns.push("status_notes");
-      placeholders.push(`$${paramIndex}`);
-      qvalues.push(notes);
-      paramIndex++;
-
-      columns.push("created_by");
-      placeholders.push(`$${paramIndex}`);
-      qvalues.push(created_by);
-
-      const insertQuery = `INSERT INTO container_status (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`;
-      await client.query(insertQuery, qvalues);
-    }
-
-    // Conditional: Update purchase (SOC) or hire (COC) - use current owner_type
-    const effectiveOwnerType = updates.owner_type || currentOwnerType;
-    if (effectiveOwnerType === "soc") {
-      const purchaseKeys = [
-        "manufacture_date",
-        "purchase_date",
-        "purchase_price",
-        "purchase_from",
-        "owned_by",
-        "available_at",
-        "currency",
-      ];
-      const purchaseUpdates = Object.keys(updates).filter((key) =>
-        purchaseKeys.includes(key),
+    if (purchaseExists.rowCount > 0) {
+      await client.query(
+        `UPDATE container_purchase_details
+         SET
+           manufacture_date = $1,
+           purchase_date    = $2,
+           purchase_price   = $3,
+           purchase_from    = $4,
+           owned_by         = $5,
+           available_at     = $6,
+           currency         = $7,
+           created_by       = $8
+         WHERE cid = $9`,
+        [...purchaseParams, cid],
       );
-      if (purchaseUpdates.length > 0) {
-        // Normalize dates for update
-        const normManufactureDate = normalizeDate(updates.manufacture_date);
-        const normPurchaseDate = normalizeDate(updates.purchase_date);
-        const normAvailableAt = updates.available_at; // String, no normalize
-        const normalizedUpdates = {
-          ...updates,
-          manufacture_date: normManufactureDate,
-          purchase_date: normPurchaseDate,
-          available_at: normAvailableAt,
-        };
-        const setClause = purchaseUpdates
-          .map((key, index) => `${key} = $${index + 1}`)
-          .join(", ");
-        const values = purchaseUpdates.map((key) => normalizedUpdates[key]);
-        values.push(cid);
-        const updateQuery = `UPDATE container_purchase_details SET ${setClause} WHERE cid = $${values.length}`;
-        console.log("Updating SOC with normalized dates:", {
-          manufacture_date: normManufactureDate,
-          purchase_date: normPurchaseDate,
-          available_at: normAvailableAt,
-        });
-        await client.query(updateQuery, values);
-      }
     } else {
-      // COC (hired)
-      const hireKeys = [
-        "hire_start_date",
-        "hire_end_date",
-        "hired_by",
-        "return_date",
-        "free_days",
-        "place_of_loading",
-        "place_of_destination",
-      ];
-      const hireUpdates = Object.keys(updates).filter((key) =>
-        hireKeys.includes(key),
+      await client.query(
+        `INSERT INTO container_purchase_details
+           (cid, manufacture_date, purchase_date, purchase_price,
+            purchase_from, owned_by, available_at, currency, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [cid, ...purchaseParams],
       );
-      if (hireUpdates.length > 0) {
-        // Normalize dates for update
-        const normHireStartDate = normalizeDate(updates.hire_start_date);
-        const normHireEndDate = normalizeDate(updates.hire_end_date);
-        const normReturnDate = normalizeDate(updates.return_date);
-        const normalizedUpdates = {
-          ...updates,
-          hire_start_date: normHireStartDate,
-          hire_end_date: normHireEndDate,
-          return_date: normReturnDate,
-        };
-        const setClause = hireUpdates
-          .map((key, index) => `${key} = $${index + 1}`)
-          .join(", ");
-        const values = hireUpdates.map((key) => normalizedUpdates[key]);
-        values.push(cid);
-        const updateQuery = `UPDATE container_hire_details SET ${setClause} WHERE cid = $${values.length}`;
-        console.log("Updating COC with normalized dates:", {
-          hire_start_date: normHireStartDate,
-          hire_end_date: normHireEndDate,
-          return_date: normReturnDate,
-        });
-        await client.query(updateQuery, values);
-      }
+    }
+
+    const hireExists = await client.query(
+      `SELECT hid FROM container_hire_details WHERE cid = $1`,
+      [cid],
+    );
+
+    const hireParams = [
+      n(updates.hire_start_date),
+      n(updates.hire_end_date),
+      n(updates.hired_by),
+      n(updates.return_date),
+      n(updates.free_days),
+      n(updates.place_of_loading),
+      n(updates.place_of_destination),
+      created_by,
+    ];
+
+    if (hireExists.rowCount > 0) {
+      await client.query(
+        `UPDATE container_hire_details
+         SET
+           hire_start_date    = $1,
+           hire_end_date      = $2,
+           hired_by           = $3,
+           return_date        = $4,
+           free_days          = $5,
+           place_of_loading   = $6,
+           place_of_destination = $7,
+           created_by         = $8
+         WHERE cid = $9`,
+        [...hireParams, cid],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO container_hire_details
+           (cid, hire_start_date, hire_end_date, hired_by,
+            return_date, free_days, place_of_loading, place_of_destination, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [cid, ...hireParams],
+      );
     }
 
     await client.query("COMMIT");
 
-    console.log("Updated container:", cid);
-    res.json({ message: "Container updated" });
+    return res.status(200).json({
+      success: true,
+      message: "Container updated successfully",
+    });
   } catch (err) {
-    if (client) {
-      await client.query("ROLLBACK");
-    }
-    console.error("pool error:", err.message);
-    if (err.code === "23505") {
-      return res.status(409).json({ error: "Container number already exists" });
-    }
-    if (err.code === "23514") {
-      return res.status(400).json({
-        error:
-          "Invalid value for constrained field (e.g., owner_type or availability)",
-      });
-    }
-    if (err.code === "22007" || err.code === "22008") {
-      return res
-        .status(400)
-        .json({ error: "Invalid date format. Use YYYY-MM-DD." });
-    }
-    res
-      .status(500)
-      .json({ error: err.message || "Failed to update container" });
+    if (client) await client.query("ROLLBACK");
+    console.error("Container update failed:", err);
+    return res.status(500).json({
+      error: "Failed to update container",
+      details: err.message,
+    });
   } finally {
-    if (client) {
-      client.release();
-    }
+    if (client) client.release();
   }
 }
 
@@ -1435,27 +1310,27 @@ export async function getAllContainersForConsignment(req, res) {
       whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
       baseValues.push(owner_type);
     }
-    if (location) {
-      // FIXED: Better normalization to avoid double underscore
-      let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
-      if (normalizedLocation.endsWith("_port")) {
-        normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
-      } else if (normalizedLocation.includes("port")) {
-        normalizedLocation = normalizedLocation
-          .replace(/_port$/, "port")
-          .replace(/port$/, "_port"); // Handle edge cases
-      } else {
-        normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
-      }
-      if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
-        whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
-        baseValues.push(normalizedLocation);
-      } else {
-        return res.status(400).json({
-          error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
-        });
-      }
-    }
+    // if (location) {
+    //   // FIXED: Better normalization to avoid double underscore
+    //   let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
+    //   if (normalizedLocation.endsWith("_port")) {
+    //     normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
+    //   } else if (normalizedLocation.includes("port")) {
+    //     normalizedLocation = normalizedLocation
+    //       .replace(/_port$/, "port")
+    //       .replace(/port$/, "_port"); // Handle edge cases
+    //   } else {
+    //     normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
+    //   }
+    //   if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
+    //     whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
+    //     baseValues.push(normalizedLocation);
+    //   } else {
+    //     return res.status(400).json({
+    //       error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
+    //     });
+    //   }
+    // }
     let baseFrom = `
       FROM container_master cm
 

@@ -1,10 +1,5 @@
-// src/modules/options/routes.js
 import express from "express";
 import {
-  getShippers,
-  getConsignees,
-  getOrigins,
-  getDestinations,
   getBanks,
   getPaymentTypes,
   getVessels,
@@ -13,12 +8,9 @@ import {
   deleteVessel,
   getShippingLines,
   getCurrencies,
-  getStatuses,
-  getContainerStatuses,
   createPaymentType,
   updatePaymentType,
   deletePaymentType,
-  getPaymentTypeOptions,
   getCategories,
   createCategory,
   updateCategory,
@@ -38,10 +30,6 @@ import {
   createBank,
   updateBank,
   deleteBank,
-  createEtaConfig,
-  deleteEtaConfig,
-  getEtaConfigs,
-  updateEtaConfig,
   getAllStatus,
   updateStatus,
   addNewStatus,
@@ -50,30 +38,22 @@ import {
   getBugReports,
   updateBugReport,
   deleteBugReport,
+  getDashboardData,
 } from "./options.controllers.js";
 import { bugReportUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
 
-// Mount routes for dropdown options (without /crud for simple GET lists)
-router.get("/shippers", getShippers);
-router.get("/consignees", getConsignees);
-router.get("/origins", getOrigins);
-router.get("/destinations", getDestinations);
-router.get("/banks", getBanks); // Updated: Removed /crud for dropdown compatibility
-router.get("/payment-types", getPaymentTypeOptions); // For dropdown options
-router.get("/vessels", getVessels); // Updated: Removed /crud for dropdown compatibility
+router.get("/banks", getBanks);
+router.get("/vessels", getVessels);
 router.get("/shipping-lines", getShippingLines);
 router.get("/currencies", getCurrencies);
-router.get("/statuses", getStatuses);
-router.get("/container-statuses", getContainerStatuses);
 
-// CRUD routes (keep /crud where full list with actions is needed)
 router.get("/payment-types/crud", getPaymentTypes);
 router.post("/payment-types", createPaymentType);
 router.put("/payment-types/:id", updatePaymentType);
 router.delete("/payment-types/:id", deletePaymentType);
-router.get("/vessels/crud", getVessels); // Keep for full CRUD if needed, but primary is without /crud
+router.get("/vessels/crud", getVessels);
 router.post("/vessels", createVessel);
 router.put("/vessels/:id", updateVessel);
 router.delete("/vessels/:id", deleteVessel);
@@ -93,14 +73,10 @@ router.get("/thirdParty/crud", getThirdParties);
 router.post("/thirdParty", createThirdParty);
 router.put("/thirdParty/:id", updateThirdParty);
 router.delete("/thirdParty/:id", deleteThirdParty);
-router.get("/banks/crud", getBanks); // Keep for full CRUD if needed, but primary is without /crud
+router.get("/banks/crud", getBanks);
 router.post("/banks", createBank);
 router.put("/banks/:id", updateBank);
 router.delete("/banks/:id", deleteBank);
-router.post("/eta-configs", createEtaConfig);
-router.put("/eta-configs/:id", updateEtaConfig);
-router.delete("/eta-configs/:id", deleteEtaConfig);
-router.get("/eta-configs", getEtaConfigs);
 
 router.get("/allStatus", getAllStatus);
 router.put("/updateStatus/:id", updateStatus);
@@ -119,5 +95,7 @@ router.put(
   updateBugReport,
 );
 router.delete("/bug-report/:id", deleteBugReport);
+
+router.get("/dashboard", getDashboardData);
 
 export default router;

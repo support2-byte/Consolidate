@@ -1,6 +1,3 @@
-// routes/consignmentRoutes.js - Express Routes for Consignment Module
-// Usage: In your main app.js or index.js: app.use('/api/consignments', consignmentRoutes);
-
 import express from "express";
 import {
   getConsignments,
@@ -9,35 +6,240 @@ import {
   updateConsignment,
   deleteConsignment,
   getStatuses,
-} from "../consignment/consignment.controller.js"; // Adjust path as needed
-import {
   advanceStatus,
   changeConsignmentStatus,
-} from "../orders/order.controller.js"; // Import advanceStatus
+} from "../consignment/consignment.controller.js";
+
 const router = express.Router();
 
-// GET /api/consignments - Fetch all consignments (with pagination and filters)
+/**
+ * @swagger
+ * /api/consignments:
+ *   get:
+ *     summary: List all consignments
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of consignments
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Consignment'
+ */
 router.get("/", getConsignments);
 
-// GET /api/consignments/statuses - Fetch available statuses (with colors) - SPECIFIC ROUTE FIRST
-router.get("/statuses", getStatuses); // Moved UP: Before /:id to avoid interception
+/**
+ * @swagger
+ * /api/consignments/statuses:
+ *   get:
+ *     summary: List all possible consignment statuses
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of statuses
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/ConsignmentStatus'
+ */
+router.get("/statuses", getStatuses);
 
-// GET /api/consignments/:id - Fetch single consignment by ID - PARAMETRIC ROUTE LAST
+/**
+ * @swagger
+ * /api/consignments/{id}:
+ *   get:
+ *     summary: Get a consignment by ID
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Consignment found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       404:
+ *         description: Consignment not found
+ */
 router.get("/:id", getConsignmentById);
 
-// POST /api/consignments - Create new consignment
+/**
+ * @swagger
+ * /api/consignments:
+ *   post:
+ *     summary: Create a new consignment
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateConsignmentRequest'
+ *     responses:
+ *       201:
+ *         description: Consignment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       400:
+ *         description: Invalid input
+ */
 router.post("/", createConsignment);
-// PUT /api/consignments/:id - Full update consignment
+
+/**
+ * @swagger
+ * /api/consignments/{id}:
+ *   put:
+ *     summary: Update a consignment (full update)
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateConsignmentRequest'
+ *     responses:
+ *       200:
+ *         description: Consignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       404:
+ *         description: Consignment not found
+ */
 router.put("/:id", updateConsignment);
 
-// PATCH /api/consignments/:id - Partial update (general)
-router.patch("/:id", updateConsignment); // Reuse update for partial; adjust if separate needed
+/**
+ * @swagger
+ * /api/consignments/{id}:
+ *   patch:
+ *     summary: Update a consignment (partial update)
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateConsignmentRequest'
+ *     responses:
+ *       200:
+ *         description: Consignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       404:
+ *         description: Consignment not found
+ */
+router.patch("/:id", updateConsignment);
 
-// PATCH /api/consignments/:id/next - Advance status (workflow) - Note: PUT used; consider PATCH for partial
+/**
+ * @swagger
+ * /api/consignments/{id}/next:
+ *   put:
+ *     summary: Advance a consignment to its next status
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Consignment advanced to next status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       404:
+ *         description: Consignment not found
+ */
 router.put("/:id/next", advanceStatus);
+
+/**
+ * @swagger
+ * /api/consignments/{id}/status:
+ *   put:
+ *     summary: Set a consignment's status explicitly
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ChangeStatusRequest'
+ *     responses:
+ *       200:
+ *         description: Consignment status updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Consignment'
+ *       404:
+ *         description: Consignment not found
+ */
 router.put("/:id/status", changeConsignmentStatus);
 
-// DELETE /api/consignments/:id - Delete consignment
+/**
+ * @swagger
+ * /api/consignments/{id}:
+ *   delete:
+ *     summary: Delete a consignment
+ *     tags: [Consignments]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Consignment deleted
+ *       404:
+ *         description: Consignment not found
+ */
 router.delete("/:id", deleteConsignment);
 
 export default router;

@@ -1,820 +1,783 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import pool from "../../db/pool.js";
+import { getEffectivePermissions } from "../../services/getEffectivePermissions.js";
+import logger from "../../services/logger.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
-const NODE_ENV = process.env.NODE_ENV || "development";
-const IS_PRODUCTION = NODE_ENV === "production";
-
-const COOKIE_OPTIONS = {
-  httpOnly: true,
-  secure: IS_PRODUCTION,
-  sameSite: IS_PRODUCTION ? "none" : "lax",
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-  path: "/",
-};
+const ACCESS_TOKEN_TTL = "1d";
+const REFRESH_TOKEN_TTL_DAYS = 30;
 
 export async function register(req, res) {
-  const { email, password } = req.body ?? {};
-
-  // Basic validation
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
-  }
-
-  if (typeof email !== "string" || email.length > 255) {
-    return res.status(400).json({ error: "Invalid email format" });
-  }
-
-  if (password.length < 8) {
-    return res
-      .status(400)
-      .json({ error: "Password must be at least 8 characters" });
-  }
-
   try {
-    const hash = await bcrypt.hash(password, 12);
+    const { email, password, name } = req.body;
 
-    const { rows } = await pool.query(
-      `INSERT INTO users (email, password_hash, created_at)
-       VALUES ($1, $2, NOW())
-       RETURNING id, email`,
-      [email.trim().toLowerCase(), hash],
-    );
-
-    res.status(201).json({
-      success: true,
-      user: rows[0],
-    });
-  } catch (err) {
-    if (err.code === "23505") {
-      // unique violation
-      return res.status(409).json({ error: "Email already registered" });
+    if (!email || !password) {
+      logger.warn("Register attempt with missing fields");
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: "Email and password are required",
+      });
     }
 
-    console.error("[REGISTER] Error:", err.message);
-    res
-      .status(500)
-      .json({ error: "Registration failed. Please try again later." });
+    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [
+      email,
+    ]);
+
+    if (existing.rows.length > 0) {
+      logger.warn("Register attempt with already-taken email", { email });
+      return res.status(409).json({
+        success: false,
+        error: "EMAIL_TAKEN",
+        message: "An account with this email already exists",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, name)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, name, role, active, created_at`,
+      [email, passwordHash, name || null],
+    );
+
+    logger.info("User registered", { userId: result.rows[0].id, email });
+
+    return res.status(201).json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (err) {
+    logger.error("Register failed", { message: err.message, stack: err.stack });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
   }
 }
 
 export async function login(req, res) {
-  const { email, password } = req.body ?? {};
-
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
-  }
-
   try {
-    // in login function
-    const { rows } = await pool.query(
-      "SELECT id, email, password_hash, role FROM users WHERE email = $1",
-      [email.trim().toLowerCase()],
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      logger.warn("Login attempt with missing fields");
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: "Email and password are required",
+      });
+    }
+
+    const userResult = await pool.query(
+      `SELECT u.id, u.email, u.password_hash, u.active, u.role AS role_id, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role
+       WHERE u.email = $1`,
+      [email],
     );
-    const user = rows[0];
+
+    const user = userResult.rows[0];
+
     if (!user) {
-      return res.status(401).json({ error: "Invalid email or password" });
+      logger.warn("Login attempt for unknown email", { email });
+      return res.status(401).json({
+        success: false,
+        error: "INVALID_CREDENIALS".replace("ENIAL", "ENTIAL"),
+      });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password_hash);
-    if (!passwordMatch) {
-      return res.status(401).json({ error: "Invalid email or password" });
+    if (!user.active) {
+      logger.warn("Login attempt for disabled account", { userId: user.id });
+      return res.status(403).json({
+        success: false,
+        error: "ACCOUNT_DISABLED",
+      });
     }
 
-    const payload = {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-    };
+    const passwordMatches = await bcrypt.compare(password, user.password_hash);
 
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+    if (!passwordMatches) {
+      logger.warn("Login attempt with invalid password", { userId: user.id });
+      return res.status(401).json({
+        success: false,
+        error: "INVALID_CREDENTIALS",
+      });
+    }
 
-    res.cookie("token", token, COOKIE_OPTIONS);
+    const permissions = await getEffectivePermissions(user.id, user.role_id);
 
-    res.json({
-      success: true,
-      user: {
+    const accessToken = jwt.sign(
+      {
         id: user.id,
         email: user.email,
-        role: user.role,
+        roleId: user.role_id,
+        roleName: user.role_name,
+        permissions,
+      },
+      JWT_SECRET,
+      { algorithm: "HS256", expiresIn: ACCESS_TOKEN_TTL },
+    );
+
+    const refreshToken = crypto.randomBytes(48).toString("hex");
+    const expiresAt = new Date(
+      Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+    );
+
+    await pool.query(
+      `INSERT INTO refresh_token (user_id, token, expires_at)
+       VALUES ($1, $2, $3)`,
+      [user.id, refreshToken, expiresAt],
+    );
+
+    res.cookie("accessToken", accessToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+    });
+
+    logger.info("User logged in", {
+      userId: user.id,
+      roleName: user.role_name,
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: user.id,
+        email: user.email,
+        roleName: user.role_name,
+        permissions,
       },
     });
   } catch (err) {
-    console.error("[LOGIN] Error:", err.message);
-    res.status(500).json({ error: "Login failed. Please try again." });
+    logger.error("Login failed", { message: err.message, stack: err.stack });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
   }
 }
 
-// middleware/requireAdmin.js
-export function requireAdminRole(req, res, next) {
-  if (!req.user || req.user.role !== "admin") {
-    // assuming role in JWT payload
-    return res.status(403).json({ error: "Admin access required" });
+export async function refreshToken(req, res) {
+  try {
+    const incomingToken = req.cookies?.refreshToken;
+
+    if (!incomingToken) {
+      logger.warn("Refresh attempt with no token present");
+      return res.status(401).json({
+        success: false,
+        error: "REFRESH_TOKEN_MISSING",
+      });
+    }
+
+    const tokenResult = await pool.query(
+      `SELECT rt.id, rt.user_id, rt.expires_at, u.email, u.active, u.role AS role_id, r.name AS role_name
+       FROM refresh_token rt
+       JOIN users u ON u.id = rt.user_id
+       JOIN roles r ON r.id = u.role
+       WHERE rt.token = $1`,
+      [incomingToken],
+    );
+
+    const tokenRow = tokenResult.rows[0];
+
+    if (!tokenRow) {
+      logger.warn("Refresh attempt with invalid/unknown token");
+      return res.status(401).json({
+        success: false,
+        error: "INVALID_REFRESH_TOKEN",
+      });
+    }
+
+    if (new Date(tokenRow.expires_at) < new Date()) {
+      await pool.query("DELETE FROM refresh_token WHERE id = $1", [
+        tokenRow.id,
+      ]);
+      logger.info("Refresh token expired, removed", {
+        userId: tokenRow.user_id,
+      });
+      return res.status(401).json({
+        success: false,
+        error: "REFRESH_TOKEN_EXPIRED",
+      });
+    }
+
+    if (!tokenRow.active) {
+      await pool.query("DELETE FROM refresh_token WHERE id = $1", [
+        tokenRow.id,
+      ]);
+      logger.warn("Refresh attempt for disabled account", {
+        userId: tokenRow.user_id,
+      });
+      return res.status(403).json({
+        success: false,
+        error: "ACCOUNT_DISABLED",
+      });
+    }
+
+    const newRefreshToken = crypto.randomBytes(48).toString("hex");
+    const newExpiresAt = new Date(
+      Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+    );
+
+    await pool.query(
+      `UPDATE refresh_token SET token = $1, expires_at = $2 WHERE id = $3`,
+      [newRefreshToken, newExpiresAt, tokenRow.id],
+    );
+
+    const permissions = await getEffectivePermissions(
+      tokenRow.user_id,
+      tokenRow.role_id,
+    );
+
+    const accessToken = jwt.sign(
+      {
+        id: tokenRow.user_id,
+        email: tokenRow.email,
+        roleId: tokenRow.role_id,
+        roleName: tokenRow.role_name,
+        permissions,
+      },
+      JWT_SECRET,
+      { algorithm: "HS256", expiresIn: ACCESS_TOKEN_TTL },
+    );
+
+    res.cookie("accessToken", accessToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.cookie("refreshToken", newRefreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
+    });
+
+    logger.debug("Access token refreshed", { userId: tokenRow.user_id });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: tokenRow.user_id,
+        email: tokenRow.email,
+        roleName: tokenRow.role_name,
+        permissions,
+      },
+    });
+  } catch (err) {
+    logger.error("Token refresh failed", {
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
   }
-  next();
+}
+
+export async function logout(req, res) {
+  try {
+    const incomingToken = req.cookies?.refreshToken;
+
+    if (incomingToken) {
+      await pool.query("DELETE FROM refresh_token WHERE token = $1", [
+        incomingToken,
+      ]);
+    }
+
+    res.clearCookie("accessToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+
+    logger.info("User logged out", { userId: req.user?.id });
+
+    return res.status(200).json({
+      success: true,
+      message: "Logged out",
+    });
+  } catch (err) {
+    logger.error("Logout failed", { message: err.message, stack: err.stack });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
+  }
 }
 
 export async function me(req, res) {
-  const token = req.cookies.token;
-
-  if (!token) {
-    return res
-      .status(401)
-      .json({ success: false, error: "No authentication token found" });
-  }
-
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    console.log("[/me] Authenticated payload:", payload);
-
-    // Fetch user with role name (string) from roles table
-    const userRes = await pool.query(
-      `
-      SELECT 
-        u.id,
-        u.email,
-        u.name AS display_name,          -- or just u.name if that's the field
-        COALESCE(r.name, 'unknown') AS role,
-        u.active
-      FROM users u
-      LEFT JOIN roles r ON r.id = u.role
-      WHERE u.id = $1
-    `,
-      [payload.id],
+    const result = await pool.query(
+      `SELECT u.id, u.email, u.name, u.active, u.created_at, u.role AS role_id, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role
+       WHERE u.id = $1`,
+      [req.user.id],
     );
 
-    if (userRes.rows.length === 0) {
-      return res.status(404).json({ success: false, error: "User not found" });
+    const user = result.rows[0];
+
+    if (!user) {
+      logger.warn("Profile lookup for missing user", { userId: req.user.id });
+      return res.status(404).json({
+        success: false,
+        error: "USER_NOT_FOUND",
+      });
     }
 
-    const dbUser = userRes.rows[0];
-
-    res.json({
+    return res.status(200).json({
       success: true,
-      user: {
-        id: dbUser.id,
-        email: dbUser.email,
-        name: dbUser.display_name || null,
-        role: dbUser.role, // Now returns "viewer", "staff", etc. (string)
-        active: dbUser.active,
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        active: user.active,
+        createdAt: user.created_at,
+        roleId: user.role_id,
+        roleName: user.role_name,
+        permissions: req.user.permissions,
       },
     });
   } catch (err) {
-    console.warn("[/me] Token verification failed:", err.message);
-
-    if (err.name === "TokenExpiredError") {
-      res.clearCookie("token", COOKIE_OPTIONS);
-      return res.status(401).json({ success: false, error: "Session expired" });
-    }
-
-    res
-      .status(401)
-      .json({ success: false, error: "Invalid authentication token" });
+    logger.error("Fetching current user failed", {
+      userId: req.user?.id,
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
   }
 }
 
 export async function getUsers(req, res) {
-  console.log("GET /admin/users - query:", req.query);
-
-  const token = req.cookies.token;
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      error: "No authentication token found",
-    });
-  }
-
   try {
-    const {
-      role, // can be string like 'staff' or number ID
-      active,
-      search,
-      page = "1",
-      limit = "20",
-      sort = "name:asc",
-    } = req.query;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 20, 1),
+      100,
+    );
+    const offset = (page - 1) * limit;
+    const search = req.query.search?.trim();
+    const roleId = req.query.roleId ? parseInt(req.query.roleId, 10) : null;
 
-    // ─── Pagination ────────────────────────────────
-    const pageNum = parseInt(page, 10) || 1;
-    const limitNum = parseInt(limit, 10) || 20;
-    const offset = (pageNum - 1) * limitNum;
-
-    // ─── Sorting ───────────────────────────────────
-    let [sortField = "name", sortDir = "asc"] = sort.split(":");
-    sortField = sortField.trim().toLowerCase();
-    sortDir = sortDir.trim().toLowerCase();
-
-    const fieldMapping = {
-      name: "u.name",
-      email: "u.email",
-      role: "r.name", // ← changed from r.code
-      active: "u.active",
-      created_at: "u.created_at",
-    };
-
-    let dbSortField = fieldMapping[sortField] || "u.name";
-    const orderDir = ["desc", "d", "-1"].includes(sortDir) ? "DESC" : "ASC";
-
-    // ─── Filters ───────────────────────────────────
     const conditions = [];
-    const values = [];
-    let paramIndex = 1;
+    const params = [];
 
-    // Role filter – support both ID (number) and name (string)
-    if (role) {
-      if (!isNaN(parseInt(role, 10))) {
-        conditions.push(`u.role = $${paramIndex++}`);
-        values.push(parseInt(role, 10));
-      } else {
-        conditions.push(`r.name = $${paramIndex++}`);
-        values.push(role.trim());
-      }
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(
+        `(u.email ILIKE $${params.length} OR u.name ILIKE $${params.length})`,
+      );
     }
 
-    if (active !== undefined) {
-      const activeBool = active === "true" || active === "1" || active === true;
-      conditions.push(`u.active = $${paramIndex++}`);
-      values.push(activeBool);
+    if (roleId) {
+      params.push(roleId);
+      conditions.push(`u.role = $${params.length}`);
     }
 
-    if (search?.trim()) {
-      const searchTerm = `%${search.trim()}%`;
-      conditions.push(`
-        (u.email ILIKE $${paramIndex} 
-         OR u.name ILIKE $${paramIndex})
-      `);
-      values.push(searchTerm);
-      paramIndex++;
-    }
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
 
-    // ─── Base query with JOIN ──────────────────────
-    let query = `
-  SELECT 
-    u.id,
-    u.name,
-    u.email,
-    COALESCE(r.name, 'unknown') AS role,
-    u.active,
-    u.created_at,
-    u.updated_at
-  FROM users u
-  LEFT JOIN roles r ON r.id = u.role
-`;
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM users u ${whereClause}`,
+      params,
+    );
 
-    if (conditions.length > 0) {
-      query += ` WHERE ${conditions.join(" AND ")}`;
-    }
+    const total = parseInt(countResult.rows[0].count, 10);
 
-    query += `
-  ORDER BY ${dbSortField} ${orderDir}
-  LIMIT $${paramIndex++} 
-  OFFSET $${paramIndex}
-`;
-    values.push(limitNum, offset);
+    params.push(limit, offset);
 
-    // Optional: keep the log, but without comment in SQL
-    console.log("[getUsers] Executing query:", query.trim());
-    console.log("[getUsers] Values:", values);
-    const { rows } = await pool.query(query, values);
+    const usersResult = await pool.query(
+      `SELECT u.id, u.email, u.name, u.active, u.created_at, u.role AS role_id, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role
+       ${whereClause}
+       ORDER BY u.id DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
 
-    // ─── Total count ───────────────────────────────
-    let countQuery = `
-      SELECT COUNT(*) 
-      FROM users u
-      LEFT JOIN roles r ON r.id = u.role
-    `;
-    if (conditions.length > 0) {
-      countQuery += ` WHERE ${conditions.join(" AND ")}`;
-    }
+    logger.debug("Fetched user list", { page, limit, total });
 
-    const countValues = values.slice(0, values.length - 2); // exclude LIMIT & OFFSET
-    const { rows: countRows } = await pool.query(countQuery, countValues);
-    const total = parseInt(countRows[0].count, 10);
-
-    const rolesResult = await pool.query(`
-  SELECT
-    id,
-    name,
-    COALESCE(description, name) AS label
-  FROM roles
-  ORDER BY id ASC
-`);
-
-    // ─── Response ──────────────────────────────────
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      users: rows,
-      roles: rolesResult.rows,
+      data: usersResult.rows,
       pagination: {
+        page,
+        limit,
         total,
-        page: pageNum,
-        limit: limitNum,
-        pages: Math.ceil(total / limitNum),
+        totalPages: Math.ceil(total / limit),
       },
     });
   } catch (err) {
-    console.error("[GET /admin/users] Error:", {
+    logger.error("Fetching users failed", {
       message: err.message,
-      code: err.code,
-      detail: err.detail,
-      stack: err.stack?.substring(0, 300) + "...", // truncate long stack
-      query: err.query || "N/A", // if pg error
+      stack: err.stack,
     });
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: "Failed to fetch users",
-      // message: err.message,   // uncomment only in dev
+      error: "INTERNAL_ERROR",
     });
   }
 }
-// export async function getUsers(req, res) {
-//   console.log("GET /admin/users - query:", req.query);
-
-//   const token = req.cookies.token;
-//   if (!token) {
-//     return res.status(401).json({
-//       success: false,
-//       error: "No authentication token found"
-//     });
-//   }
-
-//   try {
-//     const {
-//       role,          // can be string like 'staff' or number ID
-//       active,
-//       search,
-//       page = '1',
-//       limit = '20',
-//       sort = 'name:asc',
-//     } = req.query;
-
-//     // ─── Pagination ────────────────────────────────
-//     const pageNum  = parseInt(page, 10) || 1;
-//     const limitNum = parseInt(limit, 10) || 20;
-//     const offset   = (pageNum - 1) * limitNum;
-
-//     // ─── Sorting ───────────────────────────────────
-//     let [sortField = 'name', sortDir = 'asc'] = sort.split(':');
-//     sortField = sortField.trim().toLowerCase();
-//     sortDir   = sortDir.trim().toLowerCase();
-
-//     const fieldMapping = {
-//       name:       'u.name',
-//       email:      'u.email',
-//       role:       'r.name',         // ← changed from r.code
-//       active:     'u.active',
-//       created_at: 'u.created_at',
-//     };
-
-//     let dbSortField = fieldMapping[sortField] || 'u.name';
-//     const orderDir  = ['desc', 'd', '-1'].includes(sortDir) ? 'DESC' : 'ASC';
-
-//     // ─── Filters ───────────────────────────────────
-//     const conditions = [];
-//     const values = [];
-//     let paramIndex = 1;
-
-//     // Role filter – support both ID (number) and name (string)
-//     if (role) {
-//       if (!isNaN(parseInt(role, 10))) {
-//         conditions.push(`u.role = $${paramIndex++}`);
-//         values.push(parseInt(role, 10));
-//       } else {
-//         conditions.push(`r.name = $${paramIndex++}`);
-//         values.push(role.trim());
-//       }
-//     }
-
-//     if (active !== undefined) {
-//       const activeBool = active === 'true' || active === '1' || active === true;
-//       conditions.push(`u.active = $${paramIndex++}`);
-//       values.push(activeBool);
-//     }
-
-//     if (search?.trim()) {
-//       const searchTerm = `%${search.trim()}%`;
-//       conditions.push(`
-//         (u.email ILIKE $${paramIndex}
-//          OR u.name ILIKE $${paramIndex})
-//       `);
-//       values.push(searchTerm);
-//       paramIndex++;
-//     }
-
-//     // ─── Base query with JOIN ──────────────────────
-// let query = `
-//   SELECT
-//     u.id,
-//     u.name,
-//     u.email,
-//     COALESCE(r.name, 'unknown') AS role,
-//     u.active,
-//     u.created_at,
-//     u.updated_at
-//   FROM users u
-//   LEFT JOIN roles r ON r.id = u.role
-// `;
-
-// if (conditions.length > 0) {
-//   query += ` WHERE ${conditions.join(' AND ')}`;
-// }
-
-// query += `
-//   ORDER BY ${dbSortField} ${orderDir}
-//   LIMIT $${paramIndex++}
-//   OFFSET $${paramIndex}
-// `;
-// values.push(limitNum, offset);
-
-// // Optional: keep the log, but without comment in SQL
-// console.log('[getUsers] Executing query:', query.trim());
-// console.log('[getUsers] Values:', values);
-//     const { rows } = await pool.query(query, values);
-
-//     // ─── Total count ───────────────────────────────
-//     let countQuery = `
-//       SELECT COUNT(*)
-//       FROM users u
-//       LEFT JOIN roles r ON r.id = u.role
-//     `;
-//     if (conditions.length > 0) {
-//       countQuery += ` WHERE ${conditions.join(' AND ')}`;
-//     }
-
-//     const countValues = values.slice(0, values.length - 2); // exclude LIMIT & OFFSET
-//     const { rows: countRows } = await pool.query(countQuery, countValues);
-//     const total = parseInt(countRows[0].count, 10);
-
-//     // ─── Response ──────────────────────────────────
-//     res.status(200).json({
-//       success: true,
-//       users: rows,
-//       pagination: {
-//         total,
-//         page: pageNum,
-//         limit: limitNum,
-//         pages: Math.ceil(total / limitNum),
-//       }
-//     });
-
-//   } catch (err) {
-//     console.error('[GET /admin/users] Error:', {
-//       message: err.message,
-//       code: err.code,
-//       detail: err.detail,
-//       stack: err.stack?.substring(0, 300) + '...', // truncate long stack
-//       query: err.query || 'N/A', // if pg error
-//     });
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to fetch users',
-//       // message: err.message,   // uncomment only in dev
-//     });
-//   }
-// }
 
 export async function createUser(req, res) {
-  console.log("POST /admin/users - body:", req.body);
-
-  const token = req.cookies.token;
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      error: "No authentication token",
-    });
-  }
-
   try {
-    const { name, email, password, role = "staff", active = true } = req.body;
+    const { email, password, name, roleId, active } = req.body;
 
-    // Validation
-    if (!email || typeof email !== "string" || !email.includes("@")) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Valid email is required" });
-    }
-
-    if (!password || typeof password !== "string" || password.length < 8) {
+    if (!email || !password || !roleId) {
+      logger.warn("Create user attempt with missing fields", {
+        actorId: req.user?.id,
+      });
       return res.status(400).json({
         success: false,
-        error: "Password is required and must be at least 8 characters",
+        error: "VALIDATION_ERROR",
+        message: "Email, password and roleId are required",
       });
     }
 
-    if (!name || typeof name !== "string" || name.trim() === "") {
-      return res
-        .status(400)
-        .json({ success: false, error: "Name is required" });
+    const roleResult = await pool.query("SELECT id FROM roles WHERE id = $1", [
+      roleId,
+    ]);
+
+    if (roleResult.rows.length === 0) {
+      logger.warn("Create user attempt with invalid role", {
+        actorId: req.user?.id,
+        roleId,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "INVALID_ROLE",
+      });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [
+      email,
+    ]);
 
-    // ─── Use your real column name here ─────────────────────────────
-    const query = `
-      INSERT INTO users (
-        name,
+    if (existing.rows.length > 0) {
+      logger.warn("Create user attempt with already-taken email", {
+        actorId: req.user?.id,
         email,
-        password_hash,          -- ← changed from password
-        role,
-        active,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-      RETURNING 
-        id, 
-        name, 
-        email, 
-        role, 
-        active, 
-        created_at, 
-        updated_at
-    `;
-
-    const values = [
-      name.trim(),
-      email.trim(),
-      hashedPassword,
-      role,
-      active === true || active === "true" || active === 1,
-    ];
-
-    const { rows } = await pool.query(query, values);
-
-    res.status(201).json({
-      success: true,
-      user: rows[0],
-    });
-  } catch (err) {
-    console.error("[POST /admin/users] Error:", err.stack || err.message);
-
-    if (err.code === "23505") {
+      });
       return res.status(409).json({
         success: false,
-        error: "Email already exists",
+        error: "EMAIL_TAKEN",
       });
     }
 
-    res.status(500).json({
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, name, role, active)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, email, name, role AS role_id, active, created_at`,
+      [email, passwordHash, name || null, roleId, active ?? true],
+    );
+
+    logger.info("User created by admin", {
+      actorId: req.user?.id,
+      newUserId: result.rows[0].id,
+      roleId,
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: result.rows[0],
+    });
+  } catch (err) {
+    logger.error("Create user failed", {
+      actorId: req.user?.id,
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
       success: false,
-      error: "Failed to create user",
+      error: "INTERNAL_ERROR",
     });
   }
 }
+
 export async function updateUser(req, res) {
-  const { id } = req.params;
-  console.log(`PUT /admin/users/${id} - body:`, req.body);
-
-  const token = req.cookies.token;
-  if (!token) {
-    return res
-      .status(401)
-      .json({ success: false, error: "No authentication token" });
-  }
-
   try {
-    const { email, name, role, active, password } = req.body;
-
-    if (Object.keys(req.body).length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: "No fields to update" });
-    }
+    const { id } = req.params;
+    const { name, email, roleId, active } = req.body;
 
     const updates = [];
-    const values = [];
-    let paramIndex = 1;
+    const params = [];
 
-    // Email
     if (email !== undefined) {
-      if (
-        typeof email !== "string" ||
-        !email.includes("@") ||
-        email.trim() === ""
-      ) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Valid email required" });
-      }
-      const check = await pool.query(
-        "SELECT 1 FROM users WHERE email = $1 AND id != $2",
-        [email.trim(), id],
-      );
-      if (check.rowCount > 0) {
-        return res
-          .status(409)
-          .json({ success: false, error: "Email already in use" });
-      }
-      updates.push(`email = $${paramIndex}`);
-      values.push(email.trim());
-      paramIndex++;
+      params.push(email);
+      updates.push(`email = $${params.length}`);
     }
 
-    // Name
     if (name !== undefined) {
-      if (typeof name !== "string" || name.trim() === "") {
-        return res
-          .status(400)
-          .json({ success: false, error: "Name cannot be empty" });
-      }
-      updates.push(`name = $${paramIndex}`);
-      values.push(name.trim());
-      paramIndex++;
+      params.push(name);
+      updates.push(`name = $${params.length}`);
     }
 
-    // Role – handle both string name and numeric ID
-    if (role !== undefined) {
-      let roleId;
+    if (roleId !== undefined) {
+      const roleResult = await pool.query(
+        "SELECT id FROM roles WHERE id = $1",
+        [roleId],
+      );
 
-      if (typeof role === "number" || !isNaN(parseInt(role, 10))) {
-        // Already a number/ID
-        roleId = parseInt(role, 10);
-      } else if (typeof role === "string") {
-        // String name → lookup ID
-        const roleRes = await pool.query(
-          "SELECT id FROM roles WHERE name = $1",
-          [role.trim()],
-        );
-        if (roleRes.rows.length === 0) {
-          return res.status(400).json({
-            success: false,
-            error: `Invalid role name "${role}". Allowed: admin, manager, staff, viewer`,
-          });
-        }
-        roleId = roleRes.rows[0].id;
-      } else {
-        return res
-          .status(400)
-          .json({ success: false, error: "Invalid role format" });
+      if (roleResult.rows.length === 0) {
+        logger.warn("Update user attempt with invalid role", {
+          actorId: req.user?.id,
+          targetUserId: id,
+          roleId,
+        });
+        return res.status(400).json({
+          success: false,
+          error: "INVALID_ROLE",
+        });
       }
 
-      // Optional: validate roleId exists (extra safety)
-      const idCheck = await pool.query("SELECT 1 FROM roles WHERE id = $1", [
-        roleId,
-      ]);
-      if (idCheck.rowCount === 0) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Invalid role ID" });
-      }
-
-      updates.push(`role = $${paramIndex}`);
-      values.push(roleId);
-      paramIndex++;
+      params.push(roleId);
+      updates.push(`role = $${params.length}`);
     }
 
-    // Active
     if (active !== undefined) {
-      const isActive =
-        active === true || active === "true" || active === 1 || active === "1";
-      updates.push(`active = $${paramIndex}`);
-      values.push(!!isActive);
-      paramIndex++;
-    }
-
-    // Password (hash it!)
-    if (password !== undefined) {
-      if (typeof password !== "string" || password.length < 8) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Password min 8 chars" });
-      }
-      // TODO: Replace with real hashing
-      const hashedPassword = password; // ← REPLACE WITH bcrypt.hash(password, 12)
-      updates.push(`password_hash = $${paramIndex}`);
-      values.push(hashedPassword);
-      paramIndex++;
+      params.push(active);
+      updates.push(`active = $${params.length}`);
     }
 
     if (updates.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, error: "No valid fields to update" });
+      logger.warn("Update user attempt with no fields", {
+        actorId: req.user?.id,
+        targetUserId: id,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: "No fields provided to update",
+      });
     }
 
-    updates.push(`updated_at = NOW()`);
-    values.push(id);
+    updates.push(`updated_at = now()`);
+    params.push(id);
 
-    const query = `
-      UPDATE users
-      SET ${updates.join(", ")}
-      WHERE id = $${paramIndex}
-      RETURNING id, name, email, role, active, created_at, updated_at
-    `;
+    const result = await pool.query(
+      `UPDATE users SET ${updates.join(", ")}
+       WHERE id = $${params.length}
+       RETURNING id, email, name, role AS role_id, active, created_at, updated_at`,
+      params,
+    );
 
-    const { rows } = await pool.query(query, values);
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, error: "User not found" });
+    if (result.rows.length === 0) {
+      logger.warn("Update user attempt for missing user", {
+        actorId: req.user?.id,
+        targetUserId: id,
+      });
+      return res.status(404).json({
+        success: false,
+        error: "USER_NOT_FOUND",
+      });
     }
 
-    res.status(200).json({
+    logger.info("User updated", {
+      actorId: req.user?.id,
+      targetUserId: id,
+      fieldsUpdated: Object.keys(req.body || {}),
+    });
+
+    return res.status(200).json({
       success: true,
-      user: rows[0],
+      data: result.rows[0],
     });
   } catch (err) {
-    console.error(`[PUT /admin/users/${id}] Error:`, err.message, err.stack);
-
-    if (err.code === "22P02") {
-      // invalid input syntax
-      return res
-        .status(400)
-        .json({ success: false, error: "Invalid data format" });
-    }
-
     if (err.code === "23505") {
-      return res
-        .status(409)
-        .json({ success: false, error: "Email already in use" });
+      logger.warn("Update user failed due to duplicate email", {
+        actorId: req.user?.id,
+        targetUserId: req.params?.id,
+      });
+      return res.status(409).json({
+        success: false,
+        error: "EMAIL_TAKEN",
+      });
     }
 
-    res.status(500).json({
+    logger.error("Update user failed", {
+      actorId: req.user?.id,
+      targetUserId: req.params?.id,
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
       success: false,
-      error: "Failed to update user",
+      error: "INTERNAL_ERROR",
     });
   }
 }
-export async function adminForceResetPassword(req, res) {
-  // IMPORTANT: This should be protected by admin-only middleware!
-  // Example:
-  // if (!req.user || req.user.role !== 'admin') {
-  //   return res.status(403).json({ error: "Admin access required" });
-  // }
 
-  const { email, newPassword, confirmPassword } = req.body ?? {};
-
-  // ── Input validation ───────────────────────────────────────────────
-  if (!email || !newPassword || !confirmPassword) {
-    return res.status(400).json({
-      error: "Email, new password, and password confirmation are required",
-    });
-  }
-
-  if (typeof newPassword !== "string" || newPassword.length < 8) {
-    return res.status(400).json({
-      error: "New password must be at least 8 characters long",
-    });
-  }
-
-  if (newPassword !== confirmPassword) {
-    return res.status(400).json({
-      error: "New password and confirmation do not match",
-    });
-  }
-
+export async function deleteUser(req, res) {
   try {
-    // ── Find target user ──────────────────────────────────────────────
-    const { rows } = await pool.query(
-      "SELECT id, email FROM users WHERE email = $1",
-      [email.trim().toLowerCase()],
+    const { id } = req.params;
+
+    if (req.user.id === parseInt(id, 10)) {
+      logger.warn("User attempted to delete own account", {
+        userId: req.user.id,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "CANNOT_DELETE_SELF",
+      });
+    }
+
+    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [id]);
+
+    const result = await pool.query(
+      "DELETE FROM users WHERE id = $1 RETURNING id",
+      [id],
     );
 
-    const targetUser = rows[0];
-    console.log("Target user for password reset:", targetUser);
-    // ── Hash the new password ─────────────────────────────────────────
-    const saltRounds = 12;
-    const passwordHash = await bcrypt.hash(newPassword, saltRounds);
+    if (result.rows.length === 0) {
+      logger.warn("Delete user attempt for missing user", {
+        actorId: req.user?.id,
+        targetUserId: id,
+      });
+      return res.status(404).json({
+        success: false,
+        error: "USER_NOT_FOUND",
+      });
+    }
 
-    // ── Perform update ────────────────────────────────────────────────
-    await pool.query(
-      `
-      UPDATE users
-      SET 
-        password_hash = $1,
-        updated_at = NOW()
-        -- reset_password_token   = NULL,   -- uncomment if you use reset tokens
-        -- reset_password_expires = NULL
-      WHERE id = $2
-      `,
-      [passwordHash, targetUser.id],
-    );
+    logger.info("User deleted", { actorId: req.user?.id, targetUserId: id });
 
-    // Optional: Audit log (very recommended for this kind of powerful action)
-    // if (req.user?.id) {
-    //   await pool.query(
-    //     `INSERT INTO admin_actions (admin_id, action, target_user_id, details, created_at)
-    //      VALUES ($1, $2, $3, $4, NOW())`,
-    //     [req.user.id, 'FORCE_PASSWORD_RESET', targetUser.id, `via admin panel`,]
-    //   );
-    // }
-
-    // ── Success response ──────────────────────────────────────────────
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: `Password successfully updated for ${targetUser.email}`,
-      user: {
-        id: targetUser.id,
-        email: targetUser.email,
-      },
+      message: "User deleted",
     });
   } catch (err) {
-    console.error("[ADMIN FORCE RESET PASSWORD] Error:", err.message);
-    res.status(500).json({
-      error: "Server error – password update failed. Please try again later.",
+    logger.error("Delete user failed", {
+      actorId: req.user?.id,
+      targetUserId: req.params?.id,
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
     });
   }
 }
-export function logout(req, res) {
-  res.clearCookie("token", COOKIE_OPTIONS);
-  res.json({ success: true, message: "Logged out successfully" });
+
+export async function adminForceResetPassword(req, res) {
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 8) {
+      logger.warn("Admin password reset attempt with invalid password length", {
+        actorId: req.user?.id,
+        targetUserId: id,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "VALIDATION_ERROR",
+        message: "newPassword must be at least 8 characters",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+
+    const result = await pool.query(
+      `UPDATE users SET password_hash = $1, updated_at = now()
+       WHERE id = $2
+       RETURNING id, email`,
+      [passwordHash, id],
+    );
+
+    if (result.rows.length === 0) {
+      logger.warn("Admin password reset attempt for missing user", {
+        actorId: req.user?.id,
+        targetUserId: id,
+      });
+      return res.status(404).json({
+        success: false,
+        error: "USER_NOT_FOUND",
+      });
+    }
+
+    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [id]);
+
+    logger.info("Password reset by admin, sessions revoked", {
+      actorId: req.user?.id,
+      targetUserId: id,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password reset",
+    });
+  } catch (err) {
+    logger.error("Admin password reset failed", {
+      actorId: req.user?.id,
+      targetUserId: req.params?.id,
+      message: err.message,
+      stack: err.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
+  }
+}
+
+export async function logoutAll(req, res) {
+  try {
+    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [
+      req.user.id,
+    ]);
+
+    res.clearCookie("accessToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Logged out from all devices",
+    });
+  } catch (err) {
+    console.error("[LOGOUT_ALL]", err);
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+    });
+  }
 }

@@ -3,7 +3,6 @@ import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
 
-// Configure Cloudinary (credentials from .env / Render env vars)
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -13,13 +12,10 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => {
-    // Optional: dynamic folder, e.g. per user or order
-    // You can access req.user if auth middleware ran before upload
     const userId = req.user?.id || "anonymous";
     const folder = `consolidate-app/orders/${userId}`;
 
-    // You can customize per field if needed
-    let resource_type = "auto"; // handles image / raw (pdf, doc, etc.)
+    let resource_type = "auto";
 
     return {
       folder,
@@ -35,14 +31,13 @@ const storage = new CloudinaryStorage({
         "xlsx",
       ],
       resource_type,
-      // Optional: public_id: `${file.fieldname}-${Date.now()}`,
     };
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
       "image/jpeg",

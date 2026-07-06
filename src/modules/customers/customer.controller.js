@@ -160,9 +160,7 @@ export async function getCustomers(req, res) {
 
     query += ` ORDER BY created_time DESC LIMIT $${params.length + 1}`;
     params.push(parseInt(limit));
-    console.log("query limits and search", query, params);
     const { rows } = await pool.query(query, params);
-    // console.log('row data',rows)
     res.json(rows);
   } catch (err) {
     console.error("Error fetching customers:", err);
@@ -212,7 +210,6 @@ export async function deleteCustomer(req, res) {
 export async function saveContacts(req, res) {
   const { zoho_id, contacts } = req.body;
 
-  // Input validation
   if (!zoho_id) {
     console.error("Missing zoho_id in request body");
     return res.status(400).json({ error: "zoho_id is required" });
@@ -230,9 +227,7 @@ export async function saveContacts(req, res) {
       console.error("Failed to retrieve Zoho access token");
       throw new Error("Failed to retrieve Zoho access token");
     }
-    console.log(`Zoho access token: ${token}`);
 
-    // Verify zoho_id exists in Zoho Books
     try {
       const zohoResponse = await axios.get(
         `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
@@ -244,7 +239,6 @@ export async function saveContacts(req, res) {
           params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
         },
       );
-      console.log(`Verified zoho_id: ${zoho_id}`, zohoResponse.data.contact);
     } catch (err) {
       console.error(
         `Invalid zoho_id: ${zoho_id}`,
@@ -350,7 +344,6 @@ export async function saveContacts(req, res) {
       });
     }
 
-    console.log("Contacts saved successfully:", updatedContacts);
     res.status(200).json(updatedContacts);
   } catch (err) {
     console.error("Save contacts failed:", {
@@ -403,17 +396,8 @@ export async function uploadDocument(req, res) {
     return res.status(400).json({ error: "File is required" });
   }
 
-  console.log("Received file:", {
-    path: file.path,
-    originalname: file.originalname,
-    mimetype: file.mimetype,
-    size: file.size,
-    zoho_id,
-  });
-
   try {
     await fs.promises.access(file.path, fs.constants.R_OK);
-    console.log(`File accessible at: ${file.path}`);
   } catch (err) {
     console.error(`File not accessible at ${file.path}:`, err);
     return res
@@ -428,10 +412,9 @@ export async function uploadDocument(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    console.log(`Verifying contact_id: ${zoho_id}`);
     try {
       const contactResponse = await axios.get(
-        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`, // Update to .eu or your region
+        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
         {
           headers: {
             Authorization: `Zoho-oauthtoken ${token}`,
@@ -440,7 +423,6 @@ export async function uploadDocument(req, res) {
           params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
         },
       );
-      console.log(`Contact verified:`, contactResponse.data.contact);
     } catch (err) {
       console.error(
         `Invalid contact_id: ${zoho_id}`,
@@ -452,7 +434,6 @@ export async function uploadDocument(req, res) {
       });
     }
 
-    console.log(`Uploading document with contact_id: ${zoho_id}`);
     const formData = new FormData();
     const fileBuffer = await fs.promises.readFile(file.path);
     formData.append("document", fileBuffer, {
@@ -472,14 +453,9 @@ export async function uploadDocument(req, res) {
         },
         params: {
           organization_id: process.env.ZOHO_BOOKS_ORG_ID,
-          contact_id: zoho_id, // Add as query parameter
+          contact_id: zoho_id,
         },
       },
-    );
-
-    console.log(
-      "Zoho API full response:",
-      JSON.stringify(response.data, null, 2),
     );
 
     if (!response.data.documents) {
@@ -488,11 +464,7 @@ export async function uploadDocument(req, res) {
     }
 
     const document = response.data.documents;
-    console.log(
-      `Uploaded document contact_id: ${document.contact_id || "not set"}`,
-    );
 
-    // Verify association by fetching document
     const verifyResponse = await axios.get(
       `https://www.zohoapis.com/books/v3/documents/${document.document_id}`,
       {
@@ -503,12 +475,6 @@ export async function uploadDocument(req, res) {
         params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
       },
     );
-    console.log(
-      "Document verification response:",
-      JSON.stringify(verifyResponse.data, null, 2),
-    );
-
-    console.log(`File retained at: ${file.path}`);
 
     res.status(200).json({
       document_id: document.document_id,
@@ -529,7 +495,6 @@ export async function uploadDocument(req, res) {
       zoho_id,
       filename: file?.originalname,
     });
-    console.log(`File retained on error at: ${file?.path}`);
     res.status(err.response?.status || 500).json({
       error: err.response?.data?.message || "Failed to upload document",
       details: err.response?.data || err.message,
@@ -552,12 +517,8 @@ export async function getDocuments(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    console.log(
-      `Fetching documents for zoho_id: ${zoho_id}, organization_id: ${process.env.ZOHO_BOOKS_ORG_ID}`,
-    );
-
     const response = await axios.get(
-      `https://www.zohoapis.com/books/v3/documents`, // Update to .eu or your region
+      `https://www.zohoapis.com/books/v3/documents`,
       {
         headers: {
           Authorization: `Zoho-oauthtoken ${token}`,
@@ -568,11 +529,6 @@ export async function getDocuments(req, res) {
           contact_id: zoho_id,
         },
       },
-    );
-
-    console.log(
-      "Zoho API documents response:",
-      JSON.stringify(response.data, null, 2),
     );
 
     const documents = (response.data.documents || []).map((doc) => ({
@@ -587,7 +543,6 @@ export async function getDocuments(req, res) {
       uploaded_by: doc.uploaded_by || "User",
     }));
 
-    console.log("Mapped documents:", documents);
     res.status(200).json(documents);
   } catch (err) {
     console.error("Error fetching documents:", {
@@ -625,7 +580,6 @@ export async function updateDocument(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    console.log(`Updating document ${document_id} for zoho_id: ${zoho_id}`);
     const response = await axios.put(
       `https://www.zohoapis.com/books/v3/documents/${document_id}`, // Update to .eu or your region
       { document_name },
@@ -636,11 +590,6 @@ export async function updateDocument(req, res) {
         },
         params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
       },
-    );
-
-    console.log(
-      "Zoho API update response:",
-      JSON.stringify(response.data, null, 2),
     );
 
     const document = response.data.document;
@@ -733,7 +682,6 @@ export async function deleteDocument(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    console.log(`Deleting document ${document_id} for zoho_id: ${zoho_id}`);
     await axios.delete(
       `https://www.zohoapis.com/books/v3/documents/${document_id}`, // Update to .eu or your region
       {
@@ -783,7 +731,6 @@ function isEmptyAddress(addrObj) {
 }
 
 export async function updateCustomer(req, res) {
-  console.log("Received request to update customer:", req.body);
   const { zoho_id } = req.params;
   const {
     contact_name,
@@ -806,11 +753,6 @@ export async function updateCustomer(req, res) {
       return res.status(404).json({ error: "Customer not found" });
     }
     const currentCustomer = rows[0];
-    console.log("Current DB customer:", {
-      zoho_id,
-      contact_type: currentCustomer.contact_type,
-      type: currentCustomer.type,
-    });
 
     // Check for Zoho-updatable changes (exclude local fields)
     const zohoChanges = { contact_name, email, zoho_notes, address };
@@ -852,7 +794,6 @@ export async function updateCustomer(req, res) {
 
       // Only call Zoho if payload has at least one field
       if (Object.keys(payload).length > 0) {
-        console.log("Updating Zoho with payload:", payload);
         const zohoRes = await axios.put(
           `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
           payload,
@@ -866,17 +807,9 @@ export async function updateCustomer(req, res) {
         );
 
         zohoCustomer = { ...currentCustomer, ...zohoRes.data.contact }; // Merge updated fields
-        console.log("Zoho updated:", {
-          contact_id: zohoCustomer.contact_id,
-          contact_type: zohoCustomer.contact_type,
-        });
       } else {
-        console.log("No valid Zoho changes; skipping API call");
       }
     } else {
-      console.log(
-        "Only local changes (type, associated_by, system_notes); skipping Zoho",
-      );
     }
 
     // Fixed: Check for empty address before stringifying
@@ -952,7 +885,6 @@ export async function updateCustomer(req, res) {
       ],
     );
 
-    console.log("Updated local customer record:", updatedRows[0]);
     res.json(updatedRows[0]);
   } catch (err) {
     // ... (fallback and error handling unchanged)
@@ -962,14 +894,12 @@ export async function updateCustomer(req, res) {
       status: err.response?.status,
     });
 
-    // Fallback: If Zoho error, update local fields in DB anyway
     if (
       err.response?.status >= 400 &&
       (type !== undefined ||
         associated_by !== undefined ||
         system_notes !== undefined)
     ) {
-      console.log("Zoho failed; forcing local DB update");
       try {
         const { rows: fallbackRows } = await pool.query(
           `UPDATE customers SET 
@@ -988,7 +918,6 @@ export async function updateCustomer(req, res) {
             zoho_id,
           ],
         );
-        console.log("Fallback DB update:", fallbackRows[0]);
         return res.json(fallbackRows[0]);
       } catch (fallbackErr) {
         console.error("Fallback DB update failed:", fallbackErr);
@@ -1003,7 +932,6 @@ export async function updateCustomer(req, res) {
 }
 // Include createCustomer and getCustomerById from previous messages
 export async function createCustomer(req, res) {
-  console.log("Received request to create customer:", req.body);
   const {
     contact_name,
     email,
@@ -1082,7 +1010,6 @@ export async function createCustomer(req, res) {
         zohoCustomer.updated_by_name || null,
       ],
     );
-    console.log("Created new customer:", rows[0]);
     res.status(201).json(rows[0]);
   } catch (err) {
     console.error("Zoho API error:", err.response?.data || err.message);
@@ -1215,7 +1142,6 @@ export async function getCustomerById(req, res) {
           null,
       ],
     );
-    console.log("Updated local customer record:", updatedRows[0]);
     res.json({
       ...updatedRows[0],
       contact_persons: contactPersons,

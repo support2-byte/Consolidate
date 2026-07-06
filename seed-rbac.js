@@ -14,10 +14,10 @@ const ROLES = {
 };
 
 const ACTIONS = [
-  { code: 'view', name: 'View / Read' },
-  { code: 'create', name: 'Create / Add' },
-  { code: 'edit', name: 'Edit / Update' },
-  { code: 'delete', name: 'Delete / Remove' },
+  { code: "view", name: "View / Read" },
+  { code: "create", name: "Create / Add" },
+  { code: "edit", name: "Edit / Update" },
+  { code: "delete", name: "Delete / Remove" },
 ];
 
 const ROLE_MODULES = {
@@ -29,8 +29,8 @@ const ROLE_MODULES = {
     "orders",
     "consignments",
     "tracking",
-    "users",              // manage users
-    "settings",           // full settings
+    "users", // manage users
+    "settings", // full settings
     "payment-types",
     "categories",
     "vessels",
@@ -39,7 +39,7 @@ const ROLE_MODULES = {
     "third-parties",
     "eta-setup",
     "barcode-print",
-    "notifications"       // ← ADDED HERE for admin
+    "notifications", // ← ADDED HERE for admin
   ],
   [ROLES.MANAGER]: [
     "dashboard",
@@ -49,18 +49,16 @@ const ROLE_MODULES = {
     "orders",
     "consignments",
     "tracking",
-    "users",              // can see / maybe limited edit
+    "users", // can see / maybe limited edit
     // "notifications"    // ← optional: add if managers should see it
   ],
-  [ROLES.STAFF]: [
-    "dashboard",
-    "orders",
-    "consignments",
-    "tracking",
-  ],
+  [ROLES.STAFF]: ["dashboard", "orders", "consignments", "tracking"],
   [ROLES.VIEWER]: [
     "dashboard",
-    "tracking",           // read-only
+    "tracking",
+    "orders",
+    "containers",
+    "consignments",
   ],
 };
 
@@ -74,7 +72,7 @@ async function seed() {
         `INSERT INTO permission_actions (code, name) 
          VALUES ($1, $2) 
          ON CONFLICT (code) DO NOTHING`,
-        [action.code, action.name]
+        [action.code, action.name],
       );
     }
     console.log("Permission actions seeded.");
@@ -85,26 +83,28 @@ async function seed() {
         `INSERT INTO roles (name) 
          VALUES ($1) 
          ON CONFLICT (name) DO NOTHING`,
-        [ROLES[roleKey]]
+        [ROLES[roleKey]],
       );
     }
     console.log("Roles seeded.");
 
     // 3. Insert unique modules from ROLE_MODULES
     const allModules = new Set();
-    Object.values(ROLE_MODULES).forEach(mods => mods.forEach(m => allModules.add(m)));
+    Object.values(ROLE_MODULES).forEach((mods) =>
+      mods.forEach((m) => allModules.add(m)),
+    );
 
     for (const mod of allModules) {
       const displayName = mod
-        .split('-')
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' ');
+        .split("-")
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ");
 
       await pool.query(
         `INSERT INTO modules (code, name) 
          VALUES ($1, $2) 
          ON CONFLICT (code) DO NOTHING`,
-        [mod, displayName]
+        [mod, displayName],
       );
     }
     console.log("Modules seeded:", Array.from(allModules).join(", "));
@@ -113,10 +113,9 @@ async function seed() {
     for (const roleKey in ROLE_MODULES) {
       const roleName = ROLES[roleKey];
 
-      const roleRes = await pool.query(
-        `SELECT id FROM roles WHERE name = $1`,
-        [roleName]
-      );
+      const roleRes = await pool.query(`SELECT id FROM roles WHERE name = $1`, [
+        roleName,
+      ]);
       const roleId = roleRes.rows[0]?.id;
       if (!roleId) {
         console.warn(`Role not found: ${roleName}`);
@@ -126,7 +125,7 @@ async function seed() {
       for (const modCode of ROLE_MODULES[roleKey]) {
         const modRes = await pool.query(
           `SELECT id FROM modules WHERE code = $1`,
-          [modCode]
+          [modCode],
         );
         const modId = modRes.rows[0]?.id;
         if (!modId) {
@@ -149,7 +148,7 @@ async function seed() {
         for (const actionCode of actionsToAssign) {
           const actionRes = await pool.query(
             `SELECT id FROM permission_actions WHERE code = $1`,
-            [actionCode]
+            [actionCode],
           );
           const actionId = actionRes.rows[0]?.id;
           if (!actionId) {
@@ -161,7 +160,7 @@ async function seed() {
             `INSERT INTO role_permissions (role_id, module_id, action_id)
              VALUES ($1, $2, $3)
              ON CONFLICT DO NOTHING`,
-            [roleId, modId, actionId]
+            [roleId, modId, actionId],
           );
         }
       }
