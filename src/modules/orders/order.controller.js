@@ -147,7 +147,7 @@ export async function createOrder(req, res) {
       `INSERT INTO orders (
         booking_ref, status, rgl_booking_number, place_of_loading, point_of_origin,
         final_destination, place_of_delivery, order_remarks, attachments
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       RETURNING id, booking_ref, status, created_at, created_by, updated_by`,
       [
         b.booking_ref,
