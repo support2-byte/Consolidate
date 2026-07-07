@@ -1335,12 +1335,10 @@ export async function createConsignment(req, res) {
 
     const containerErrors = validateContainers(input.containers);
     if (containerErrors.length > 0) {
-      return res
-        .status(400)
-        .json({
-          error: "Container validation failed",
-          details: containerErrors,
-        });
+      return res.status(400).json({
+        error: "Container validation failed",
+        details: containerErrors,
+      });
     }
 
     const dbData = {
@@ -1472,12 +1470,10 @@ export async function createConsignment(req, res) {
       );
     });
 
-    res
-      .status(201)
-      .json({
-        message: "Consignment created successfully",
-        data: newConsignment,
-      });
+    res.status(201).json({
+      message: "Consignment created successfully",
+      data: newConsignment,
+    });
   } catch (err) {
     console.error("Error creating consignment:", err);
 
@@ -2250,18 +2246,20 @@ export async function advanceStatus(req, res) {
         await client.query(
           `
           INSERT INTO order_tracking
-            (
-              order_id,
-              sender_id,
-              sender_ref,
-              receiver_id,
-              container_id,
-              consignment_number,
-              status,
-              old_status,
-              item_ref,
-              created_by
-            )
+          (
+            order_id,
+            sender_id,
+            sender_ref,
+            receiver_id,
+            container_id,
+            consignment_number,
+            status,
+            old_status,
+            item_ref,
+            eta,
+            etd,
+            created_by
+          )
           SELECT
             cah.order_id,
             ot.sender_id,
@@ -2272,24 +2270,27 @@ export async function advanceStatus(req, res) {
             $1,
             $2,
             oi.item_ref,
-            $3
-            FROM container_assignment_history cah
-            JOIN consignments c
+            $3,
+            $3,
+            $4
+          FROM container_assignment_history cah
+          JOIN consignments c
             ON c.id = cah.consignment_id
-            JOIN order_items oi
+          JOIN order_items oi
             ON oi.id = cah.detail_id
-            LEFT JOIN LATERAL (
-              SELECT sender_id, sender_ref
-                FROM order_tracking
-                WHERE item_ref = oi.item_ref
-                ORDER BY created_time DESC
+          LEFT JOIN LATERAL (
+            SELECT sender_id, sender_ref
+            FROM order_tracking
+            WHERE item_ref = oi.item_ref
+            ORDER BY created_time DESC
             LIMIT 1
-            ) ot ON true
-            WHERE cah.consignment_id = $4
+          ) ot ON TRUE
+          WHERE cah.consignment_id = $5
           `,
           [
             syncedStatus,
             currentStatus,
+            consignmentEta,
             req.user?.username || req.user?.email || "system",
             numericId,
           ],
@@ -2362,6 +2363,7 @@ export async function advanceStatus(req, res) {
     });
   }
 }
+
 export async function changeConsignmentStatus(req, res) {
   let syncOrderIds = [];
   let consignmentEta = null;
@@ -2523,6 +2525,8 @@ export async function changeConsignmentStatus(req, res) {
           status,
           old_status,
           item_ref,
+          eta,
+          etd,
           created_by
         )
         SELECT
@@ -2535,12 +2539,14 @@ export async function changeConsignmentStatus(req, res) {
           $1,
           $2,
           oi.item_ref,
-          $3
+          $3,
+          $3,
+          $4
         FROM container_assignment_history cah
         JOIN consignments c
-        ON c.id = cah.consignment_id
+          ON c.id = cah.consignment_id
         JOIN order_items oi
-        ON oi.id = cah.detail_id
+          ON oi.id = cah.detail_id
         LEFT JOIN LATERAL (
           SELECT
             sender_id,
@@ -2550,11 +2556,12 @@ export async function changeConsignmentStatus(req, res) {
           ORDER BY ot.created_time DESC
           LIMIT 1
         ) ot ON TRUE
-        WHERE cah.consignment_id = $4
+        WHERE cah.consignment_id = $5
         `,
         [
           syncedStatus,
           currentStatus,
+          consignmentEta,
           req.user?.username || req.user?.email || req.user?.id || "system",
           numericId,
         ],

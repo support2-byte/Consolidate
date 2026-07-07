@@ -106,19 +106,19 @@ export async function createOrder(req, res) {
 
     const duplicateCheck = await client.query(
       `
-        SELECT
-          EXISTS(
-            SELECT 1
-            FROM orders
-            WHERE booking_ref = $1
-          ) AS booking_ref_exists,
+  SELECT
+    EXISTS(
+      SELECT 1
+      FROM orders
+      WHERE booking_ref = $1
+    ) AS booking_ref_exists,
 
-          EXISTS(
-            SELECT 1
-            FROM orders
-            WHERE rgl_booking_number = $2
-          ) AS rgl_booking_exists
-    `,
+    EXISTS(
+      SELECT 1
+      FROM orders
+      WHERE rgl_booking_number = $2
+    ) AS rgl_booking_exists
+  `,
       [b.booking_ref, b.rgl_booking_number],
     );
 
@@ -267,6 +267,8 @@ export async function createOrder(req, res) {
           owner.ref || null,
           receiverId,
           item.status || "Order Created",
+          normEta,
+          normEtd || normEta,
           req.user?.username || req.user?.email || req.user?.id || "system",
           itemRef,
         ]);
@@ -274,8 +276,18 @@ export async function createOrder(req, res) {
 
       for (const row of trackingRows) {
         await client.query(
-          `INSERT INTO order_tracking (order_id, sender_id, sender_ref, receiver_id, status, created_by, item_ref)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          `INSERT INTO order_tracking (
+            order_id,
+            sender_id,
+            sender_ref,
+            receiver_id,
+            status,
+            eta,
+            etd,
+            created_by,
+            item_ref
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           row,
         );
       }
@@ -578,6 +590,24 @@ export async function updateOrder(req, res) {
       }
 
       receiverIdMap[String(i)] = receiverId;
+
+      if (etd) {
+        await client.query(
+          `
+          UPDATE order_tracking
+             SET etd = $1
+           WHERE id = (
+             SELECT id
+             FROM order_tracking
+             WHERE order_id = $2
+               AND receiver_id = $3
+             ORDER BY created_time DESC
+             LIMIT 1
+           )
+        `,
+          [etd, id, receiverId],
+        );
+      }
 
       // Order Items for this receiver
       const itemsForThisReceiver = incomingOrderItems.filter(
@@ -883,8 +913,8 @@ export const getOrders = async (req, res) => {
 
         COALESCE(receiver_data.receivers, '[]'::jsonb) AS receivers,
 
-        COALESCE(receiver_data.total_items, 0) AS total_items,
-        COALESCE(receiver_data.total_weight, 0) AS total_weight
+        COALESCE(order_totals.total_items, 0) AS total_items,
+        COALESCE(order_totals.total_weight, 0) AS total_weight
 
       FROM orders o
 
@@ -898,6 +928,7 @@ export const getOrders = async (req, res) => {
               'id', r.id,
               'receiverName', r.receiver_name,
               'status', r.status,
+              'eta', r.eta,
 
               'shippingdetails',
               COALESCE(
@@ -913,6 +944,9 @@ export const getOrders = async (req, res) => {
                       'itemRef', oi.item_ref,
                       'status', oi.consignment_status,
 
+                      'trackingEta', ot.eta,
+                      'trackingStatus', ot.status,
+
                       'containerDetails',
                       COALESCE(
                         (
@@ -925,7 +959,7 @@ export const getOrders = async (req, res) => {
                               ),
 
                               'status',
-                              COALESCE(cs.availability, 'Created'),
+                              cm.status,
 
                               'assign_total_box',
                               COALESCE(oi.assigned_boxes::text, '0'),
@@ -948,14 +982,6 @@ export const getOrders = async (req, res) => {
                           JOIN container_master cm
                             ON cm.container_number = container_num
 
-                          LEFT JOIN LATERAL (
-                            SELECT availability
-                            FROM container_status
-                            WHERE cid = cm.cid
-                            ORDER BY sid DESC
-                            LIMIT 1
-                          ) cs ON true
-
                           WHERE r2.id = oi.receiver_id
                         ),
                         '[]'::jsonb
@@ -964,25 +990,36 @@ export const getOrders = async (req, res) => {
                     ORDER BY oi.id
                   )
                   FROM order_items oi
+                  LEFT JOIN LATERAL (
+                    SELECT ot.eta, ot.status
+                    FROM order_tracking ot
+                    WHERE ot.receiver_id = r.id
+                      AND ot.item_ref = oi.item_ref
+                    ORDER BY ot.id DESC
+                    LIMIT 1
+                  ) ot ON true
                   WHERE oi.receiver_id = r.id
                 ),
                 '[]'::jsonb
               )
             )
             ORDER BY r.id
-          ) AS receivers,
-
-          COALESCE(SUM(oi.total_number),0) AS total_items,
-          COALESCE(SUM(oi.weight),0) AS total_weight
+          ) AS receivers
 
         FROM receivers r
-
-        LEFT JOIN order_items oi
-          ON oi.receiver_id = r.id
 
         WHERE r.order_id = o.id
 
       ) receiver_data ON true
+
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(oi.total_number),0) AS total_items,
+          COALESCE(SUM(oi.weight),0) AS total_weight
+        FROM receivers r
+        JOIN order_items oi ON oi.receiver_id = r.id
+        WHERE r.order_id = o.id
+      ) order_totals ON true
 
       ${whereClause}
 
@@ -1327,8 +1364,6 @@ export async function getOrderById(req, res) {
   try {
     const { id } = req.params;
 
-    console.log("[getOrderById] Raw ID received:", id);
-
     const numericId = parseInt(id, 10);
     if (isNaN(numericId) || numericId <= 0) {
       return res.status(400).json({
@@ -1412,62 +1447,60 @@ export async function getOrderById(req, res) {
         sd_full.shippingdetails
       FROM receivers r
       LEFT JOIN LATERAL (
-        SELECT json_agg(
-          json_build_object(
-            'id',                oi.id,
-            'order_id',          oi.order_id,
-            'category',          COALESCE(oi.category, ''),
-            'subcategory',       COALESCE(oi.subcategory, ''),
-            'type',              COALESCE(oi.type, ''),
-            'pickupLocation',    COALESCE(oi.pickup_location, ''),
-            'deliveryAddress',   COALESCE(oi.delivery_address, ''),
-            'totalNumber',       COALESCE(oi.total_number, 0)::int,
-            'weight',            COALESCE(oi.weight, 0)::numeric,
-            'totalWeight',       COALESCE(oi.total_weight, 0)::numeric,
-            'itemRef',           COALESCE(oi.item_ref, ''),
-            'consignmentStatus', COALESCE(oi.consignment_status, ''),
-            'shippingLine',      COALESCE(oi.shipping_line, ''),
-            'containerDetails',  ${containerDetailsSub},
-            'remainingItems',    GREATEST(0, 
-              COALESCE(oi.total_number, 0)::int - COALESCE((
-                SELECT SUM((cd->>'assign_total_box')::int)
-                FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd
-              ), 0)
-            )::int
-          ) ORDER BY oi.id
-        ) AS shippingdetails
-        FROM order_items oi
-        WHERE oi.receiver_id = r.id
-      ) sd_full ON true
+      SELECT json_agg(
+        json_build_object(
+          'id',                oi.id,
+          'order_id',          oi.order_id,
+          'category',          COALESCE(oi.category, ''),
+          'subcategory',       COALESCE(oi.subcategory, ''),
+          'type',              COALESCE(oi.type, ''),
+          'pickupLocation',    COALESCE(oi.pickup_location, ''),
+          'deliveryAddress',   COALESCE(oi.delivery_address, ''),
+          'totalNumber',       COALESCE(oi.total_number, 0)::int,
+          'weight',            COALESCE(oi.weight, 0)::numeric,
+          'totalWeight',       COALESCE(oi.total_weight, 0)::numeric,
+          'itemRef',           COALESCE(oi.item_ref, ''),
+
+          -- Get latest values from order_tracking
+          'status',            COALESCE(ot.status, oi.consignment_status, ''),
+          'eta',               TO_CHAR(ot.eta, 'YYYY-MM-DD'),
+          'etd',               TO_CHAR(ot.etd, 'YYYY-MM-DD'),
+
+          'shippingLine',      COALESCE(oi.shipping_line, ''),
+          'containerDetails',  ${containerDetailsSub},
+          'remainingItems',    GREATEST(
+             0,
+            COALESCE(oi.total_number, 0)::int -
+            COALESCE((
+              SELECT SUM((cd->>'assign_total_box')::int)
+              FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd
+            ), 0)
+          )::int
+        )
+        ORDER BY oi.id
+      ) AS shippingdetails
+      FROM order_items oi
+
+      LEFT JOIN LATERAL (
+        SELECT status, eta, etd
+        FROM order_tracking t
+        WHERE t.receiver_id = r.id
+          AND t.item_ref = oi.item_ref
+        ORDER BY t.created_time DESC
+        LIMIT 1
+      ) ot ON TRUE
+
+      WHERE oi.receiver_id = r.id
+    ) sd_full ON TRUE
       WHERE r.order_id = $1
       ORDER BY r.id
     `;
 
     const receiversResult = await client.query(receiversQuery, [numericId]);
 
-    const STATUS_MAP = {
-      "under processing": "Under Processing",
-      "ready for loading": "Ready for Loading",
-      "loaded into container": "Loaded Into Container",
-      "shipment processing": "Shipment Processing",
-      "shipment in transit": "Shipment In Transit",
-      "arrived at facility": "Arrived at Facility",
-      "ready for delivery": "Ready for Delivery",
-      "shipment delivered": "Shipment Delivered",
-      "order created": "Order Created",
-      created: "Order Created",
-      occupied: "",
-    };
-
     let receivers = receiversResult.rows.map((row) => {
-      const normalizedStatus =
-        STATUS_MAP[row.status?.toLowerCase()?.trim()] ??
-        row.status ??
-        "Order Created";
-
       return {
         ...row,
-        status: normalizedStatus,
         marksAndNumber: row.marksAndNumber || "",
         receiverMarksNumber: row.marksAndNumber || "",
         shippingDetails: row.shippingdetails || [],
@@ -1480,9 +1513,8 @@ export async function getOrderById(req, res) {
             return [];
           }
         })(),
-        eta: row.eta ? new Date(row.eta).toISOString().split("T")[0] : "",
-
-        etd: row.etd ? new Date(row.etd).toISOString().split("T")[0] : "",
+        eta: row.eta || "",
+        etd: row.etd || "",
       };
     });
 
@@ -1517,6 +1549,7 @@ export async function getOrderById(req, res) {
       });
     });
 
+    // Drop-off details per receiver
     const dropOffResult = await client.query(
       `
       SELECT 
@@ -1547,6 +1580,7 @@ export async function getOrderById(req, res) {
       drop_off_details: dropOffMap.get(r.id) || [],
     }));
 
+    // Assignment history
     const historyResult = await client.query(
       `
       SELECT h.*, cm.container_number
@@ -1558,13 +1592,16 @@ export async function getOrderById(req, res) {
       [numericId],
     );
 
+    // Parse JSONB fields safely
     let parsedAttachments = [];
     try {
       parsedAttachments =
         typeof orderRow.attachments === "string"
           ? JSON.parse(orderRow.attachments)
           : orderRow.attachments || [];
-    } catch (e) {}
+    } catch (e) {
+      // ignore malformed attachments
+    }
 
     let parsedGatepass = [];
     try {
@@ -1572,7 +1609,9 @@ export async function getOrderById(req, res) {
         typeof orderRow.gatepass === "string"
           ? JSON.parse(orderRow.gatepass)
           : orderRow.gatepass || [];
-    } catch (e) {}
+    } catch (e) {
+      // ignore malformed gatepass
+    }
 
     const formattedOrderRow = {
       ...orderRow,
@@ -3336,8 +3375,6 @@ export async function updateSpecificItemsStatus(req, res) {
     forceRecalcEta = false,
   } = req.body || {};
 
-  const created_by = req.user?.id || "system";
-
   if (!Array.isArray(itemRefs) || itemRefs.length === 0) {
     return res
       .status(400)
@@ -3353,26 +3390,28 @@ export async function updateSpecificItemsStatus(req, res) {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    // 1. Validate & normalize status
-    const trimmedStatus = (status || "").trim().toLowerCase();
-    const validStatuses = [
-      "ready for loading",
-      "loaded into container",
-      "shipment processing",
-      "shipment in transit",
-      "under processing",
-      "arrived at facility",
-      "ready for delivery",
-      "shipment delivered",
-    ];
+    // 1. Validate & normalize status against statuses table
+    const trimmedStatus = (status || "").trim();
 
-    if (!trimmedStatus || !validStatuses.includes(trimmedStatus)) {
-      throw new Error(
-        `Invalid status. Allowed: ${validStatuses.map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(", ")}`,
-      );
+    if (!trimmedStatus) {
+      throw new Error("Status is required");
     }
 
-    const normalizedStatus = validStatuses.find((s) => s === trimmedStatus);
+    const statusResult = await client.query(
+      `SELECT order_status
+       FROM statuses
+       WHERE status = true
+         AND order_status ILIKE $1
+       ORDER BY sorting_number ASC
+       LIMIT 1`,
+      [trimmedStatus],
+    );
+
+    if (statusResult.rowCount === 0) {
+      throw new Error(`Invalid status: "${trimmedStatus}"`);
+    }
+
+    const normalizedStatus = statusResult.rows[0].order_status;
 
     // 2. Update order_items
     let extraWhere = "";
@@ -3439,25 +3478,22 @@ export async function updateSpecificItemsStatus(req, res) {
       }
     }
 
-    // 4. Optional force ETA recalculation (placeholder)
+    const { eta: calculatedEta } = await calculateETA(client, normalizedStatus);
+    const calculatedEtd = calculatedEta;
+
     if (forceRecalcEta) {
       for (const rid of affectedReceiverIds) {
-        // Replace with your real ETA logic when available
-        const etaResult = {
-          eta: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        };
         await client.query(
           `
           UPDATE receivers 
              SET eta = $1, updated_at = CURRENT_TIMESTAMP 
            WHERE id = $2
         `,
-          [etaResult.eta, rid],
+          [calculatedEta, rid],
         );
       }
     }
 
-    // 5. Update order-level min ETA
     const minEtaRes = await client.query(
       `SELECT MIN(eta) AS min_eta FROM receivers WHERE order_id = $1`,
       [Number(orderId)],
@@ -3470,27 +3506,59 @@ export async function updateSpecificItemsStatus(req, res) {
       );
     }
 
-    // 6. Log each change
+    let createdByLabel = "system";
+    if (req.user?.id) {
+      const userRes = await client.query(
+        `SELECT email FROM users WHERE id = $1`,
+        [req.user.id],
+      );
+      createdByLabel = userRes.rows[0]?.email || "system";
+    }
+
     for (const row of updatedRows) {
+      const lastTrackingRes = await client.query(
+        `
+        SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_number, status
+        FROM order_tracking
+        WHERE order_id = $1
+          AND receiver_id = $2
+          AND item_ref = $3
+        ORDER BY created_time DESC
+        LIMIT 1
+      `,
+        [Number(orderId), row.receiver_id, row.item_ref],
+      );
+
+      const last = lastTrackingRes.rows[0] || {};
+
       await client.query(
         `
         INSERT INTO order_tracking 
-          (order_id, receiver_id, item_ref, status, created_by, created_time)
-        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+          (order_id, sender_id, sender_ref, receiver_id, receiver_ref,
+           container_id, consignment_number, status, old_status,
+           item_ref, eta, etd, created_by, created_time)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP)
       `,
         [
           Number(orderId),
+          last.sender_id ?? null,
+          last.sender_ref ?? null,
           row.receiver_id,
-          row.item_ref,
+          last.receiver_ref ?? null,
+          last.container_id ?? null,
+          last.consignment_number ?? null,
           normalizedStatus,
-          created_by,
+          last.status ?? null,
+          row.item_ref,
+          calculatedEta,
+          calculatedEtd,
+          createdByLabel,
         ],
       );
     }
 
     await client.query("COMMIT");
 
-    // 7. Fetch order info (shared for all notifications)
     const orderResult = await pool.query(
       `
       SELECT 
@@ -3514,19 +3582,17 @@ export async function updateSpecificItemsStatus(req, res) {
         : order.place_of_delivery || order.place_of_loading || "—";
 
     const templateBase = {
-      statusLabel:
-        normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
-      statusMsg: getStatusMessage(normalizedStatus), // assume this exists
+      statusLabel: normalizedStatus,
+      statusMsg: getStatusMessage(normalizedStatus),
       refId: order.booking_ref || "—",
       orderId: orderId,
       route: routeDisplay,
       etaFormatted: order.eta_formatted || "—",
       lastUpdated: new Date(),
       trackLink: "https://consolidatetracking.onrender.com/",
-      currentStatus: normalizedStatus, // used for trigger check
+      currentStatus: normalizedStatus,
     };
 
-    // 8. Fetch people to notify
     const peopleRes = await pool.query(
       `
       -- Sender
@@ -3556,9 +3622,6 @@ export async function updateSpecificItemsStatus(req, res) {
 
     const people = peopleRes.rows;
 
-    console.log(`Notifying ${people.length} parties for order ${orderId}`);
-
-    // 9. Send emails conditionally
     const emailPromises = [];
 
     for (const person of people) {
@@ -3566,9 +3629,8 @@ export async function updateSpecificItemsStatus(req, res) {
 
       const isSender = person.party === "sender";
 
-      // Determine notification type
       const notificationType = isSender
-        ? "order-status-update" // or 'order-created' for new orders
+        ? "order-status-update"
         : "order-status-update";
 
       const templateData = {
@@ -3577,10 +3639,6 @@ export async function updateSpecificItemsStatus(req, res) {
           ? "Valued Customer"
           : person.name?.trim() || "Receiver",
       };
-
-      console.log(
-        `Preparing ${notificationType} email for ${person.party} (${person.email})`,
-      );
 
       //     emailPromises.push(
       // //  sendShipmentEmail(person.email, templateData, notificationType)
@@ -3608,6 +3666,8 @@ export async function updateSpecificItemsStatus(req, res) {
         receiverId: r.receiver_id,
         status: r.consignment_status,
       })),
+      eta: calculatedEta,
+      etd: calculatedEtd,
       notifiedCount: people.length,
       message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`,
     });
@@ -3636,6 +3696,14 @@ export async function getOrderByItemRef(req, res) {
   const pattern = `%${ref.trim().toUpperCase()}%`;
 
   try {
+    const { rows: statusRows } = await pool.query(
+      `SELECT order_status
+       FROM statuses
+       WHERE status = true
+       ORDER BY sorting_number ASC`,
+    );
+    const statusSequence = statusRows.map((s) => s.order_status);
+
     const query = `
       SELECT 
         o.id AS order_id,
@@ -3644,32 +3712,43 @@ export async function getOrderByItemRef(req, res) {
         o.place_of_delivery,
         r.id AS receiver_id,
         r.status AS receiver_base_status,
-        r.eta AS receiver_eta,
+        ot.eta AS tracking_eta,
         oi.id AS item_id,
         oi.item_ref,
         oi.total_number,
         oi.weight,
         ct.id AS ct_tracking_id,
+        ct.old_status,
         ct.new_status AS ct_new_status,
         ct."timestamp" AS ct_timestamp,
+        ct.event_type AS ct_event_type,
         ct.details AS ct_details,
         ct.reason,
         ct.location
       FROM order_items oi
       INNER JOIN orders o ON oi.order_id = o.id
       LEFT JOIN receivers r ON oi.receiver_id = r.id
+      LEFT JOIN LATERAL (
+        SELECT *
+        FROM order_tracking t
+        WHERE t.receiver_id = r.id
+          OR (t.order_id = o.id AND t.item_ref = oi.item_ref)
+        ORDER BY t.created_time DESC
+        LIMIT 1
+      ) ot ON TRUE
       LEFT JOIN consignments c ON (
-           c.orders @> jsonb_build_array(o.id::text)
+          c.orders @> jsonb_build_array(o.id::text)
         OR c.orders @> jsonb_build_array(o.id)
         OR c.orders ? o.id::text
       )
-      LEFT JOIN consignment_tracking ct ON ct.consignment_id = c.id
-        AND ct.event_type IN (
+      LEFT JOIN consignment_tracking ct
+        ON ct.consignment_id = c.id
+      AND ct.event_type IN (
           'status_advanced',
           'status_updated',
           'order_synced',
           'status_auto_updated'
-        )
+      )
       WHERE oi.item_ref ILIKE $1
       ORDER BY o.created_at DESC, oi.id, ct."timestamp" DESC
     `;
@@ -3690,6 +3769,7 @@ export async function getOrderByItemRef(req, res) {
 
       if (!orderMap[orderId]) {
         orderMap[orderId] = {
+          order_id: orderId,
           booking_ref: row.booking_ref,
           place_of_loading: row.place_of_loading || null,
           place_of_delivery: row.place_of_delivery || null,
@@ -3705,20 +3785,29 @@ export async function getOrderByItemRef(req, res) {
       if (!ord.receivers[recvKey]) {
         const receiverCurrent = row.receiver_base_status;
 
+        const currentIdx = statusSequence.indexOf(receiverCurrent);
+        const remaining =
+          currentIdx === -1 || currentIdx >= statusSequence.length - 1
+            ? []
+            : statusSequence.slice(currentIdx + 1);
+
         ord.receivers[recvKey] = {
+          receiver_id: row.receiver_id || null,
           status: receiverCurrent,
-          current_status: receiverCurrent,
-          eta: row.receiver_eta || null,
+          eta: row.tracking_eta || null,
           items: {},
+          current_status: receiverCurrent,
           status_history: [],
+          remaining_status_steps: remaining,
         };
       }
 
       const recv = ord.receivers[recvKey];
 
+      // ── Status history (deduplicated by ct.id) ──
       if (row.ct_tracking_id) {
         const alreadyExists = recv.status_history.some(
-          (h) => h._tid === row.ct_tracking_id,
+          (h) => h.tracking_id === row.ct_tracking_id,
         );
 
         if (!alreadyExists) {
@@ -3731,16 +3820,22 @@ export async function getOrderByItemRef(req, res) {
             .join(" | ");
 
           recv.status_history.push({
-            _tid: row.ct_tracking_id,
+            tracking_id: row.ct_tracking_id,
+            old_status: row.old_status || null,
             status: row.ct_new_status,
             time: row.ct_timestamp,
+            event_type: row.ct_event_type,
+            reason: row.reason || null,
+            location: row.location || null,
             notes: notes || null,
           });
         }
       }
 
+      // ── Item (only the single item shown in the layout) ──
       if (row.item_id && !recv.items[row.item_id]) {
         recv.items[row.item_id] = {
+          item_id: row.item_id,
           item_ref: row.item_ref || "—",
           total_number: Number(row.total_number) || 0,
           weight: Number(row.weight) || 0,
@@ -3751,19 +3846,21 @@ export async function getOrderByItemRef(req, res) {
     const result = Object.values(orderMap).map((order) => {
       Object.values(order.receivers).forEach((recv) => {
         recv.status_history.sort((a, b) => new Date(b.time) - new Date(a.time));
-        recv.status_history = recv.status_history.map(
-          ({ _tid, ...rest }) => rest,
-        );
+
+        recv.current_status = recv.status;
+
+        if (recv.status_history.length > 0) {
+          recv.latest_tracking_status = recv.status_history[0].status;
+        } else {
+          recv.latest_tracking_status = null;
+        }
       });
 
       return {
         ...order,
         receivers: Object.values(order.receivers).map((r) => ({
-          status: r.status,
-          current_status: r.current_status,
-          eta: r.eta,
+          ...r,
           items: Object.values(r.items),
-          status_history: r.status_history,
         })),
       };
     });
@@ -3771,6 +3868,8 @@ export async function getOrderByItemRef(req, res) {
     res.json({
       success: true,
       data: result.length === 1 ? result[0] : result,
+      count: result.length,
+      message: `Found ${result.length} order(s) containing item reference matching "${ref.trim()}"`,
     });
   } catch (err) {
     console.error("getOrderByItemRef error:", err.stack || err);

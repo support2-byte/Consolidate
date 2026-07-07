@@ -34,20 +34,30 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
       "http://127.0.0.1:5000",
       "http://localhost:5500",
       "http://localhost:8000",
-      "http://192.168.100.160:56445",
       "http://192.168.100.160:*",
       "http://192.168.100.162:*",
       "http://192.168.1.29:*",
       "http://192.168.137.1:*",
-      "192.168.137.85:5000",
+      "http://192.168.137.85:*",
       "https://consolidatetracking.onrender.com",
-      "origin: '*'",
       "https://imaginative-pothos-0a1193.netlify.app",
     ];
+
+function isOriginAllowed(origin) {
+  if (!origin || origin === "null") return true;
+  return allowedOrigins.some((pattern) => {
+    if (pattern.endsWith(":*")) {
+      const base = pattern.slice(0, -2);
+      return origin.startsWith(base + ":") || origin === base;
+    }
+    return origin === pattern;
+  });
+}
+
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin)) {
         callback(null, true);
       } else {
         console.log(`Rejected origin: ${origin}`);

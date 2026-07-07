@@ -1714,7 +1714,9 @@ export async function updateContainerStatus(req, res) {
               old_status,
               item_ref,
               created_by,
-              created_time
+              created_time,
+              eta,
+              etd
             )
             VALUES (
               $1,
@@ -1728,7 +1730,9 @@ export async function updateContainerStatus(req, res) {
               $9,
               $10,
               $11,
-              NOW()
+              NOW(),
+              $12,
+              $13
             )
             `,
             [
@@ -1743,6 +1747,8 @@ export async function updateContainerStatus(req, res) {
               oldStatus,
               item.item_ref,
               created_by,
+              eta,
+              eta,
             ],
           );
         }
