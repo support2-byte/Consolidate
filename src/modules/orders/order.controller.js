@@ -887,8 +887,8 @@ export const getOrders = async (req, res) => {
 
         COALESCE(receiver_data.receivers, '[]'::jsonb) AS receivers,
 
-        COALESCE(receiver_data.total_items, 0) AS total_items,
-        COALESCE(receiver_data.total_weight, 0) AS total_weight
+        COALESCE(order_totals.total_items, 0) AS total_items,
+        COALESCE(order_totals.total_weight, 0) AS total_weight
 
       FROM orders o
 
@@ -902,6 +902,7 @@ export const getOrders = async (req, res) => {
               'id', r.id,
               'receiverName', r.receiver_name,
               'status', r.status,
+              'eta', r.eta,
 
               'shippingdetails',
               COALESCE(
@@ -929,7 +930,7 @@ export const getOrders = async (req, res) => {
                               ),
 
                               'status',
-                              COALESCE(cs.availability, 'Created'),
+                              cm.status,
 
                               'assign_total_box',
                               COALESCE(oi.assigned_boxes::text, '0'),
@@ -952,14 +953,6 @@ export const getOrders = async (req, res) => {
                           JOIN container_master cm
                             ON cm.container_number = container_num
 
-                          LEFT JOIN LATERAL (
-                            SELECT availability
-                            FROM container_status
-                            WHERE cid = cm.cid
-                            ORDER BY sid DESC
-                            LIMIT 1
-                          ) cs ON true
-
                           WHERE r2.id = oi.receiver_id
                         ),
                         '[]'::jsonb
@@ -974,19 +967,22 @@ export const getOrders = async (req, res) => {
               )
             )
             ORDER BY r.id
-          ) AS receivers,
-
-          COALESCE(SUM(oi.total_number),0) AS total_items,
-          COALESCE(SUM(oi.weight),0) AS total_weight
+          ) AS receivers
 
         FROM receivers r
-
-        LEFT JOIN order_items oi
-          ON oi.receiver_id = r.id
 
         WHERE r.order_id = o.id
 
       ) receiver_data ON true
+
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(oi.total_number),0) AS total_items,
+          COALESCE(SUM(oi.weight),0) AS total_weight
+        FROM receivers r
+        JOIN order_items oi ON oi.receiver_id = r.id
+        WHERE r.order_id = o.id
+      ) order_totals ON true
 
       ${whereClause}
 
