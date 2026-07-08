@@ -319,8 +319,7 @@ export async function getPaymentTypes(req, res) {
         message: "No Payment Types Found!",
       });
     }
-    const options = formatOptions(paymentTypes.rows, "value", "value");
-    return res.json({ success: true, paymentTypes: options });
+    return res.json({ success: true, paymentTypes: paymentTypes.rows });
   } catch (err) {
     logger.error("Error fetching payment type:", { error: err.message });
     return res

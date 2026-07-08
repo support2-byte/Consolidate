@@ -930,6 +930,7 @@ export async function getUsageHistory(req, res) {
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
+        NULL as item_ref,
         NULL as job_id,
         NULL as job_no,
         NULL as form_no,
@@ -969,6 +970,7 @@ export async function getUsageHistory(req, res) {
         cm.owner_type,
         cpd.owned_by,
         chd.hired_by,
+        oi.item_ref,
         cah.order_id as job_id,
         o.booking_ref as job_no,
         o.rgl_booking_number as form_no,
@@ -992,6 +994,7 @@ export async function getUsageHistory(req, res) {
         LEFT JOIN container_consignment_history cch
           ON cch.consignment_id = con.id
           AND cch.container_id = cah.cid
+        LEFT JOIN order_items oi ON oi.id = cah.detail_id
         WHERE cah.cid = $1
           AND con.id IS NOT NULL
 
@@ -1059,6 +1062,7 @@ export async function getUsageHistory(req, res) {
         changedBy: row.changed_by,
         receiverId: row.receiver_id,
         detailId: row.detail_id,
+        itemRef: row.item_ref,
       };
     });
 
@@ -1504,12 +1508,14 @@ export async function getUnassignedOrders(req, res) {
         o.final_destination     AS pod,
         o.created_at            AS start_date,
         o.updated_at            AS end_date,
-        o.id                    AS job_id
+        o.id                    AS job_id,
+        oi.item_ref
       FROM container_assignment_history cah
       JOIN container_master cm ON cah.cid = cm.cid
       LEFT JOIN orders o
         ON cah.order_id = o.id
         AND o.status != 'Cancelled'
+      LEFT JOIN order_items oi ON oi.receiver_id = cah.receiver_id
       WHERE cah.cid = $1
         AND o.id IS NOT NULL          -- was con.id, which doesn't exist
         AND cah.assigned_qty > 0
@@ -1555,6 +1561,7 @@ export async function getUnassignedOrders(req, res) {
         changedBy: row.changed_by || "System",
         receiverId: row.receiver_id || null,
         detailId: row.detail_id || null,
+        itemRef: row.item_ref || null,
       };
     });
 
@@ -1623,10 +1630,6 @@ export async function updateContainerStatus(req, res) {
 
       const order_status = statusResult.rows[0]?.order_status ?? null;
       const days_offset = statusResult.rows[0]?.days_offset ?? null;
-
-      console.log(
-        `[updateContainerStatus] container_status="${container_status}" → order_status="${order_status}", days_offset=${days_offset}`,
-      );
 
       let eta = null;
       let daysUntil = null;

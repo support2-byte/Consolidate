@@ -6,8 +6,9 @@ import { getEffectivePermissions } from "../../services/getEffectivePermissions.
 import logger from "../../services/logger.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
-const ACCESS_TOKEN_TTL = "1d";
+const ACCESS_TOKEN_TTL = "15m";
 const REFRESH_TOKEN_TTL_DAYS = 30;
+const ACCESS_TOKEN_MAX_AGE_MS = 15 * 60 * 1000;
 
 export async function register(req, res) {
   try {
@@ -137,7 +138,7 @@ export async function login(req, res) {
       httpOnly: true,
       secure: true,
       sameSite: "strict",
-      maxAge: 15 * 60 * 1000,
+      maxAge: ACCESS_TOKEN_MAX_AGE_MS,
     });
 
     res.cookie("refreshToken", refreshToken, {
@@ -258,7 +259,7 @@ export async function refreshToken(req, res) {
       httpOnly: true,
       secure: true,
       sameSite: "strict",
-      maxAge: 15 * 60 * 1000,
+      maxAge: ACCESS_TOKEN_MAX_AGE_MS,
     });
 
     res.cookie("refreshToken", newRefreshToken, {

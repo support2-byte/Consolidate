@@ -1,6 +1,15 @@
 export async function createOrderTracking(
   client,
-  { orderId, receiverId, containerId, status, createdBy, itemRef = null },
+  {
+    orderId,
+    receiverId,
+    containerId,
+    status,
+    createdBy,
+    itemRef = null,
+    eta = null,
+    etd = null,
+  },
 ) {
   const orderRes = await client.query(
     `
@@ -36,10 +45,12 @@ export async function createOrderTracking(
       status,
       old_status,
       created_by,
-      item_ref
+      item_ref,
+      eta,
+      etd
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
     )
   `,
     [
@@ -53,6 +64,8 @@ export async function createOrderTracking(
       "Created",
       createdBy,
       itemRef,
+      eta,
+      etd,
     ],
   );
 }

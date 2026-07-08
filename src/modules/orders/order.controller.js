@@ -106,19 +106,19 @@ export async function createOrder(req, res) {
 
     const duplicateCheck = await client.query(
       `
-  SELECT
-    EXISTS(
-      SELECT 1
-      FROM orders
-      WHERE booking_ref = $1
-    ) AS booking_ref_exists,
+      SELECT
+        EXISTS(
+          SELECT 1
+          FROM orders
+          WHERE booking_ref = $1
+        ) AS booking_ref_exists,
 
-    EXISTS(
-      SELECT 1
-      FROM orders
-      WHERE rgl_booking_number = $2
-    ) AS rgl_booking_exists
-  `,
+        EXISTS(
+          SELECT 1
+          FROM orders
+          WHERE rgl_booking_number = $2
+        ) AS rgl_booking_exists
+      `,
       [b.booking_ref, b.rgl_booking_number],
     );
 
@@ -201,6 +201,10 @@ export async function createOrder(req, res) {
       const normEta =
         typeof etaCalc === "string" ? etaCalc : etaCalc?.eta || null;
       const normEtd = p.etd ? normalizeDate(p.etd) : null;
+      const receiverItemRefs = items
+        .map((it) => it.item_ref || it.itemRef || "")
+        .filter(Boolean)
+        .join(",");
 
       const recResult = await withUserAudit(
         req,
@@ -208,8 +212,8 @@ export async function createOrder(req, res) {
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
           receiver_marks_and_number, eta, etd, shipping_line,
           consignment_vessel, consignment_number, consignment_marks, consignment_voyage,
-          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered, item_ref
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, $21)
         RETURNING id`,
         [
           orderId,
@@ -232,6 +236,7 @@ export async function createOrder(req, res) {
           p.status || "Created",
           p.full_partial || "Full",
           p.qty_delivered ? parseInt(p.qty_delivered) : null,
+          receiverItemRefs,
         ],
       );
       const receiverId = recResult.rows[0].id;
@@ -1206,10 +1211,13 @@ export async function getOrdersConsignments(req, res) {
           params.push(String(pod.trim()));
           whereClause += ` AND o.place_of_delivery = $${params.length}`;
         }
+        params.push(validIds);
+        const chContainerParam = params.length;
         whereClause += ` AND EXISTS (
             SELECT 1
             FROM container_assignment_history ch
             WHERE ch.order_id = o.id
+              AND ch.cid = ANY($${chContainerParam}::int[])
               AND COALESCE(ch.status, 'Ready for Loading') IN (
                 'Ready for Loading',
                 'Loaded'
@@ -1245,6 +1253,7 @@ export async function getOrdersConsignments(req, res) {
         'subcategory', COALESCE(oi.subcategory, ''),
         'type', COALESCE(oi.type, ''),
         'itemRef', COALESCE(oi.item_ref, ''),
+        'status', COALESCE(ot_item.status, 'Created'),
         'totalNumber', COALESCE(oi.total_number, 0),
         'weight', COALESCE(oi.weight, 0),
         'containerDetails',${containerDetailsSub},
@@ -1253,17 +1262,24 @@ export async function getOrdersConsignments(req, res) {
             FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
           ), 0)
       ) ORDER BY oi.id), '[]'::json)
-      FROM order_items oi WHERE oi.receiver_id = r.id)
+      FROM order_items oi
+      LEFT JOIN LATERAL (
+        SELECT ot.status
+        FROM order_tracking ot
+        WHERE ot.item_ref = oi.item_ref
+        ORDER BY ot.created_time DESC
+        LIMIT 1
+      ) ot_item ON true
+      WHERE oi.receiver_id = r.id)
     `;
 
     const receiversSub = `
       (SELECT COALESCE(json_agg(rf ORDER BY rf.id), '[]'::json) FROM (
         SELECT
-          r.id,
-          r.receiver_name  AS receivername,
-          r.status,
-          r.containers,
-          ${shippingDetailsSub} AS shippingdetails,
+        r.id,
+        r.receiver_name  AS receivername,
+        r.containers,
+        ${shippingDetailsSub} AS shippingdetails,
           COALESCE((
             SELECT json_agg(json_build_object(
               'drop_method', dod.drop_method,
@@ -1894,7 +1910,9 @@ export async function assignContainersBatch(req, res) {
 
       const container = contRes.rows[0];
       if (
-        !["Available", "Assigned to Job"].includes(container.derived_status)
+        !["Available", "Assigned to Job", "Ready for Loading"].includes(
+          container.derived_status,
+        )
       ) {
         skipped.push({
           ...ass,
@@ -1950,7 +1968,6 @@ export async function assignContainersBatch(req, res) {
           weight
         FROM order_items
         WHERE receiver_id = $1
-          AND total_number > COALESCE(assigned_boxes, 0)
         ORDER BY id
         LIMIT 1 OFFSET $2
         FOR UPDATE
@@ -1961,12 +1978,20 @@ export async function assignContainersBatch(req, res) {
       if (itemsRes.rowCount === 0) {
         skipped.push({
           ...ass,
-          reason: "no remaining items found for this detail index",
+          reason: "no item found for this detail index",
         });
         continue;
       }
 
       const targetItem = itemsRes.rows[0];
+
+      if (
+        Number(targetItem.total_number) <=
+        Number(targetItem.assigned_boxes || 0)
+      ) {
+        skipped.push({ ...ass, reason: "target item already fully assigned" });
+        continue;
+      }
       const targetItemId = targetItem.id;
       const itemRef = targetItem.item_ref;
 
@@ -2033,16 +2058,27 @@ export async function assignContainersBatch(req, res) {
 
       const nextStatus = await moveReceiverToNextStatus(client, receiverIdNum);
 
-      if (nextStatus) {
-        await createOrderTracking(client, {
-          orderId: orderIdNum,
-          receiverId: receiverIdNum,
-          containerId: cid,
-          status: nextStatus.order_status,
-          createdBy: currentUserEmail,
-          itemRef,
-        });
+      let trackingStatus = nextStatus?.order_status;
+      if (!trackingStatus) {
+        const currRes = await client.query(
+          `SELECT status FROM receivers WHERE id = $1`,
+          [receiverIdNum],
+        );
+        trackingStatus = currRes.rows[0]?.status || "Ready for Loading";
       }
+
+      const { eta } = await calculateETA(client, trackingStatus);
+
+      await createOrderTracking(client, {
+        orderId: orderIdNum,
+        receiverId: receiverIdNum,
+        containerId: cid,
+        status: trackingStatus,
+        createdBy: currentUserEmail,
+        itemRef,
+        eta,
+        etd: eta,
+      });
 
       await client.query(
         `
@@ -2230,7 +2266,6 @@ export async function assignContainersToOrders(req, res) {
     const { assignments } = req.body;
     const currentUserEmail = req.user?.email || "system-fallback";
 
-    // Get real user email for auditing
     const changedBy = req.user?.id || req.user?.email || "system-fallback";
     if (
       !assignments ||
@@ -2329,6 +2364,8 @@ export async function assignContainersToOrders(req, res) {
           const qtyPer = Math.floor(qty / cids.length);
           const weightPer = Number((userWeight / cids.length).toFixed(2));
 
+          let lastCid = null;
+
           for (let i = 0; i < cids.length; i++) {
             const cid = cids[i];
             const isLast = i === cids.length - 1;
@@ -2410,12 +2447,13 @@ export async function assignContainersToOrders(req, res) {
             );
 
             newContainers.add(entry.container.container_number);
-
-            trackingEntries.push({
-              cid,
-              itemRef: item.item_ref,
-            });
+            lastCid = cid;
           }
+
+          trackingEntries.push({
+            cid: lastCid,
+            itemRef: item.item_ref,
+          });
 
           const newBoxes = currentBoxes + assignedThisItemQty;
           const newKg = currentKg + assignedThisItemKg;
@@ -2465,6 +2503,11 @@ export async function assignContainersToOrders(req, res) {
               ])
             ).rows[0].status;
 
+          const { eta: trackingEta } = await calculateETA(
+            client,
+            trackingStatus,
+          );
+
           for (const tracking of trackingEntries) {
             await createOrderTracking(client, {
               orderId,
@@ -2473,6 +2516,8 @@ export async function assignContainersToOrders(req, res) {
               status: trackingStatus,
               createdBy: currentUserEmail,
               itemRef: tracking.itemRef,
+              eta: trackingEta,
+              etd: trackingEta,
             });
           }
 
@@ -2526,7 +2571,6 @@ export async function removeContainerAssignments(req, res) {
     await client.query("BEGIN");
 
     const { assignments } = req.body;
-    // const created_by = req.user?.id || req.user?.email || "system";
     const created_by = req.user?.email || "system";
 
     if (
@@ -2553,7 +2597,6 @@ export async function removeContainerAssignments(req, res) {
         const recId = Number(recIdStr);
         const recRemove = orderRemove[recIdStr];
 
-        // Always fetch and lock receiver first
         const receiverRes = await client.query(
           `
           SELECT id, qty_delivered, containers, total_number
@@ -2662,6 +2705,25 @@ export async function removeContainerAssignments(req, res) {
               `,
               [item.id, orderId],
             );
+
+            const itemRefRes = await client.query(
+              `SELECT item_ref FROM order_items WHERE id = $1`,
+              [item.id],
+            );
+            const removedItemRef = itemRefRes.rows[0]?.item_ref || null;
+
+            const { eta: revertEta } = await calculateETA(client, "Created");
+
+            await createOrderTracking(client, {
+              orderId,
+              receiverId: recId,
+              containerId: null,
+              status: "Created",
+              createdBy: created_by,
+              itemRef: removedItemRef,
+              eta: revertEta,
+              etd: revertEta,
+            });
 
             orderRemovedQty += receiverRemovedQty;
           }
@@ -2808,17 +2870,35 @@ export async function removeContainerAssignments(req, res) {
 
             await client.query(
               `
-              UPDATE order_items
-              SET
-                assigned_boxes     = $1,
-                assigned_weight_kg = $2,
-                container_details  = $3::jsonb,
-                assigned_at        = CASE WHEN $1 > 0 THEN assigned_at ELSE NULL END,
-                updated_at         = NOW()
-              WHERE id = $4
-            `,
+                UPDATE order_items
+                SET
+                  assigned_boxes     = $1,
+                  assigned_weight_kg = $2,
+                  container_details  = $3::jsonb,
+                  assigned_at        = CASE WHEN $1 > 0 THEN assigned_at ELSE NULL END,
+                  updated_at         = NOW()
+                WHERE id = $4
+              `,
               [newBoxes, newKg, finalJson, item.id],
             );
+
+            const revertedItemStatus =
+              newBoxes <= 0 ? "Created" : "Partially Assigned";
+            const { eta: itemRevertEta } = await calculateETA(
+              client,
+              revertedItemStatus,
+            );
+
+            await createOrderTracking(client, {
+              orderId,
+              receiverId: recId,
+              containerId: null,
+              status: revertedItemStatus,
+              createdBy: created_by,
+              itemRef: item.item_ref,
+              eta: itemRevertEta,
+              etd: itemRevertEta,
+            });
 
             receiverRemovedQty += removedThisItemQty;
             receiverRemovedKg += removedThisItemKg;
@@ -4595,9 +4675,6 @@ export async function getOrderUsageHistory(req, res) {
     const result = await pool.query(query, [order_id]);
     const history = result.rows;
 
-    console.log(
-      `Fetched ${history.length} usage history for order: ${order_id}`,
-    );
     res.json({ history });
   } catch (err) {
     console.error("Error fetching order usage history:", err.message);

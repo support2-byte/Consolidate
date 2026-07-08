@@ -1,10 +1,6 @@
 // src/modules/options/routes.js
 import express from "express";
 import {
-  getShippers,
-  getConsignees,
-  getOrigins,
-  getDestinations,
   getBanks,
   getPaymentTypes,
   getVessels,
@@ -13,12 +9,9 @@ import {
   deleteVessel,
   getShippingLines,
   getCurrencies,
-  getStatuses,
-  getContainerStatuses,
   createPaymentType,
   updatePaymentType,
   deletePaymentType,
-  getPaymentTypeOptions,
   getCategories,
   createCategory,
   updateCategory,
@@ -38,10 +31,6 @@ import {
   createBank,
   updateBank,
   deleteBank,
-  createEtaConfig,
-  deleteEtaConfig,
-  getEtaConfigs,
-  updateEtaConfig,
   getAllStatus,
   updateStatus,
   addNewStatus,
@@ -50,84 +39,11 @@ import {
   getBugReports,
   updateBugReport,
   deleteBugReport,
+  getDashboardData,
 } from "./options.controllers.js";
 import { bugReportUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
-
-// Mount routes for dropdown options (without /crud for simple GET lists)
-
-/**
- * @swagger
- * /api/options/shippers:
- *   get:
- *     summary: List shipper options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of shippers
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/NamedOption'
- */
-router.get("/shippers", getShippers);
-
-/**
- * @swagger
- * /api/options/consignees:
- *   get:
- *     summary: List consignee options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of consignees
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/NamedOption'
- */
-router.get("/consignees", getConsignees);
-
-/**
- * @swagger
- * /api/options/origins:
- *   get:
- *     summary: List origin options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of origins
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/NamedOption'
- */
-router.get("/origins", getOrigins);
-
-/**
- * @swagger
- * /api/options/destinations:
- *   get:
- *     summary: List destination options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of destinations
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/NamedOption'
- */
-router.get("/destinations", getDestinations);
 
 /**
  * @swagger
@@ -146,24 +62,6 @@ router.get("/destinations", getDestinations);
  *                 $ref: '#/components/schemas/Bank'
  */
 router.get("/banks", getBanks); // Updated: Removed /crud for dropdown compatibility
-
-/**
- * @swagger
- * /api/options/payment-types:
- *   get:
- *     summary: List payment type options (dropdown)
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of payment types
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/PaymentType'
- */
-router.get("/payment-types", getPaymentTypeOptions); // For dropdown options
 
 /**
  * @swagger
@@ -218,44 +116,6 @@ router.get("/shipping-lines", getShippingLines);
  *                 $ref: '#/components/schemas/NamedOption'
  */
 router.get("/currencies", getCurrencies);
-
-/**
- * @swagger
- * /api/options/statuses:
- *   get:
- *     summary: List general status options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of statuses
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/StatusItem'
- */
-router.get("/statuses", getStatuses);
-
-/**
- * @swagger
- * /api/options/container-statuses:
- *   get:
- *     summary: List container status options
- *     tags: [Options - Dropdowns]
- *     responses:
- *       200:
- *         description: List of container statuses
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/StatusItem'
- */
-router.get("/container-statuses", getContainerStatuses);
-
-// CRUD routes (keep /crud where full list with actions is needed)
 
 /**
  * @swagger
@@ -875,94 +735,6 @@ router.delete("/banks/:id", deleteBank);
 
 /**
  * @swagger
- * /api/options/eta-configs:
- *   post:
- *     summary: Create an ETA config
- *     tags: [Options - ETA Configs]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/EtaConfigRequest'
- *     responses:
- *       201:
- *         description: ETA config created
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/EtaConfig'
- */
-router.post("/eta-configs", createEtaConfig);
-
-/**
- * @swagger
- * /api/options/eta-configs/{id}:
- *   put:
- *     summary: Update an ETA config
- *     tags: [Options - ETA Configs]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/EtaConfigRequest'
- *     responses:
- *       200:
- *         description: ETA config updated
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/EtaConfig'
- *       404:
- *         description: ETA config not found
- */
-router.put("/eta-configs/:id", updateEtaConfig);
-
-/**
- * @swagger
- * /api/options/eta-configs/{id}:
- *   delete:
- *     summary: Delete an ETA config
- *     tags: [Options - ETA Configs]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: ETA config deleted
- *       404:
- *         description: ETA config not found
- */
-router.delete("/eta-configs/:id", deleteEtaConfig);
-
-/**
- * @swagger
- * /api/options/eta-configs:
- *   get:
- *     summary: List ETA configs
- *     tags: [Options - ETA Configs]
- *     responses:
- *       200:
- *         description: List of ETA configs
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/EtaConfig'
- */
-router.get("/eta-configs", getEtaConfigs);
-
-/**
- * @swagger
  * /api/options/allStatus:
  *   get:
  *     summary: List all statuses
@@ -1144,5 +916,7 @@ router.put(
  *         description: Bug report not found
  */
 router.delete("/bug-report/:id", deleteBugReport);
+
+router.get("/dashboard", getDashboardData);
 
 export default router;
