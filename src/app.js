@@ -41,6 +41,7 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
       "http://192.168.137.85:*",
       "https://consolidatetracking.onrender.com",
       "https://imaginative-pothos-0a1193.netlify.app",
+      "https://orders.royalgulfshipping.com",
     ];
 
 function isOriginAllowed(origin) {
