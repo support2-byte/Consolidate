@@ -241,14 +241,14 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/User'
  *       403:
- *         description: Missing users.update permission
+ *         description: Missing users.edit permission
  *       404:
  *         description: User not found
  */
 router.put(
   "/users/:id",
   requireAuth,
-  requirePermission("users.update"),
+  requirePermission("users.edit"),
   updateUser,
 );
 
@@ -297,14 +297,14 @@ router.delete(
  *       200:
  *         description: Password reset successfully
  *       403:
- *         description: Missing users.update permission
+ *         description: Missing users.edit permission
  *       404:
  *         description: User not found
  */
 router.post(
   "/admin/users/:id/reset-password",
   requireAuth,
-  requirePermission("users.update"),
+  requirePermission("users.edit"),
   adminForceResetPassword,
 );
 
@@ -344,7 +344,7 @@ router.get("/roles", requireAuth, getRoles);
 router.get(
   "/rbac/modules",
   requireAuth,
-  requirePermission("rbac.view"),
+  requirePermission("permissions.view"),
   getModules,
 );
 
@@ -365,7 +365,7 @@ router.get(
 router.get(
   "/rbac/actions",
   requireAuth,
-  requirePermission("rbac.view"),
+  requirePermission("permissions.view"),
   getActions,
 );
 
@@ -391,7 +391,7 @@ router.get(
 router.get(
   "/rbac/permissions",
   requireAuth,
-  requirePermission("rbac.view"),
+  requirePermission("permissions.view"),
   getAllPossiblePermissions,
 );
 
@@ -423,7 +423,7 @@ router.get(
 router.get(
   "/rbac/roles/:roleName/permissions",
   requireAuth,
-  requirePermission("roles.view"),
+  requirePermission("permissions.view"),
   getRolePermissions,
 );
 
@@ -454,14 +454,14 @@ router.get(
  *       200:
  *         description: Role permissions updated
  *       403:
- *         description: Missing roles.update permission
+ *         description: Missing roles.edit permission
  *       404:
  *         description: Role not found
  */
 router.put(
   "/rbac/roles/:roleName/permissions",
   requireAuth,
-  requirePermission("roles.update"),
+  requirePermission("permissions.edit"),
   updateRolePermissions,
 );
 
@@ -520,14 +520,14 @@ router.get(
  *       200:
  *         description: User permissions updated
  *       403:
- *         description: Missing users.update permission
+ *         description: Missing users.edit permission
  *       404:
  *         description: User not found
  */
 router.put(
   "/users/:userId/permissions",
   requireAuth,
-  requirePermission("users.update"),
+  requirePermission("users.edit"),
   updateUserPermission,
 );
 
