@@ -1239,13 +1239,18 @@ export const releaseContainer = async (req, res) => {
         [releasedAssignment.container_id],
       );
 
+      const consignment = await client.query(
+        "SELECT destination FROM consignments WHERE id = $1",
+        [releasedAssignment.consignment_id],
+      );
+
       await client.query(
         `
         UPDATE container_status
-          SET availability = 'Available'
-        WHERE cid = $1
+          SET availability = 'Available', location = $1
+        WHERE cid = $2
         `,
-        [releasedAssignment.container_id],
+        [consignment.rows[0].destination, releasedAssignment.container_id],
       );
     });
 
@@ -1314,27 +1319,11 @@ export async function getAllContainersForConsignment(req, res) {
       whereClause += ` AND cm.owner_type = $${baseValues.length + 1}`;
       baseValues.push(owner_type);
     }
-    // if (location) {
-    //   // FIXED: Better normalization to avoid double underscore
-    //   let normalizedLocation = location.toLowerCase().replace(/\s+/g, "_");
-    //   if (normalizedLocation.endsWith("_port")) {
-    //     normalizedLocation = normalizedLocation; // Already good (e.g., 'karachi_port')
-    //   } else if (normalizedLocation.includes("port")) {
-    //     normalizedLocation = normalizedLocation
-    //       .replace(/_port$/, "port")
-    //       .replace(/port$/, "_port"); // Handle edge cases
-    //   } else {
-    //     normalizedLocation = normalizedLocation.replace(/port$/, "_port"); // Append if ends with 'port'
-    //   }
-    //   if (["karachi_port", "dubai_port"].includes(normalizedLocation)) {
-    //     whereClause += ` AND COALESCE(cs.location, 'karachi_port') = $${baseValues.length + 1}`;
-    //     baseValues.push(normalizedLocation);
-    //   } else {
-    //     return res.status(400).json({
-    //       error: `Invalid location: must be 'karachi_port' or 'dubai_port'`,
-    //     });
-    //   }
-    // }
+    if (location) {
+      whereClause += ` AND cs.location = $${baseValues.length + 1}`;
+      baseValues.push(location);
+    }
+
     let baseFrom = `
       FROM container_master cm
 
@@ -1364,7 +1353,7 @@ export async function getAllContainersForConsignment(req, res) {
     let selectClause = `
       SELECT 
         cm.cid, cm.container_number, cm.container_size, cm.container_type, cm.owner_type, cm.remarks, cm.status,
-        COALESCE(cs.location, 'karachi_port') as location,
+        cs.location as location,
         CASE 
           WHEN cs.availability IS NOT NULL THEN cs.availability
           WHEN chd.hire_end_date IS NULL AND chd.hire_start_date IS NOT NULL THEN 'Hired'
@@ -1517,7 +1506,7 @@ export async function getUnassignedOrders(req, res) {
         AND o.status != 'Cancelled'
       LEFT JOIN order_items oi ON oi.receiver_id = cah.receiver_id
       WHERE cah.cid = $1
-        AND o.id IS NOT NULL          -- was con.id, which doesn't exist
+        AND o.id IS NOT NULL
         AND cah.assigned_qty > 0
         AND NOT EXISTS (
           SELECT 1 FROM consignments c
