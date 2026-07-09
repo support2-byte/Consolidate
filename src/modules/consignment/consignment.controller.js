@@ -664,21 +664,20 @@ export async function getConsignmentById(req, res) {
             cm.container_number        AS "containerNo",
             cm.container_type          AS "containerType",
             cm.owner_type               AS ownership,
-            COALESCE(cm.location, 'N/A') AS location,
-            COALESCE(
-              (SELECT cs.availability 
-              FROM container_status cs 
-              WHERE cs.cid = cm.cid 
-              ORDER BY cs.created_time DESC 
-              LIMIT 1),
-              cm.derived_status,
-              'Available'
-            ) AS derived_status
+            cs.location AS location,
+            COALESCE(cs.availability, cm.derived_status, 'Available') AS derived_status
           FROM container_master cm
+          LEFT JOIN LATERAL (
+            SELECT location, availability
+            FROM container_status
+            WHERE cid = cm.cid
+            ORDER BY created_time DESC
+            LIMIT 1
+          ) cs ON true
           WHERE cm.cid IN (
-            SELECT cch.container_id
-            FROM container_consignment_history cch
-            WHERE cch.consignment_id = $1
+            SELECT cah.cid
+            FROM container_assignment_history cah
+            WHERE cah.consignment_id = $1
           )
           `,
           [numericId],
