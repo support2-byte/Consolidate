@@ -1,3 +1,5 @@
+import logger from "./logger.js";
+
 export function computeDaysUntilEta(etaDateStr, today = new Date()) {
   if (!etaDateStr) return null;
   const etaDate = new Date(etaDateStr);
@@ -28,9 +30,9 @@ export const calculateETA = async (client, status, baseDate = new Date()) => {
     );
 
     if (configResult.rowCount === 0) {
-      console.log(
-        `No ETA config for status: "${status}"; using baseDate (0 days)`,
-      );
+      logger.warn("No ETA configuration found", {
+        status,
+      });
       return { eta: baseDate.toISOString().split("T")[0], daysUntil: 0 };
     }
 
@@ -44,13 +46,19 @@ export const calculateETA = async (client, status, baseDate = new Date()) => {
     const eta = etaDate.toISOString().split("T")[0];
     const daysUntil = computeDaysUntilEta(eta, baseDate);
 
-    console.log(
-      `[calculateETA] status="${status}" matched order_status="${order_status}" → offset=${days}d → ETA=${eta} (daysUntil=${daysUntil})`,
-    );
+    logger.debug("ETA calculated", {
+      status,
+      orderStatus: order_status,
+      offsetDays: days,
+      eta,
+    });
 
     return { eta, daysUntil };
   } catch (err) {
-    console.error("ETA calc error:", err);
+    logger.error("Failed to calculate ETA", {
+      status,
+      error: err,
+    });
     return { eta: new Date().toISOString().split("T")[0], daysUntil: 0 };
   }
 };

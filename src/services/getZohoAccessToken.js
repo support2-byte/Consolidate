@@ -24,7 +24,11 @@ export async function getZohoAccessToken() {
       );
     }
 
-    console.log("Fetched new Zoho access token:", res.data);
+    logger.info("Zoho access token refreshed successfully", {
+      expiresIn: res.data.expires_in,
+      apiDomain: res.data.api_domain,
+    });
+
     zohoAccessToken = res.data.access_token;
 
     setTimeout(

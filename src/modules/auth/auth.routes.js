@@ -1,144 +1,550 @@
-// src/routes/auth.routes.js
 import { Router } from "express";
 
 import {
   register,
   login,
-  me,
   logout,
+  refreshToken,
+  me,
   getUsers,
   createUser,
   updateUser,
+  deleteUser,
   adminForceResetPassword,
+  logoutAll,
 } from "../auth/auth.controller.js";
 
 import {
   getMyPermissions,
   getModules,
   getActions,
+  getRoles,
   getRolePermissions,
   updateRolePermissions,
   getUserPermissions,
   updateUserPermission,
   getAllPossiblePermissions,
-  getRoles,
-  getNotifications,
-  getNotificationById,
-  updateNotification,
-  // createNotificationType,
-  createNotification,
 } from "../auth/rbac.controller.js";
 
-import { requireAuth, requireRole } from "../auth/auth.middleware.js";
+import { requireAuth, requirePermission } from "../auth/auth.middleware.js";
 
 const router = Router();
 
-// ────────────────────────────────────────────────────────────────
-// Public / Auth routes (no auth required)
-// ────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /auth/register:
+ *   post:
+ *     summary: Register a new user
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RegisterRequest'
+ *     responses:
+ *       201:
+ *         description: User registered successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       400:
+ *         description: Invalid input
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
 router.post("/register", register);
-router.post("/login", login);
-router.post("/logout", logout);
 
-// ────────────────────────────────────────────────────────────────
-// Authenticated user routes
-// ────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /auth/login:
+ *   post:
+ *     summary: Log in and receive auth cookies
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/LoginRequest'
+ *     responses:
+ *       200:
+ *         description: Login successful, sets accessToken cookie
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       401:
+ *         description: Invalid credentials
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post("/login", login);
+
+/**
+ * @swagger
+ * /auth/refresh:
+ *   post:
+ *     summary: Refresh the access token using the refresh token cookie
+ *     tags: [Auth]
+ *     responses:
+ *       200:
+ *         description: New access token issued
+ *       401:
+ *         description: Invalid or expired refresh token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post("/refresh", refreshToken);
+
+/**
+ * @swagger
+ * /auth/logout:
+ *   post:
+ *     summary: Log out the current session/device
+ *     tags: [Auth]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Logged out successfully
+ *       401:
+ *         description: Not authenticated
+ */
+router.post("/logout", requireAuth, logout);
+
+/**
+ * @swagger
+ * /auth/me:
+ *   get:
+ *     summary: Get the currently authenticated user
+ *     tags: [Auth]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       401:
+ *         description: Not authenticated
+ */
 router.get("/me", requireAuth, me);
+
+/**
+ * @swagger
+ * /auth/rbac/my-permissions:
+ *   get:
+ *     summary: Get the current user's permissions
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of permission keys for the current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { type: string }
+ *       401:
+ *         description: Not authenticated
+ */
 router.get("/rbac/my-permissions", requireAuth, getMyPermissions);
 
-// ────────────────────────────────────────────────────────────────
-// Admin-only: User Management
-// ────────────────────────────────────────────────────────────────
-router.get("/users", requireAuth, requireRole("admin"), getUsers);
-router.get("/roles", requireAuth, requireRole("admin"), getRoles);
+/**
+ * @swagger
+ * /auth/users:
+ *   get:
+ *     summary: List all users
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of users
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/User'
+ *       403:
+ *         description: Missing users.view permission
+ */
+router.get("/users", requireAuth, requirePermission("users.view"), getUsers);
 
-router.post("/users", requireAuth, requireRole("admin"), createUser);
-router.put("/users/:id", requireAuth, requireRole("admin"), updateUser);
+/**
+ * @swagger
+ * /auth/users:
+ *   post:
+ *     summary: Create a new user
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateUserRequest'
+ *     responses:
+ *       201:
+ *         description: User created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       403:
+ *         description: Missing users.create permission
+ */
+router.post(
+  "/users",
+  requireAuth,
+  requirePermission("users.create"),
+  createUser,
+);
+
+/**
+ * @swagger
+ * /auth/users/{id}:
+ *   put:
+ *     summary: Update a user
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateUserRequest'
+ *     responses:
+ *       200:
+ *         description: User updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/User'
+ *       403:
+ *         description: Missing users.edit permission
+ *       404:
+ *         description: User not found
+ */
+router.put(
+  "/users/:id",
+  requireAuth,
+  requirePermission("users.edit"),
+  updateUser,
+);
+
+/**
+ * @swagger
+ * /auth/users/{id}:
+ *   delete:
+ *     summary: Delete a user
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: User deleted
+ *       403:
+ *         description: Missing users.delete permission
+ *       404:
+ *         description: User not found
+ */
 router.delete(
   "/users/:id",
   requireAuth,
-  requireRole("admin"),
-  async (req, res) => {
-    // Add delete logic here if not already in auth.controller
-    try {
-      await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
-      res.json({ success: true, message: "User deleted" });
-    } catch (err) {
-      res.status(500).json({ success: false, error: "Failed to delete user" });
-    }
-  },
+  requirePermission("users.delete"),
+  deleteUser,
 );
 
-// Admin password reset
-router.post(
-  "/admin/reset-user-password",
-  requireAuth,
-  // requireRole("admin"),
-  adminForceResetPassword,
-);
+/**
+ * @swagger
+ * /auth/admin/users/{id}/reset-password:
+ *   post:
+ *     summary: Admin force-reset a user's password
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Password reset successfully
+ *       403:
+ *         description: Missing users.edit permission
+ *       404:
+ *         description: User not found
+ */
 router.post(
   "/admin/users/:id/reset-password",
   requireAuth,
-  requireRole("admin"),
+  requirePermission("users.edit"),
   adminForceResetPassword,
 );
 
-// ────────────────────────────────────────────────────────────────
-// Admin-only: RBAC - Global Modules & Actions
-// ────────────────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /auth/roles:
+ *   get:
+ *     summary: List all roles
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of role names
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { type: string }
+ */
+router.get("/roles", requireAuth, getRoles);
+
+/**
+ * @swagger
+ * /auth/rbac/modules:
+ *   get:
+ *     summary: List all RBAC modules
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of modules
+ *       403:
+ *         description: Missing rbac.view permission
+ */
 router.get(
-  "/admin/rbac/modules",
+  "/rbac/modules",
   requireAuth,
-  requireRole("admin"),
+  requirePermission("permissions.view"),
   getModules,
 );
+
+/**
+ * @swagger
+ * /auth/rbac/actions:
+ *   get:
+ *     summary: List all RBAC actions
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of actions
+ *       403:
+ *         description: Missing rbac.view permission
+ */
 router.get(
-  "/admin/rbac/actions",
+  "/rbac/actions",
   requireAuth,
-  requireRole("admin"),
+  requirePermission("permissions.view"),
   getActions,
 );
-// In your router file (e.g., adminRoutes.js)
-router.get("/admin/notifications", getNotifications);
-router.get("/admin/notifications/:id", getNotificationById);
-router.patch("/admin/notifications/:id", updateNotification);
-router.post("/admin/notifications", createNotification); // optional
-// router.post('/admin/notifications', createNotification);
-// ────────────────────────────────────────────────────────────────
-// Admin-only: Role Permission Management
-// ────────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /auth/rbac/permissions:
+ *   get:
+ *     summary: List all possible permissions
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of all permission keys
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items: { type: string }
+ *       403:
+ *         description: Missing rbac.view permission
+ */
 router.get(
-  "/admin/rbac/roles/:roleName/permissions",
+  "/rbac/permissions",
   requireAuth,
-  requireRole("admin"),
-  getRolePermissions,
-);
-router.post(
-  "/admin/rbac/roles/:roleName/permissions",
-  requireAuth,
-  requireRole("admin"),
-  updateRolePermissions,
-);
-router.get(
-  "/admin/permissions/all",
-  requireAuth,
-  requireRole("admin"),
+  requirePermission("permissions.view"),
   getAllPossiblePermissions,
 );
-// ────────────────────────────────────────────────────────────────
-// Admin-only: Per-User Permission Overrides
-// ────────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /auth/rbac/roles/{roleName}/permissions:
+ *   get:
+ *     summary: Get permissions assigned to a role
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: roleName
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Role permissions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/RolePermissions'
+ *       403:
+ *         description: Missing roles.view permission
+ *       404:
+ *         description: Role not found
+ */
 router.get(
-  "/admin/users/:userId/permissions",
+  "/rbac/roles/:roleName/permissions",
   requireAuth,
-  requireRole("admin"),
+  requirePermission("permissions.view"),
+  getRolePermissions,
+);
+
+/**
+ * @swagger
+ * /auth/rbac/roles/{roleName}/permissions:
+ *   put:
+ *     summary: Update permissions assigned to a role
+ *     tags: [RBAC]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: roleName
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               permissions:
+ *                 type: array
+ *                 items: { type: string }
+ *     responses:
+ *       200:
+ *         description: Role permissions updated
+ *       403:
+ *         description: Missing roles.edit permission
+ *       404:
+ *         description: Role not found
+ */
+router.put(
+  "/rbac/roles/:roleName/permissions",
+  requireAuth,
+  requirePermission("permissions.edit"),
+  updateRolePermissions,
+);
+
+/**
+ * @swagger
+ * /auth/users/{userId}/permissions:
+ *   get:
+ *     summary: Get a specific user's permission overrides
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: User permission overrides
+ *       403:
+ *         description: Missing users.view permission
+ *       404:
+ *         description: User not found
+ */
+router.get(
+  "/users/:userId/permissions",
+  requireAuth,
+  requirePermission("users.view"),
   getUserPermissions,
 );
-router.post(
-  "/admin/users/:userId/permissions",
+
+/**
+ * @swagger
+ * /auth/users/{userId}/permissions:
+ *   put:
+ *     summary: Update a specific user's permission overrides
+ *     tags: [Users]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               permissions:
+ *                 type: array
+ *                 items: { type: string }
+ *     responses:
+ *       200:
+ *         description: User permissions updated
+ *       403:
+ *         description: Missing users.edit permission
+ *       404:
+ *         description: User not found
+ */
+router.put(
+  "/users/:userId/permissions",
   requireAuth,
-  requireRole("admin"),
+  requirePermission("users.edit"),
   updateUserPermission,
 );
+
+/**
+ * @swagger
+ * /auth/logout-all:
+ *   post:
+ *     summary: Log out all sessions/devices for the current user
+ *     tags: [Auth]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: All sessions logged out
+ *       401:
+ *         description: Not authenticated
+ */
+router.post("/logout-all", requireAuth, logoutAll);
 
 export default router;

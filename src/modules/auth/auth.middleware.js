@@ -1,136 +1,143 @@
-// middleware/auth.js
 import jwt from "jsonwebtoken";
 import { promisify } from "util";
 
 const JWT_SECRET = process.env.JWT_SECRET;
+
 if (!JWT_SECRET) {
-  console.error("[FATAL] JWT_SECRET is not set in environment variables");
+  console.error("[FATAL] JWT_SECRET is missing.");
   process.exit(1);
 }
 
 const jwtVerify = promisify(jwt.verify);
-const ALLOWED_ALGORITHMS = ["HS256", "HS384", "HS512"];
 
-// ✅ Fixed: matches your actual roles table
-// id=1 superadmin, id=2 admin, id=3 manager, id=4 user
-const ROLE_MAP = { 1: "admin", 2: "superadmin", 3: "manager", 4: "user" };
+const ALLOWED_ALGORITHMS = ["HS256"];
 
-export const requireRole =
-  (...requiredRoles) =>
-  (req, res, next) => {
+export async function requireAuth(req, res, next) {
+  try {
+    const token = req.cookies?.accessToken;
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: "UNAUTHENTICATED",
+        message: "Access token missing",
+      });
+    }
+
+    const decoded = await jwtVerify(token, JWT_SECRET, {
+      algorithms: ALLOWED_ALGORITHMS,
+    });
+
+    req.user = {
+      id: decoded.id,
+      email: decoded.email,
+      roleId: decoded.roleId,
+      roleName: decoded.roleName,
+      permissions: decoded.permissions || [],
+    };
+
+    next();
+  } catch (err) {
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({
+        success: false,
+        error: "TOKEN_EXPIRED",
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      error: "INVALID_TOKEN",
+    });
+  }
+}
+
+export async function optionalAuth(req, res, next) {
+  try {
+    const token = req.cookies?.accessToken;
+
+    if (!token) {
+      req.user = null;
+      return next();
+    }
+
+    const decoded = await jwtVerify(token, JWT_SECRET, {
+      algorithms: ALLOWED_ALGORITHMS,
+    });
+
+    req.user = {
+      id: decoded.id,
+      email: decoded.email,
+      roleId: decoded.roleId,
+      roleName: decoded.roleName,
+      permissions: decoded.permissions || [],
+    };
+
+    next();
+  } catch {
+    req.user = null;
+    next();
+  }
+}
+
+export const requirePermission = (...permissions) => {
+  return (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ success: false, error: "Unauthorized" });
+      return res.status(401).json({
+        success: false,
+        error: "UNAUTHENTICATED",
+      });
     }
-    console.log("[USER]", req.user);
 
-    let userRoleStr;
+    const userPermissions = req.user.permissions || [];
 
-    if (typeof req.user.role === "string") {
-      userRoleStr = req.user.role.toLowerCase();
-    } else if (typeof req.user.role === "number") {
-      userRoleStr = (ROLE_MAP[req.user.role] || "unknown").toLowerCase();
-    } else {
-      userRoleStr = "unknown";
-    }
-    console.log({ userRoleStr });
+    const allowed = permissions.some((permission) =>
+      userPermissions.includes(permission),
+    );
 
-    // ✅ Support multiple roles: requireRole('admin', 'superadmin')
-    const allowed = requiredRoles.map((r) => r.toLowerCase());
-    console.log({ allowed });
-
-    if (!allowed.includes(userRoleStr)) {
+    if (!allowed) {
       return res.status(403).json({
         success: false,
-        error: "Forbidden",
-        message: `Insufficient permissions - requires one of: ${requiredRoles.join(", ")}`,
+        error: "FORBIDDEN",
+        message: "Insufficient permissions",
+        required: permissions,
       });
     }
 
     next();
   };
+};
 
-export function requireAuth(req, res, next) {
-  const token = req.cookies?.token;
-
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      error: "Unauthenticated",
-      message: "No authentication token provided",
-    });
-  }
-
-  jwtVerify(token, JWT_SECRET, { algorithms: ALLOWED_ALGORITHMS })
-    .then((decoded) => {
-      if (!decoded || typeof decoded !== "object") {
-        return res
-          .status(401)
-          .json({ success: false, error: "Invalid token payload" });
-      }
-
-      if (!decoded.id && !decoded.sub && !decoded.userId) {
-        return res
-          .status(401)
-          .json({ success: false, error: "Token missing user identifier" });
-      }
-
-      req.user = {
-        id: decoded.id || decoded.sub || decoded.userId,
-        email: decoded.email,
-        role: decoded.role,
-      };
-
-      return next();
-    })
-    .catch((err) => {
-      console.error("[Auth Middleware] Token verification failed", {
-        name: err.name,
-        message: err.message,
-        tokenPrefix: token.substring(0, 10) + "...",
+export const requireSelfOrPermission = (paramName, ...permissions) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: "UNAUTHENTICATED",
       });
+    }
 
-      let status = 401;
-      let message = "Authentication failed";
+    const targetId = parseInt(req.params[paramName], 10);
 
-      switch (err.name) {
-        case "TokenExpiredError":
-          message = "Session expired. Please log in again.";
-          break;
-        case "NotBeforeError":
-          message = "Token not yet valid.";
-          break;
-        case "JsonWebTokenError":
-          message = "Invalid authentication token.";
-          break;
-        default:
-          status = 500;
-          message = "Internal authentication error";
-      }
+    if (req.user.id === targetId) {
+      return next();
+    }
 
-      return res
-        .status(status)
-        .json({ success: false, error: "Unauthenticated", message });
-    });
-}
+    const userPermissions = req.user.permissions || [];
 
-export function optionalAuth(req, res, next) {
-  const token = req.cookies?.token;
-  if (!token) {
-    req.user = null;
-    return next();
-  }
+    const allowed = permissions.some((permission) =>
+      userPermissions.includes(permission),
+    );
 
-  jwtVerify(token, JWT_SECRET, { algorithms: ALLOWED_ALGORITHMS })
-    .then((decoded) => {
-      req.user = {
-        id: decoded.id || decoded.sub || decoded.userId,
-        email: decoded.email,
-        role: decoded.role,
-      };
-      next();
-    })
-    .catch(() => {
-      req.user = null;
-      next();
-    });
-}
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "FORBIDDEN",
+        message: "Insufficient permissions",
+        required: permissions,
+      });
+    }
+
+    next();
+  };
+};

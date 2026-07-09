@@ -1,7 +1,5 @@
 import express from "express";
-import multer from "multer"; // only if you define multer inline (optional)
-import path from "path"; // can remove if not used elsewhere
-import upload from "../../middleware/upload.js"; // ← your Cloudinary multer instance
+import upload from "../../middleware/upload.js";
 import { requireAuth } from "../../modules/auth/auth.middleware.js";
 
 import {
@@ -12,16 +10,12 @@ import {
   getOrderByTrackingId,
   getOrderByItemRef,
   assignContainersToOrders,
-  updateReceiverStatus,
   updateSpecificItemsStatus,
   getOrdersConsignments,
   getOrderByOrderId,
-  getMyOrdersByRef,
   removeContainerAssignments,
   getOrderByRglBookingNo,
-  assignOneContainerToMultipleReceivers,
   assignContainersBatch,
-  sendShipmentEmail,
   removeReceiver,
   removeOrderItem,
   getAssignedOrderById,
@@ -29,11 +23,206 @@ import {
 
 const router = express.Router();
 
-// ────────────────────────────────────────────────
-// Protected routes – require authentication
-// ────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/orders/consignmentsOrders:
+ *   get:
+ *     summary: Get orders grouped by consignments
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Orders grouped by consignment
+ */
+router.get("/consignmentsOrders", requireAuth, getOrdersConsignments);
 
-// POST /api/orders - Create new order (with file uploads)
+/**
+ * @swagger
+ * /api/orders/track/item/{ref}:
+ *   get:
+ *     summary: Track an order by item reference (public)
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: ref
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Order found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/track/item/:ref", getOrderByItemRef);
+
+/**
+ * @swagger
+ * /api/orders/track/order/{ref}:
+ *   get:
+ *     summary: Track an order by order ID (public)
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: ref
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Order found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/track/order/:ref", getOrderByOrderId);
+
+/**
+ * @swagger
+ * /api/orders/track/rgl/{rglBookingNo}:
+ *   get:
+ *     summary: Track an order by RGL booking number (public)
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: rglBookingNo
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Order found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
+
+/**
+ * @swagger
+ * /api/orders/track/consignment_no/{id}:
+ *   get:
+ *     summary: Track an order by consignment tracking ID (public)
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Order found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/track/consignment_no/:id", getOrderByTrackingId);
+
+/**
+ * @swagger
+ * /api/orders:
+ *   get:
+ *     summary: List all orders
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: List of orders
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Order'
+ */
+router.get("/", requireAuth, getOrders);
+
+/**
+ * @swagger
+ * /api/orders/{id}:
+ *   get:
+ *     summary: Get an order by ID
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Order found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/:id", requireAuth, getOrderById);
+
+/**
+ * @swagger
+ * /api/orders/{id}/assigned:
+ *   get:
+ *     summary: Get an order's container assignment details by ID
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Assigned order details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
+router.get("/:id/assigned", requireAuth, getAssignedOrderById);
+
+/**
+ * @swagger
+ * /api/orders:
+ *   post:
+ *     summary: Create a new order (with optional attachments/gatepass files)
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             $ref: '#/components/schemas/CreateOrderRequest'
+ *     responses:
+ *       201:
+ *         description: Order created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       400:
+ *         description: Invalid input
+ */
 router.post(
   "/",
   requireAuth,
@@ -44,7 +233,133 @@ router.post(
   createOrder,
 );
 
-// PUT /api/orders/:id - Update order (with possible new files)
+/**
+ * @swagger
+ * /api/orders/assign-container:
+ *   post:
+ *     summary: Assign a single container to an order
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AssignContainerRequest'
+ *     responses:
+ *       200:
+ *         description: Container assigned
+ *       404:
+ *         description: Order or container not found
+ */
+router.post("/assign-container", requireAuth, assignContainersToOrders);
+
+/**
+ * @swagger
+ * /api/orders/assign-containers-batch:
+ *   post:
+ *     summary: Assign containers to multiple orders in batch
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/AssignContainersBatchRequest'
+ *     responses:
+ *       200:
+ *         description: Containers assigned
+ */
+router.post("/assign-containers-batch", requireAuth, assignContainersBatch);
+
+/**
+ * @swagger
+ * /api/orders/remove-assign-container:
+ *   post:
+ *     summary: Remove a container assignment from an order
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RemoveContainerAssignmentRequest'
+ *     responses:
+ *       200:
+ *         description: Container assignment removed
+ *       404:
+ *         description: Assignment not found
+ */
+router.post(
+  "/remove-assign-container",
+  requireAuth,
+  removeContainerAssignments,
+);
+
+/**
+ * @swagger
+ * /api/orders/notify/me:
+ *   post:
+ *     summary: Trigger a shipment notification email (currently a stub)
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: query
+ *         name: email
+ *         required: true
+ *         schema: { type: string, format: email }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: Shipment data payload
+ *     responses:
+ *       200:
+ *         description: Notification triggered
+ */
+router.post("/notify/me", async (req, res) => {
+  const { email } = req.query;
+  const shipmentData = req.body;
+  console.log("hit", email, shipmentData);
+  // await sendShipmentEmail(email, shipmentData);
+  res.json({ success: true });
+});
+
+/**
+ * @swagger
+ * /api/orders/{id}:
+ *   put:
+ *     summary: Update an order (with optional attachments/gatepass files)
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateOrderRequest'
+ *     responses:
+ *       200:
+ *         description: Order updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
 router.put(
   "/:id",
   requireAuth,
@@ -55,7 +370,35 @@ router.put(
   updateOrder,
 );
 
-// PUT /api/orders/:id/shipping - Update shipping details (if it also accepts files)
+/**
+ * @swagger
+ * /api/orders/{id}/shipping:
+ *   put:
+ *     summary: Update an order's shipping details (with optional attachments/gatepass files)
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateOrderRequest'
+ *     responses:
+ *       200:
+ *         description: Order shipping details updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
 router.put(
   "/:id/shipping",
   requireAuth,
@@ -63,51 +406,94 @@ router.put(
     { name: "attachments", maxCount: 10 },
     { name: "gatepass", maxCount: 10 },
   ]),
-  updateOrder, // ← or create a dedicated handler if different logic needed
+  updateOrder,
 );
 
-// Other routes remain unchanged (no file uploads)
+/**
+ * @swagger
+ * /api/orders/{orderId}/receivers/{receiverId}/items/{itemRef}/status:
+ *   put:
+ *     summary: Update the status of a specific item for a receiver
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: receiverId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: itemRef
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/UpdateItemStatusRequest'
+ *     responses:
+ *       200:
+ *         description: Item status updated
+ *       404:
+ *         description: Order, receiver, or item not found
+ */
 router.put(
   "/:orderId/receivers/:receiverId/items/:itemRef/status",
   requireAuth,
   updateSpecificItemsStatus,
 );
-router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
+
+/**
+ * @swagger
+ * /api/orders/{orderId}/order-items/{itemId}:
+ *   delete:
+ *     summary: Remove an item from an order
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: itemId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Item removed
+ *       404:
+ *         description: Order or item not found
+ */
 router.delete("/:orderId/order-items/:itemId", removeOrderItem);
-router.post("/assign-container", requireAuth, assignContainersToOrders);
-router.post("/assign-containers-batch", requireAuth, assignContainersBatch);
-router.post(
-  "/assign-containers-to-orders",
-  requireAuth,
-  assignOneContainerToMultipleReceivers,
-);
-router.post(
-  "/remove-assign-container",
-  requireAuth,
-  removeContainerAssignments,
-);
 
-// Read / tracking routes
-router.get("/track/item/:ref", getOrderByItemRef);
-router.get("/track/order/:ref", getOrderByOrderId);
-router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
-router.get("/track/consignment_no/:id", getOrderByTrackingId);
-router.get("/consignmentsOrders", requireAuth, getOrdersConsignments);
-
-router.post("/notify/me", async (req, res) => {
-  const { email } = req.query;
-  const shipmentData = req.body;
-  console.log("hit", email, shipmentData);
-
-  // await sendShipmentEmail(email, shipmentData);
-  res.json({ success: true });
-});
-
-// Protected reads
-router.get("/", requireAuth, getOrders);
-router.get("/:id", requireAuth, getOrderById);
-router.get("/myOrderByRef", requireAuth, getMyOrdersByRef);
-
-router.get("/:id/assigned", requireAuth, getAssignedOrderById);
+/**
+ * @swagger
+ * /api/orders/{orderId}/receivers/{receiverId}:
+ *   delete:
+ *     summary: Remove a receiver from an order
+ *     tags: [Orders]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: receiverId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Receiver removed
+ *       404:
+ *         description: Order or receiver not found
+ */
+router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
 
 export default router;

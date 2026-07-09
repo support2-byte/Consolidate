@@ -1,9 +1,8 @@
-// src/modules/options/functions.js
-import pool from "../../db/pool.js"; // Fixed: Removed extra space, added .js
+import pool from "../../db/pool.js";
+import { logErrorAndNotify } from "../../services/errorMail.js";
 import logger from "../../services/logger.js";
 import { sendBugReportEmail } from "../../services/sendBugReportEmail.js";
 
-// Helper function to format options (shared across all functions)
 const formatOptions = (rows, valueField = "id", labelField = "name") => {
   return rows.map((row) => ({
     value: row[valueField],
@@ -11,93 +10,26 @@ const formatOptions = (rows, valueField = "id", labelField = "name") => {
   }));
 };
 
-// Hardcoded common ports for origin and destination (since no dedicated table/FK in schema)
-const commonPorts = [
-  "Port of Felixstowe",
-  "Port of Southampton",
-  "Port of London Gateway",
-  "Port of Liverpool",
-  "Port of Rotterdam",
-  "Port of Antwerp",
-  "Port of Singapore",
-  "Port of Shanghai",
-  "Port of New York",
-  "Port of Los Angeles",
-];
-
-// GET Shippers – now from third_parties
-export async function getShippers(req, res) {
-  try {
-    const { rows } = await pool.query(`
-      SELECT id, company_name AS name, address, contact_name, contact_email, contact_phone
-      FROM third_parties 
-    `);
-    console.log("shipeers rows", rows);
-    const options = formatOptions(rows, "id", "name");
-    console.log("shipeers rows options", options);
-
-    res.json({ shipperOptions: options });
-  } catch (err) {
-    console.error("Error fetching shippers:", err);
-    res.status(500).json({ error: "Failed to fetch shippers" });
-  }
-}
-
-// GET Consignees – same pattern
-export async function getConsignees(req, res) {
-  try {
-    const { rows } = await pool.query(`
-      SELECT id, company_name AS name, address, contact_name, contact_email, contact_phone
-      FROM third_parties 
-      WHERE type = 'CONSIGNEE'
-      ORDER BY company_name ASC
-    `);
-
-    const options = formatOptions(rows, "id", "name");
-    res.json({ consigneeOptions: options });
-  } catch (err) {
-    console.error("Error fetching consignees:", err);
-    res.status(500).json({ error: "Failed to fetch consignees" });
-  }
-}
-
-// // GET Shippers
-// export async function getShippers(req, res) {
-//   try {
-//     const { rows } = await pool.query('SELECT id, name FROM shippers ORDER BY name ASC');
-//     const options = formatOptions(rows, 'id', 'name');
-//     res.json({ shipperOptions: options });
-//   } catch (err) {
-//     console.error('Error fetching shippers:', err);
-//     res.status(500).json({ error: 'Failed to fetch shippers' });
-//   }
-// }
-
-// // GET Consignees
-// export async function getConsignees(req, res) {
-//   try {
-//     const { rows } = await pool.query('SELECT id, name FROM consignees ORDER BY name ASC');
-//     const options = formatOptions(rows, 'id', 'name');
-//     res.json({ consigneeOptions: options });
-//   } catch (err) {
-//     console.error('Error fetching consignees:', err);
-//     res.status(500).json({ error: 'Failed to fetch consignees' });
-//   }
-// }
-// GET Third Parties
 export async function getThirdParties(req, res) {
   try {
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "SELECT * FROM third_parties ORDER BY company_name ASC",
     );
-    res.json({ third_parties: rows });
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Third Parties Found!",
+      });
+    }
+    return res.json({ success: true, third_parties: result.rows });
   } catch (err) {
-    console.error("Error fetching third parties:", err);
-    res.status(500).json({ error: "Failed to fetch third parties" });
+    logger.error("Error fetching third parties:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// // POST Third Party
 export async function createThirdParty(req, res) {
   try {
     const {
@@ -108,18 +40,25 @@ export async function createThirdParty(req, res) {
       address,
       type,
     } = req.body;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "INSERT INTO third_parties (company_name, contact_name, contact_email, contact_phone, address, type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
       [company_name, contact_name, contact_email, contact_phone, address, type],
     );
-    res.status(201).json({ third_party: rows[0] });
+    if (result.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create third party!",
+      });
+    }
+    return res.status(201).json({ success: true, third_party: result.rows[0] });
   } catch (err) {
-    console.error("Error creating third party:", err);
-    res.status(500).json({ error: "Failed to create third party" });
+    logger.error("Error creating third party:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Third Party
 export async function updateThirdParty(req, res) {
   try {
     const { id } = req.params;
@@ -131,7 +70,7 @@ export async function updateThirdParty(req, res) {
       address,
       type,
     } = req.body;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "UPDATE third_parties SET company_name = $1, contact_name = $2, contact_email = $3, contact_phone = $4, address = $5, type = $6 WHERE id = $7 RETURNING *",
       [
         company_name,
@@ -143,322 +82,317 @@ export async function updateThirdParty(req, res) {
         id,
       ],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Third party not found" });
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Third Party Not Found!" });
     }
-    res.json({ third_party: rows[0] });
+    return res.json({ success: true, third_party: result.rows[0] });
   } catch (err) {
-    console.error("Error updating third party:", err);
-    res.status(500).json({ error: "Failed to update third party" });
+    logger.error("Error updating third party:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Third Party
 export async function deleteThirdParty(req, res) {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "DELETE FROM third_parties WHERE id = $1 RETURNING *",
       [id],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Third party not found" });
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Third Party Not Found!" });
     }
-    res.json({
+    return res.json({
+      success: true,
       message: "Third party deleted successfully",
-      third_party: rows[0],
+      third_party: result.rows[0],
     });
   } catch (err) {
-    console.error("Error deleting third party:", err);
-    res.status(500).json({ error: "Failed to delete third party" });
-  }
-}
-// GET Origins (hardcoded since no FK/table in schema)
-export async function getOrigins(req, res) {
-  try {
-    const options = commonPorts.map((port) => ({ value: port, label: port }));
-    res.json({ originOptions: options });
-  } catch (err) {
-    console.error("Error fetching origins:", err);
-    res.status(500).json({ error: "Failed to fetch origins" });
+    logger.error("Error deleting third party:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Places (full list)
+// --- PLACES ---
+
 export async function getPlaces(req, res) {
   try {
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "SELECT id, name, is_loading, is_destination, country, latitude, longitude FROM places ORDER BY id",
     );
-    res.json({ places: rows });
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Places Found!",
+      });
+    }
+    return res.json({ success: true, places: result.rows });
   } catch (err) {
-    console.error("Error fetching places:", err);
-    res.status(500).json({ error: "Failed to fetch places" });
+    logger.error("Error fetching places:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// POST Place
 export async function createPlace(req, res) {
   try {
     const { name, is_loading, is_destination, country, latitude, longitude } =
       req.body;
     if (!name || !country) {
-      return res.status(400).json({ error: "Name and country are required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Name and country are required" });
     }
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "INSERT INTO places (name, is_loading, is_destination, country, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, is_loading, is_destination, country, latitude, longitude",
       [name, is_loading, is_destination, country, latitude, longitude],
     );
-    res.status(201).json({ place: rows[0] });
+    if (result.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create place!",
+      });
+    }
+    return res.status(201).json({ success: true, place: result.rows[0] });
   } catch (err) {
-    console.error("Error creating place:", err);
-    res.status(500).json({ error: "Failed to create place" });
+    logger.error("Error creating place:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Place
 export async function updatePlace(req, res) {
   try {
     const { id } = req.params;
     const { name, is_loading, is_destination, country, latitude, longitude } =
       req.body;
     if (!name || !country) {
-      return res.status(400).json({ error: "Name and country are required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Name and country are required" });
     }
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "UPDATE places SET name = $1, is_loading = $2, is_destination = $3, country = $4, latitude = $5, longitude = $6 WHERE id = $7 RETURNING id, name, is_loading, is_destination, country, latitude, longitude",
       [name, is_loading, is_destination, country, latitude, longitude, id],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Place not found" });
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Place Not Found!" });
     }
-    res.json({ place: rows[0] });
+    return res.json({ success: true, place: result.rows[0] });
   } catch (err) {
-    console.error("Error updating place:", err);
-    res.status(500).json({ error: "Failed to update place" });
+    logger.error("Error updating place:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Place
 export async function deletePlace(req, res) {
   try {
     const { id } = req.params;
-    const { rowCount } = await pool.query("DELETE FROM places WHERE id = $1", [
-      id,
-    ]);
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "Place not found" });
+    const result = await pool.query("DELETE FROM places WHERE id = $1", [id]);
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Place Not Found!" });
     }
-    res.json({ message: "Place deleted successfully" });
+    return res.json({ success: true, message: "Place deleted successfully" });
   } catch (err) {
-    console.error("Error deleting place:", err);
-    res.status(500).json({ error: "Failed to delete place" });
+    logger.error("Error deleting place:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Destinations (hardcoded since no FK/table in schema)
-export async function getDestinations(req, res) {
-  try {
-    const options = commonPorts.map((port) => ({ value: port, label: port }));
-    res.json({ destinationOptions: options });
-  } catch (err) {
-    console.error("Error fetching destinations:", err);
-    res.status(500).json({ error: "Failed to fetch destinations" });
-  }
-}
+// --- BANKS ---
 
-// // GET Banks
-// export async function getBanks(req, res) {
-//   try {
-//     const { rows } = await pool.query('SELECT id, name FROM banks ORDER BY name ASC');
-//     const options = formatOptions(rows, 'id', 'name');
-//     res.json({ bankOptions: options });
-//   } catch (err) {
-//     console.error('Error fetching banks:', err);
-//     res.status(500).json({ error: 'Failed to fetch banks' });
-//   }
-// }
-
-// GET Banks
 export async function getBanks(req, res) {
   try {
-    const { rows } = await pool.query("SELECT * FROM banks ORDER BY name ASC");
-    res.json({ banks: rows });
+    const result = await pool.query("SELECT * FROM banks ORDER BY name ASC");
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Banks Found!",
+      });
+    }
+    return res.json({ success: true, banks: result.rows });
   } catch (err) {
-    console.error("Error fetching banks:", err);
-    res.status(500).json({ error: "Failed to fetch banks" });
+    logger.error("Error fetching banks:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// POST Bank
 export async function createBank(req, res) {
   try {
     const { name, account_number, swift_code, branch, address, currency } =
       req.body;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "INSERT INTO banks (name, account_number, swift_code, branch, address, currency) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
       [name, account_number, swift_code, branch, address, currency || "USD"],
     );
-    res.status(201).json({ bank: rows[0] });
+    if (result.rowCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create bank!",
+      });
+    }
+    return res.status(201).json({ success: true, bank: result.rows[0] });
   } catch (err) {
-    console.error("Error creating bank:", err);
-    res.status(500).json({ error: "Failed to create bank" });
+    logger.error("Error creating bank:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Bank
 export async function updateBank(req, res) {
   try {
     const { id } = req.params;
     const { name, account_number, swift_code, branch, address, currency } =
       req.body;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "UPDATE banks SET name = $1, account_number = $2, swift_code = $3, branch = $4, address = $5, currency = $6 WHERE id = $7 RETURNING *",
       [name, account_number, swift_code, branch, address, currency, id],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Bank not found" });
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Bank Not Found!" });
     }
-    res.json({ bank: rows[0] });
+    return res.json({ success: true, bank: result.rows[0] });
   } catch (err) {
-    console.error("Error updating bank:", err);
-    res.status(500).json({ error: "Failed to update bank" });
+    logger.error("Error updating bank:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Bank
 export async function deleteBank(req, res) {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query(
+    const result = await pool.query(
       "DELETE FROM banks WHERE id = $1 RETURNING *",
       [id],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Bank not found" });
+    if (result.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Bank Not Found!" });
     }
-    res.json({ message: "Bank deleted successfully", bank: rows[0] });
+    return res.json({
+      success: true,
+      message: "Bank deleted successfully",
+      bank: result.rows[0],
+    });
   } catch (err) {
-    console.error("Error deleting bank:", err);
-    res.status(500).json({ error: "Failed to delete bank" });
+    logger.error("Error deleting bank:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
-// Assuming the table schema is:
-// CREATE TYPE payment_category AS ENUM ('DP', 'AP', 'DA');
-// CREATE TABLE payment_types (
-//   id SERIAL PRIMARY KEY,
-//   name VARCHAR(255) UNIQUE NOT NULL,
-//   category payment_category NOT NULL,
-//   percent INTEGER DEFAULT 0 CHECK (percent >= 0),
-//   days INTEGER DEFAULT 0 CHECK (days >= 0)
-// );
 
-// GET Payment Types (full list from table)
 export async function getPaymentTypes(req, res) {
   try {
-    const { rows } = await pool.query(
-      "SELECT id, name, type, percent, days FROM payment_types ORDER BY id",
+    const paymentTypes = await pool.query(
+      "SELECT * FROM payment_types ORDER BY id",
     );
-    res.json({ paymentTypes: rows });
+    if (paymentTypes.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Payment Types Found!",
+      });
+    }
+    return res.json({ success: true, paymentTypes: paymentTypes.rows });
   } catch (err) {
-    console.error("Error fetching payment types:", err);
-    res.status(500).json({ error: "Failed to fetch payment types" });
+    logger.error("Error fetching payment type:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Payment Type Options (from enum, for dropdowns elsewhere)
-export async function getPaymentTypeOptions(req, res) {
-  try {
-    const { rows } = await pool.query(
-      `SELECT unnest(enum_range(NULL::payment_category)) as value`,
-    );
-    const options = formatOptions(rows, "value", "value");
-    res.json({ paymentTypeOptions: options });
-  } catch (err) {
-    console.error("Error fetching payment type options:", err);
-    res.status(500).json({ error: "Failed to fetch payment type options" });
-  }
-}
-
-// POST Payment Type
 export async function createPaymentType(req, res) {
   try {
     const { name, type, percent = 0, days = 0 } = req.body;
     if (!name || !type) {
-      return res.status(400).json({ error: "Name and type are required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Name and type are required" });
     }
-    // Optional: Dynamically add to enum if not exists (requires privileges)
-    const enumCheck = await pool.query(
-      `SELECT 1 FROM pg_enum WHERE enumtypid = 'payment_category'::regtype AND enumlabel = $1`,
-      [type],
-    );
-    if (enumCheck.rowCount === 0) {
-      await pool.query(
-        `ALTER TYPE payment_category ADD VALUE IF NOT EXISTS $1`,
-        [type],
-      );
-    }
-    const { rows } = await pool.query(
+    const payment = await pool.query(
       "INSERT INTO payment_types (name, type, percent, days) VALUES ($1, $2, $3, $4) RETURNING id, name, type, percent, days",
       [name, type, percent, days],
     );
-    res.status(201).json({ paymentType: rows[0] });
-  } catch (err) {
-    console.error("Error creating payment type:", err);
-    if (err.code === "23505") {
-      // Unique violation
-      res.status(409).json({ error: "Payment type name already exists" });
-    } else if (err.code === "42703") {
-      // Enum value not found (if FK enforced)
-      res.status(400).json({ error: "Invalid payment type value" });
-    } else {
-      res.status(500).json({ error: "Failed to create payment type" });
+
+    if (payment.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Could not create a new payment type!",
+      });
     }
+    return res.status(201).json({
+      success: true,
+      message: "New Payment type create successfully!",
+      paymentType: payment.rows[0],
+    });
+  } catch (err) {
+    logger.error("Error creating payment type:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Payment Type
 export async function updatePaymentType(req, res) {
   try {
     const { id } = req.params;
     const { name, type, percent = 0, days = 0 } = req.body;
     if (!name || !type) {
-      return res.status(400).json({ error: "Name and type are required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Name and type are required" });
     }
-    // Optional: Dynamically add to enum if new type
-    const enumCheck = await pool.query(
-      `SELECT 1 FROM pg_enum WHERE enumtypid = 'payment_category'::regtype AND enumlabel = $1`,
-      [type],
-    );
-    if (enumCheck.rowCount === 0) {
-      await pool.query(
-        `ALTER TYPE payment_category ADD VALUE IF NOT EXISTS $1`,
-        [type],
-      );
-    }
-    const { rows } = await pool.query(
+
+    const payment = await pool.query(
       "UPDATE payment_types SET name = $1, type = $2, percent = $3, days = $4 WHERE id = $5 RETURNING id, name, type, percent, days",
       [name, type, percent, days, id],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Payment type not found" });
+    if (payment.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Payment type not found" });
     }
-    res.json({ paymentType: rows[0] });
+
+    return res.json({
+      success: true,
+      message: "New Payment type create successfully!",
+      paymentType: payment.rows[0],
+    });
   } catch (err) {
-    console.error("Error updating payment type:", err);
-    if (err.code === "23505") {
-      // Unique violation
-      res.status(409).json({ error: "Payment type name already exists" });
-    } else if (err.code === "42703") {
-      // Enum value not found
-      res.status(400).json({ error: "Invalid payment type value" });
-    } else {
-      res.status(500).json({ error: "Failed to update payment type" });
-    }
+    logger.error("Error updating payment type:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Payment Type
 export async function deletePaymentType(req, res) {
   try {
     const { id } = req.params;
@@ -467,92 +401,100 @@ export async function deletePaymentType(req, res) {
       [id],
     );
     if (rowCount === 0) {
-      return res.status(404).json({ error: "Payment type not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Payment type not found" });
     }
-    // Note: Enum values aren't deleted automatically; handle manually if needed
-    res.json({ message: "Payment type deleted successfully" });
+    return res.json({
+      success: true,
+      message: "Payment type deleted successfully",
+    });
   } catch (err) {
-    console.error("Error deleting payment type:", err);
-    res.status(500).json({ error: "Failed to delete payment type" });
+    logger.error("Error deleting payment type:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// Assuming the table schema:
-// CREATE TABLE categories (
-//   id SERIAL PRIMARY KEY,
-//   name VARCHAR(255) UNIQUE NOT NULL
-// );
-//
-// CREATE TABLE subcategories (
-//   id SERIAL PRIMARY KEY,
-//   name VARCHAR(255) NOT NULL,
-//   category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE
-// );
-
-// GET Categories (full list)
 export async function getCategories(req, res) {
   try {
-    const { rows } = await pool.query(
-      "SELECT id, name FROM categories ORDER BY id",
-    );
-    res.json({ categories: rows });
+    const { rows } = await pool.query("SELECT * FROM categories ORDER BY id");
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Categories found",
+      });
+    }
+    return res.json({ success: true, categories: rows });
   } catch (err) {
-    console.error("Error fetching categories:", err);
-    res.status(500).json({ error: "Failed to fetch categories" });
+    logger.error("Error fetching categories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// POST Category
 export async function createCategory(req, res) {
   try {
     const { name } = req.body;
     if (!name) {
-      return res.status(400).json({ error: "Name is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Name is required" });
     }
     const { rows } = await pool.query(
-      "INSERT INTO categories (name) VALUES ($1) RETURNING id, name",
+      "INSERT INTO categories (name) VALUES ($1) RETURNING *",
       [name],
     );
-    res.status(201).json({ category: rows[0] });
-  } catch (err) {
-    console.error("Error creating category:", err);
-    if (err.code === "23505") {
-      // Unique violation
-      res.status(409).json({ error: "Category name already exists" });
-    } else {
-      res.status(500).json({ error: "Failed to create category" });
+
+    if (rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create new category",
+      });
     }
+    return res.status(201).json({ success: true, category: rows[0] });
+  } catch (err) {
+    logger.error("Error creating categories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Category
 export async function updateCategory(req, res) {
   try {
     const { id } = req.params;
-    const { name } = req.body;
+    const { name, status } = req.body;
     if (!name) {
-      return res.status(400).json({ error: "Name is required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Category name is required" });
     }
     const { rows } = await pool.query(
-      "UPDATE categories SET name = $1 WHERE id = $2 RETURNING id, name",
-      [name, id],
+      "UPDATE categories SET name = $1, status = $2 WHERE id = $3 RETURNING *",
+      [name, status, id],
     );
     if (rows.length === 0) {
-      return res.status(404).json({ error: "Category not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Failed to create category" });
     }
-    res.json({ category: rows[0] });
+    return res.json({
+      success: true,
+      message: "Category updated successfully",
+      category: rows[0],
+    });
   } catch (err) {
-    console.error("Error updating category:", err);
-    if (err.code === "23505") {
-      // Unique violation
-      res.status(409).json({ error: "Category name already exists" });
-    } else {
-      res.status(500).json({ error: "Failed to update category" });
-    }
+    logger.error("Error updating categories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Category
 export async function deleteCategory(req, res) {
   try {
     const { id } = req.params;
@@ -561,96 +503,108 @@ export async function deleteCategory(req, res) {
       [id],
     );
     if (rowCount === 0) {
-      return res.status(404).json({ error: "Category not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Could not delete category" });
     }
-    // Subcategories will be deleted via ON DELETE CASCADE
-    res.json({ message: "Category deleted successfully" });
+    return res.json({
+      success: true,
+      message: "Category deleted successfully",
+    });
   } catch (err) {
-    console.error("Error deleting category:", err);
-    res.status(500).json({ error: "Failed to delete category" });
+    logger.error("Error deleting categories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Subcategories (full list, optionally filtered by category_id)
 export async function getSubcategories(req, res) {
   try {
     const { category_id } = req.query;
-    let query = "SELECT id, name, category_id FROM subcategories";
-    let params = [];
+
+    let data;
     if (category_id) {
-      query += " WHERE category_id = $1";
-      params = [category_id];
+      data = await pool.query(
+        "SELECT * FROM subcategories WHERE category_id = $1 ORDER BY id",
+        [category_id],
+      );
+    } else {
+      data = await pool.query("SELECT * FROM subcategories ORDER BY id");
     }
-    query += " ORDER BY id";
-    const { rows } = await pool.query(query, params);
-    res.json({ subcategories: rows });
+
+    if (data.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Sub-Categories found",
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      subCategories: data.rows,
+    });
   } catch (err) {
-    console.error("Error fetching subcategories:", err);
-    res.status(500).json({ error: "Failed to fetch subcategories" });
+    logger.error("Error fetching subCategories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// POST Subcategory
 export async function createSubcategory(req, res) {
   try {
     const { name, category_id } = req.body;
     if (!name || !category_id) {
       return res
         .status(400)
-        .json({ error: "Name and category_id are required" });
-    }
-    // Verify category exists
-    const catCheck = await pool.query(
-      "SELECT id FROM categories WHERE id = $1",
-      [category_id],
-    );
-    if (catCheck.rowCount === 0) {
-      return res.status(400).json({ error: "Invalid category_id" });
+        .json({ success: false, message: "Name and Category ID are required" });
     }
     const { rows } = await pool.query(
       "INSERT INTO subcategories (name, category_id) VALUES ($1, $2) RETURNING id, name, category_id",
       [name, category_id],
     );
-    res.status(201).json({ subcategory: rows[0] });
+
+    if (rows.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Could not create sub-category" });
+    }
+    return res.status(201).json({ success: true, subcategory: rows[0] });
   } catch (err) {
-    console.error("Error creating subcategory:", err);
-    res.status(500).json({ error: "Failed to create subcategory" });
+    logger.error("Error creating subCategories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Subcategory
 export async function updateSubcategory(req, res) {
   try {
     const { id } = req.params;
-    const { name, category_id } = req.body;
+    const { name, status, category_id } = req.body;
     if (!name || !category_id) {
       return res
         .status(400)
-        .json({ error: "Name and category_id are required" });
-    }
-    // Verify category exists
-    const catCheck = await pool.query(
-      "SELECT id FROM categories WHERE id = $1",
-      [category_id],
-    );
-    if (catCheck.rowCount === 0) {
-      return res.status(400).json({ error: "Invalid category_id" });
+        .json({ success: false, message: "Name and Category ID are required" });
     }
     const { rows } = await pool.query(
-      "UPDATE subcategories SET name = $1, category_id = $2 WHERE id = $3 RETURNING id, name, category_id",
-      [name, category_id, id],
+      "UPDATE subcategories SET name = $1, category_id = $2, status = $3 WHERE id = $4 RETURNING *",
+      [name, category_id, status, id],
     );
     if (rows.length === 0) {
-      return res.status(404).json({ error: "Subcategory not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Subcategory not found" });
     }
-    res.json({ subcategory: rows[0] });
+    return res.json({ subcategory: rows[0] });
   } catch (err) {
-    console.error("Error updating subcategory:", err);
-    res.status(500).json({ error: "Failed to update subcategory" });
+    logger.error("Error updating subCategories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Subcategory
 export async function deleteSubcategory(req, res) {
   try {
     const { id } = req.params;
@@ -659,73 +613,96 @@ export async function deleteSubcategory(req, res) {
       [id],
     );
     if (rowCount === 0) {
-      return res.status(404).json({ error: "Subcategory not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Could not delete sub-category" });
     }
-    res.json({ message: "Subcategory deleted successfully" });
+    return res.json({ message: "Subcategory deleted successfully" });
   } catch (err) {
-    console.error("Error deleting subcategory:", err);
-    res.status(500).json({ error: "Failed to delete subcategory" });
+    logger.error("Error delete subCategories:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Vessels (full list)
 export async function getVessels(req, res) {
   try {
     const { rows } = await pool.query(
       "SELECT id, name, capacity, status FROM vessels ORDER BY id",
     );
-    res.json({ vessels: rows });
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Vessel found",
+      });
+    }
+    return res.json({ success: true, vessels: rows });
   } catch (err) {
-    console.error("Error fetching vessels:", err);
-    res.status(500).json({ error: "Failed to fetch vessels" });
+    logger.error("Error fetching vessels:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// POST Vessel
 export async function createVessel(req, res) {
   try {
     const { name, capacity, status } = req.body;
     if (!name || !capacity || !status) {
       return res
         .status(400)
-        .json({ error: "Name, capacity, and status are required" });
+        .json({ success: true, message: "Fileds are reqiured!" });
     }
     const { rows } = await pool.query(
-      "INSERT INTO vessels (name, capacity, status) VALUES ($1, $2, $3) RETURNING id, name, capacity, status",
+      "INSERT INTO vessels (name, capacity, status) VALUES ($1, $2, $3) RETURNING *",
       [name, capacity, status],
     );
-    res.status(201).json({ vessel: rows[0] });
+    return res.status(201).json({
+      success: true,
+      message: "Vessel added successfully",
+      vessel: rows[0],
+    });
   } catch (err) {
-    console.error("Error creating vessel:", err);
-    res.status(500).json({ error: "Failed to create vessel" });
+    logger.error("Error creating vessels:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// PUT Vessel
 export async function updateVessel(req, res) {
   try {
     const { id } = req.params;
     const { name, capacity, status } = req.body;
     if (!name || !capacity || !status) {
-      return res
-        .status(400)
-        .json({ error: "Name, capacity, and status are required" });
+      return res.status(400).json({
+        success: false,
+        message: "Name, capacity, and status are required",
+      });
     }
     const { rows } = await pool.query(
-      "UPDATE vessels SET name = $1, capacity = $2, status = $3 WHERE id = $4 RETURNING id, name, capacity, status",
+      "UPDATE vessels SET name = $1, capacity = $2, status = $3 WHERE id = $4 RETURNING *",
       [name, capacity, status, id],
     );
     if (rows.length === 0) {
-      return res.status(404).json({ error: "Vessel not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Vessel not found" });
     }
-    res.json({ vessel: rows[0] });
+    return res.json({
+      success: true,
+      message: "Updated Vessel successfully",
+      vessel: rows[0],
+    });
   } catch (err) {
-    console.error("Error updating vessel:", err);
-    res.status(500).json({ error: "Failed to update vessel" });
+    logger.error("Error updating vessels:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// DELETE Vessel
 export async function deleteVessel(req, res) {
   try {
     const { id } = req.params;
@@ -733,149 +710,96 @@ export async function deleteVessel(req, res) {
       id,
     ]);
     if (rowCount === 0) {
-      return res.status(404).json({ error: "Vessel not found" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Could not delete Vessel" });
     }
-    res.json({ message: "Vessel deleted successfully" });
+    return res.json({ success: true, message: "Vessel deleted successfully" });
   } catch (err) {
-    console.error("Error deleting vessel:", err);
-    res.status(500).json({ error: "Failed to delete vessel" });
+    logger.error("Error deleting vessels:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Shipping Lines
 export async function getShippingLines(req, res) {
   try {
     const { rows } = await pool.query(
       "SELECT id, name FROM shipping_lines ORDER BY name ASC",
     );
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No Sipping Lines Found!",
+      });
+    }
     const options = formatOptions(rows, "id", "name");
-    res.json({ shippingLineOptions: options });
+    return res.json({ success: true, shippingLineOptions: options });
   } catch (err) {
-    console.error("Error fetching shipping lines:", err);
-    res.status(500).json({ error: "Failed to fetch shipping lines" });
+    logger.error("Error fetching shipping lines:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Currencies
 export async function getCurrencies(req, res) {
   try {
     const { rows } = await pool.query(
       "SELECT code as value FROM currencies ORDER BY code ASC",
     );
-    const options = formatOptions(rows, "value", "value");
-    res.json({ currencyOptions: options });
-  } catch (err) {
-    console.error("Error fetching currencies:", err);
-    res.status(500).json({ error: "Failed to fetch currencies" });
-  }
-}
-
-// GET all ETA configs
-export async function getEtaConfigs(req, res) {
-  try {
-    const { rows } = await pool.query(
-      "SELECT * FROM eta_config ORDER BY id ASC",
-    );
-    res.json(rows);
-  } catch (err) {
-    console.error("Error fetching eta configs:", err);
-    res.status(500).json({ error: "Failed to fetch eta configs" });
-  }
-}
-
-// POST new ETA config
-export async function createEtaConfig(req, res) {
-  const { status, days_offset } = req.body;
-  try {
-    const { rows } = await pool.query(
-      "INSERT INTO eta_config (status, days_offset) VALUES ($1, $2) RETURNING *",
-      [status, days_offset || 0], // Default handled by DB, but explicit for safety
-    );
-    res.status(201).json(rows[0]);
-  } catch (err) {
-    console.error("Error creating eta config:", err);
-    if (err.code === "23505") {
-      // Unique violation on status
-      return res.status(409).json({ error: "Status already exists" });
-    }
-    res.status(500).json({ error: "Failed to create eta config" });
-  }
-}
-
-// PUT update ETA config
-export async function updateEtaConfig(req, res) {
-  const { id } = req.params;
-  const { status, days_offset } = req.body;
-  try {
-    const { rows } = await pool.query(
-      "UPDATE eta_config SET status = $1, days_offset = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *",
-      [status, days_offset || 0, id],
-    );
     if (rows.length === 0) {
-      return res.status(404).json({ error: "Eta config not found" });
+      return res.status(404).json({
+        success: false,
+        message: "No Currencies Found!",
+      });
     }
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("Error updating eta config:", err);
-    if (err.code === "23505") {
-      // Unique violation on status
-      return res.status(409).json({ error: "Status already exists" });
-    }
-    res.status(500).json({ error: "Failed to update eta config" });
-  }
-}
-
-// DELETE ETA config
-export async function deleteEtaConfig(req, res) {
-  const { id } = req.params;
-  try {
-    const { rows } = await pool.query(
-      "DELETE FROM eta_config WHERE id = $1 RETURNING *",
-      [id],
-    );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Eta config not found" });
-    }
-    res.json({ message: "Eta config deleted successfully" });
-  } catch (err) {
-    console.error("Error deleting eta config:", err);
-    res.status(500).json({ error: "Failed to delete eta config" });
-  }
-}
-// GET Statuses (from enum)
-export async function getStatuses(req, res) {
-  try {
-    const { rows } = await pool.query(
-      `SELECT unnest(enum_range(NULL::consignment_status)) as value`,
-    );
     const options = formatOptions(rows, "value", "value");
-    res.json({ statusOptions: options });
+    return res.json({ success: true, currencyOptions: options });
   } catch (err) {
-    console.error("Error fetching statuses:", err);
-    res.status(500).json({ error: "Failed to fetch statuses" });
+    logger.error("Error fetching currencies:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 }
 
-// GET Container Statuses (hardcoded since no table/enum)
-export async function getContainerStatuses(req, res) {
+export const addNewStatus = async (req, res) => {
   try {
-    const hardcodedStatuses = [
-      "Pending",
-      "Loaded",
-      "In Transit",
-      "Delivered",
-      "Returned",
-    ];
-    const options = hardcodedStatuses.map((status) => ({
-      value: status,
-      label: status,
-    }));
-    res.json({ containerStatusOptions: options });
+    const {
+      order_status,
+      container_status,
+      consignment_status,
+      days_offset,
+      sorting_number,
+    } = req.body;
+
+    const newStatus = await pool.query(
+      `INSERT INTO statuses (order_status, container_status, consignment_status, days_offset, sorting_number, status)
+       VALUES ($1, $2, $3, $4, $5, true)
+       RETURNING *`,
+      [
+        order_status || null,
+        container_status || null,
+        consignment_status || null,
+        days_offset ?? 0,
+        sorting_number ?? 0,
+      ],
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Status added!",
+      status: newStatus.rows[0],
+    });
   } catch (err) {
-    console.error("Error fetching container statuses:", err);
-    res.status(500).json({ error: "Failed to fetch container statuses" });
+    logger.error("Error creating status for statuses:", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
-}
+};
 
 export const getAllStatus = async (req, res) => {
   try {
@@ -889,7 +813,7 @@ export const getAllStatus = async (req, res) => {
     }
     return res.status(200).json({ success: true, statuses: statuses.rows });
   } catch (err) {
-    console.error("Error fetching statuses:", err);
+    logger.error("Error fetching statuses:", { error: err.message });
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
@@ -942,43 +866,7 @@ export const updateStatus = async (req, res) => {
       status: updatedStatus.rows[0],
     });
   } catch (err) {
-    console.error("Error updating status:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Something went wrong!" });
-  }
-};
-
-export const addNewStatus = async (req, res) => {
-  try {
-    const {
-      order_status,
-      container_status,
-      consignment_status,
-      days_offset,
-      sorting_number,
-    } = req.body;
-
-    const newStatus = await pool.query(
-      `INSERT INTO statuses (order_status, container_status, consignment_status, days_offset, sorting_number, status)
-       VALUES ($1, $2, $3, $4, $5, true)
-       RETURNING *`,
-      [
-        order_status || null,
-        container_status || null,
-        consignment_status || null,
-        days_offset ?? 0,
-        sorting_number ?? 0,
-      ],
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Status added!",
-      status: newStatus.rows[0],
-    });
-  } catch (err) {
-    console.error("Error adding status:", err);
+    logger.error("Error updating status for statuses:", { error: err.message });
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
@@ -1002,7 +890,9 @@ export const deleteStatus = async (req, res) => {
 
     return res.status(200).json({ success: true, message: "Status deleted!" });
   } catch (err) {
-    console.error("Error deleting status:", err);
+    logger.error("Error deleting status from statuses:", {
+      error: err.message,
+    });
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
@@ -1013,16 +903,30 @@ export const createBugReport = async (req, res) => {
   const { title, description } = req.body;
 
   if (!title?.trim() || !description?.trim()) {
+    logger.warn("Bug report validation failed", {
+      reason: "Missing title or description",
+    });
+
     return res
       .status(400)
       .json({ message: "Title and description are required." });
   }
+
   if (title.trim().length > 80) {
+    logger.warn("Bug report validation failed", {
+      reason: "Title exceeds maximum length",
+    });
+
     return res
       .status(400)
       .json({ message: "Title must be 80 characters or fewer." });
   }
+
   if (description.trim().length > 1000) {
+    logger.warn("Bug report validation failed", {
+      reason: "Description exceeds maximum length",
+    });
+
     return res
       .status(400)
       .json({ message: "Description must be 1000 characters or fewer." });
@@ -1034,13 +938,20 @@ export const createBugReport = async (req, res) => {
       VALUES ($1, $2, NOW()) 
       RETURNING id, title, description, is_fixed AS "isFixed", created_at AS "createdAt"
     `;
+
     const { rows } = await pool.query(reportQuery, [
       title.trim(),
       description.trim(),
     ]);
+
     const newReport = rows[0];
 
+    logger.info("Bug report created", {
+      reportId: newReport.id,
+    });
+
     let attachments = [];
+
     if (req.files?.length) {
       const attachmentInserts = req.files.map((file) =>
         pool.query(
@@ -1048,8 +959,14 @@ export const createBugReport = async (req, res) => {
           [newReport.id, file.path],
         ),
       );
+
       const results = await Promise.all(attachmentInserts);
       attachments = results.map((r) => r.rows[0].image_url);
+
+      logger.info("Bug report attachments uploaded", {
+        reportId: newReport.id,
+        count: attachments.length,
+      });
     }
 
     try {
@@ -1059,8 +976,13 @@ export const createBugReport = async (req, res) => {
         submittedAt: newReport.createdAt,
         attachments,
       });
+
+      logger.info("Bug report notification email sent", {
+        reportId: newReport.id,
+      });
     } catch (emailErr) {
-      logger.error("[bug-report] Email failed, report saved", {
+      logger.error("Failed to send bug report notification email", {
+        reportId: newReport.id,
         error: emailErr.message,
       });
     }
@@ -1070,7 +992,10 @@ export const createBugReport = async (req, res) => {
       report: { ...newReport, attachments },
     });
   } catch (err) {
-    logger.error("[bug-report] DB Insert failed", { error: err.message });
+    logger.error("Failed to create bug report", {
+      error: err.message,
+    });
+
     return res
       .status(500)
       .json({ message: "Failed to save the report. Please try again." });
@@ -1095,11 +1020,22 @@ export const getBugReports = async (req, res) => {
       GROUP BY br.id
       ORDER BY br.created_at DESC
     `;
+
     const { rows } = await pool.query(query);
+
+    logger.info("Bug reports fetched", {
+      count: rows.length,
+    });
+
     return res.status(200).json({ reports: rows });
   } catch (err) {
-    logger.error("[bug-report] DB Fetch failed", { error: err.message });
-    return res.status(500).json({ message: "Failed to fetch bug reports." });
+    await logErrorAndNotify("getBugReports", err, req);
+    logger.error("Error fetching bug reports:", {
+      error: err.message,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 };
 
@@ -1120,10 +1056,15 @@ export const updateBugReport = async (req, res) => {
     );
 
     if (rows.length === 0) {
+      logger.warn("Bug report not found", {
+        reportId: id,
+      });
+
       return res.status(404).json({ message: "Bug report not found." });
     }
 
     let attachments = [];
+
     if (req.files?.length) {
       const inserts = req.files.map((file) =>
         pool.query(
@@ -1131,14 +1072,25 @@ export const updateBugReport = async (req, res) => {
           [id, file.path],
         ),
       );
+
       const results = await Promise.all(inserts);
       attachments = results.map((r) => r.rows[0].image_url);
+
+      logger.info("Bug report attachments uploaded", {
+        reportId: id,
+        count: attachments.length,
+      });
     }
 
     const { rows: existingAttachments } = await pool.query(
       `SELECT image_url FROM bug_report_attachments WHERE report_id = $1`,
       [id],
     );
+
+    logger.info("Bug report updated", {
+      reportId: id,
+      status: isFixed,
+    });
 
     return res.status(200).json({
       message: "Bug report updated successfully.",
@@ -1148,8 +1100,14 @@ export const updateBugReport = async (req, res) => {
       },
     });
   } catch (err) {
-    logger.error("[bug-report] DB Update failed", { error: err.message });
-    return res.status(500).json({ message: "Failed to update bug report." });
+    logger.error("Failed to update bug report", {
+      reportId: id,
+      error: err.message,
+    });
+
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 };
 
@@ -1161,14 +1119,135 @@ export const deleteBugReport = async (req, res) => {
     const { rows } = await pool.query(query, [id]);
 
     if (rows.length === 0) {
-      return res.status(404).json({ message: "Bug report not found." });
+      logger.warn("Bug report not found", {
+        reportId: id,
+      });
+
+      return res.status(404).json({
+        message: "Bug report not found.",
+      });
     }
 
-    return res
-      .status(200)
-      .json({ message: "Bug report deleted successfully." });
+    logger.info("Bug report deleted", {
+      reportId: id,
+    });
+
+    return res.status(200).json({
+      message: "Bug report deleted successfully.",
+    });
   } catch (err) {
-    console.error("[bug-report] DB Delete failed:", err);
-    return res.status(500).json({ message: "Failed to delete bug report." });
+    logger.error("Failed to delete bug report", {
+      reportId: id,
+      error: err.message,
+    });
+
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const getDashboardData = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const [
+      recentOrders,
+      ordersCount,
+      containersCount,
+      consignmentsCount,
+      recentConsignments,
+      statusesResult,
+      ordersByStatusResult,
+      customersCount,
+      sendersCount,
+      receiversCount,
+    ] = await Promise.all([
+      client.query(`
+        SELECT
+          o.id,
+          o.rgl_booking_number,
+          (SELECT r.status FROM receivers r WHERE r.order_id = o.id ORDER BY r.id DESC LIMIT 1) as order_status,
+          (SELECT r.receiver_name FROM receivers r WHERE r.order_id = o.id ORDER BY r.id DESC LIMIT 1) as receiver_name,
+          (SELECT r.eta FROM receivers r WHERE r.order_id = o.id ORDER BY r.id DESC LIMIT 1) as eta,
+          (SELECT oi.item_ref 
+          FROM order_items oi 
+          WHERE oi.order_id = o.id 
+          ORDER BY oi.id DESC 
+          LIMIT 1) as item_ref
+        FROM orders o
+        ORDER BY o.id DESC
+        LIMIT 10
+      `),
+
+      client.query(`SELECT COUNT(*) as total FROM orders`),
+      client.query(`SELECT COUNT(*) as total FROM container_master`),
+      client.query(`SELECT COUNT(*) as total FROM consignments`),
+
+      client.query(`
+        SELECT
+          cons.id,
+          cons.consignment_number,
+          cons.status,
+          COALESCE(consignee_tp.company_name, cons.consignee) AS consignee,
+          cons.eta
+        FROM consignments cons
+        LEFT JOIN third_parties consignee_tp ON cons.consignee_id = consignee_tp.id
+        ORDER BY cons.id DESC
+        LIMIT 10
+      `),
+
+      client.query(
+        `SELECT * FROM statuses WHERE status = true ORDER BY sorting_number ASC`,
+      ),
+
+      client.query(`
+        SELECT r.status, COUNT(DISTINCT r.order_id) as count 
+        FROM receivers r 
+        WHERE r.status IS NOT NULL 
+        GROUP BY r.status
+      `),
+
+      client.query(`SELECT COUNT(*) as total FROM customers`),
+      client.query(`SELECT COUNT(*) as total FROM senders`),
+      client.query(`SELECT COUNT(*) as total FROM receivers`),
+    ]);
+
+    const statuses = statusesResult.rows;
+
+    const formatCounts = (rows) => {
+      const obj = {};
+      rows.forEach((r) => (obj[r.status] = Number(r.count)));
+      return obj;
+    };
+
+    const ordersByStatus = formatCounts(ordersByStatusResult.rows);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        counts: {
+          orders: Number(ordersCount.rows[0]?.total || 0),
+          containers: Number(containersCount.rows[0]?.total || 0),
+          consignments: Number(consignmentsCount.rows[0]?.total || 0),
+          customers: Number(customersCount.rows[0]?.total || 0),
+          senders: Number(sendersCount.rows[0]?.total || 0),
+          receivers: Number(receiversCount.rows[0]?.total || 0),
+        },
+        countsByStatus: {
+          orders: ordersByStatus,
+        },
+        statuses,
+        recentOrders: recentOrders.rows,
+        recentConsignments: recentConsignments.rows,
+      },
+    });
+  } catch (err) {
+    logger.error("Error fetching dashboard data", { error: err.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch dashboard data" });
+  } finally {
+    client.release();
   }
 };
