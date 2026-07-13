@@ -396,10 +396,6 @@ export async function updateOrder(req, res) {
     let hasAttachmentChange = false;
     let hasGatepassChange = false;
 
-    console.log("[updateOrder] Starting update for order ID:", id);
-    console.log("[updateOrder] Received body keys:", Object.keys(updates));
-
-    // ── 1. Fetch current state ─────────────────────────────────────
     const currentOrderRes = await client.query(
       "SELECT * FROM orders WHERE id = $1",
       [id],
@@ -422,7 +418,6 @@ export async function updateOrder(req, res) {
     );
     const currentTransport = currentTransportRes.rows[0] || {};
 
-    // ── 2. Parse incoming data ─────────────────────────────────────
     let incomingReceivers = [];
     const panel2Key =
       updates.sender_type === "sender" ? "receivers" : "senders";
@@ -452,7 +447,6 @@ export async function updateOrder(req, res) {
       }
     }
 
-    // ── 3. Attachments Handling ───────────────────────────────────
     let currentAttachments = currentOrder.attachments || [];
     if (typeof currentAttachments === "string") {
       currentAttachments = JSON.parse(currentAttachments) || [];
@@ -481,7 +475,6 @@ export async function updateOrder(req, res) {
     const attachmentsJson = JSON.stringify(newAttachments);
     if (hasAttachmentChange) hasAnyChange = true;
 
-    // ── 4. Gatepass Handling ──────────────────────────────────────
     let currentGatepass = currentTransport.gatepass || [];
     if (typeof currentGatepass === "string") {
       currentGatepass = JSON.parse(currentGatepass) || [];
@@ -510,7 +503,6 @@ export async function updateOrder(req, res) {
     const gatepassJson = JSON.stringify(newGatepass);
     if (hasGatepassChange) hasAnyChange = true;
 
-    // ── 5. Upsert Receivers + Order Items ─────────────────────────
     const receiverIdMap = {};
 
     const existingReceiversRes = await client.query(
@@ -614,7 +606,6 @@ export async function updateOrder(req, res) {
         );
       }
 
-      // Order Items for this receiver
       const itemsForThisReceiver = incomingOrderItems.filter(
         (item) =>
           String(item.receiver_index ?? item.receiverIndex) === String(i),
@@ -679,11 +670,79 @@ export async function updateOrder(req, res) {
       }
     }
 
-    // ── 6. Drop-off Details (Clear old + Insert new) ─────────────────────
+    {
+      const senderName =
+        updates.sender_name ?? currentSender.sender_name ?? null;
+      const senderContact =
+        updates.sender_contact ?? currentSender.sender_contact ?? null;
+      const senderAddress =
+        updates.sender_address ?? currentSender.sender_address ?? null;
+      const senderEmail =
+        updates.sender_email ?? currentSender.sender_email ?? null;
+      const senderRef = updates.sender_ref ?? currentSender.sender_ref ?? null;
+      const senderRemarks =
+        updates.sender_remarks ?? currentSender.sender_remarks ?? null;
+      const selectedSenderOwner =
+        updates.selected_sender_owner ??
+        currentSender.selected_sender_owner ??
+        "individual";
+      const senderType =
+        updates.sender_type_owner ?? currentSender.sender_type ?? "individual";
+
+      const senderFieldsPresent = [
+        "sender_name",
+        "sender_contact",
+        "sender_address",
+        "sender_email",
+        "sender_ref",
+        "sender_remarks",
+        "selected_sender_owner",
+      ].some((k) => updates[k] !== undefined);
+
+      if (senderFieldsPresent || currentSenderRes.rowCount > 0) {
+        if (currentSenderRes.rowCount > 0) {
+          await client.query(
+            `UPDATE senders SET
+               sender_name = $2, sender_contact = $3, sender_address = $4,
+               sender_email = $5, sender_ref = $6, sender_remarks = $7,
+               selected_sender_owner = $8
+             WHERE id = $1`,
+            [
+              currentSender.id,
+              senderName,
+              senderContact,
+              senderAddress,
+              senderEmail,
+              senderRef,
+              senderRemarks,
+              selectedSenderOwner,
+            ],
+          );
+        } else {
+          await client.query(
+            `INSERT INTO senders (
+               order_id, sender_name, sender_contact, sender_address,
+               sender_email, sender_ref, sender_remarks, selected_sender_owner
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              id,
+              senderName,
+              senderContact,
+              senderAddress,
+              senderEmail,
+              senderRef,
+              senderRemarks,
+              selectedSenderOwner,
+            ],
+          );
+        }
+        hasAnyChange = true;
+      }
+    }
+
     if (incomingDropOffs.length > 0) {
       hasAnyChange = true;
 
-      // First, delete old drop-off details for this order (recommended)
       await client.query(`DELETE FROM drop_off_details WHERE order_id = $1`, [
         id,
       ]);
@@ -722,7 +781,6 @@ export async function updateOrder(req, res) {
       }
     }
 
-    // ── 7. Update Transport Details ─────────────────────────────────────
     const transportUpdateQuery = `
       INSERT INTO transport_details (order_id, transport_type, collection_scope, 
         collection_method, third_party_transport, driver_name, driver_contact, 
@@ -780,7 +838,6 @@ export async function updateOrder(req, res) {
 
     hasAnyChange = true;
 
-    // ── 8. Update Orders Table ─────────────────────────────────────
     const updatedFields = {
       booking_ref: updates.booking_ref ?? currentOrder.booking_ref,
       status: updates.status ?? currentOrder.status,
@@ -797,7 +854,6 @@ export async function updateOrder(req, res) {
       eta: updates.eta ? normalizeDate(updates.eta) : currentOrder.eta,
       etd: updates.etd ? normalizeDate(updates.etd) : currentOrder.etd,
       attachments: attachmentsJson,
-      // sender_ref, sender_remarks etc. can be added here if needed
     };
 
     const ordersSet = [];
@@ -822,12 +878,14 @@ export async function updateOrder(req, res) {
       );
     }
 
-    // ── 9. COMMIT ─────────────────────────────────────────────────
     await client.query("COMMIT");
 
-    // Refetch updated data
     const updatedOrder = await client.query(
       "SELECT * FROM orders WHERE id = $1",
+      [id],
+    );
+    const updatedSender = await client.query(
+      "SELECT * FROM senders WHERE order_id = $1",
       [id],
     );
     const updatedReceivers = await client.query(
@@ -839,6 +897,7 @@ export async function updateOrder(req, res) {
     res.status(200).json({
       message: "Order updated successfully",
       order: updatedOrder.rows[0],
+      sender: updatedSender.rows[0] || null,
       receivers: updatedReceivers.rows.map((r) => ({
         ...r,
         eta: r.eta ? String(r.eta).split("T")[0] : "",

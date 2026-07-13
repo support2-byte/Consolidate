@@ -361,7 +361,6 @@ export async function createContainer(req, res) {
         .json({ error: "Normalized dates invalid for COC. Use YYYY-MM-DD." });
     }
 
-    // Check for duplicate container_number
     const checkQuery =
       "SELECT cid FROM container_master WHERE container_number = $1";
     const checkResult = await client.query(checkQuery, [container_number]);
@@ -370,7 +369,6 @@ export async function createContainer(req, res) {
       return res.status(409).json({ error: "Container number already exists" });
     }
 
-    // Insert master
     const masterQuery = `
       INSERT INTO container_master (container_number, container_size, container_type, owner_type, remarks, status, created_by)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -388,19 +386,17 @@ export async function createContainer(req, res) {
     const masterResult = await client.query(masterQuery, masterValues);
     const cid = masterResult.rows[0].cid;
 
-    // Insert initial status history
     await client.query(
       "INSERT INTO container_status (cid, location, availability, status_notes, created_by) VALUES ($1, $2, $3, $4, $5)",
       [
         cid,
-        location || "karachi_port",
+        location,
         derived_status || availability || "Available",
         "Initial creation",
         created_by || "system",
       ],
     );
 
-    // Conditional insert
     if (owner_type === "soc") {
       console.log("Inserting SOC with available_at (string):", available_at);
       await client.query(
@@ -639,7 +635,7 @@ export const getAllContainers = async (req, res) => {
         cm.container_type,
         cm.owner_type,
         cm.created_time,
-        COALESCE(cs.location, 'karachi_port') AS location,
+        COALESCE(cs.location, '') AS location,
         COALESCE(cs.availability, 'Available') AS current_status,
         CASE
           WHEN lc.active = false THEN COALESCE(cm.status, '')
