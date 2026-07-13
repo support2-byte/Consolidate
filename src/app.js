@@ -81,6 +81,10 @@ const swaggerSpec = swaggerJsdoc({
     },
     servers: [
       { url: "http://localhost:5000", description: "Local dev server" },
+      {
+        url: "https://consolidate.onrender.com",
+        description: "Production server",
+      },
     ],
     components: {
       securitySchemes: {
