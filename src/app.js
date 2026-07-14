@@ -55,8 +55,6 @@ function isOriginAllowed(origin) {
   });
 }
 
-// app.use(cors());
-
 app.use(
   cors({
     origin: function (origin, callback) {

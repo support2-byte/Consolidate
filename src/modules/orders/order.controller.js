@@ -3557,47 +3557,28 @@ export async function getOrderByItemRef(req, res) {
         pod.name AS place_of_delivery_name,
         r.id AS receiver_id,
         r.status AS receiver_base_status,
-        ot.eta AS tracking_eta,
         oi.id AS item_id,
         oi.item_ref,
         oi.total_number,
         oi.weight,
-        ct.id AS ct_tracking_id,
-        ct.old_status,
-        ct.new_status AS ct_new_status,
-        ct."timestamp" AS ct_timestamp,
-        ct.event_type AS ct_event_type,
-        ct.details AS ct_details,
-        ct.reason,
-        ct.location
+        ot.id AS ot_tracking_id,
+        ot.old_status AS ot_old_status,
+        ot.status AS ot_new_status,
+        ot.created_time AS ot_timestamp,
+        ot.created_by AS ot_created_by,
+        ot.eta AS ot_eta,
+        ot.etd AS ot_etd,
+        ot.consignment_number AS ot_consignment_number
       FROM order_items oi
       INNER JOIN orders o ON oi.order_id = o.id
       LEFT JOIN places pol ON pol.id = o.place_of_loading
       LEFT JOIN places pod ON pod.id = o.place_of_delivery
       LEFT JOIN receivers r ON oi.receiver_id = r.id
-      LEFT JOIN LATERAL (
-        SELECT *
-        FROM order_tracking t
-        WHERE t.receiver_id = r.id
-          OR (t.order_id = o.id AND t.item_ref = oi.item_ref)
-        ORDER BY t.created_time DESC
-        LIMIT 1
-      ) ot ON TRUE
-      LEFT JOIN consignments c ON (
-          c.orders @> jsonb_build_array(o.id::text)
-        OR c.orders @> jsonb_build_array(o.id)
-        OR c.orders ? o.id::text
-      )
-      LEFT JOIN consignment_tracking ct
-        ON ct.consignment_id = c.id
-      AND ct.event_type IN (
-          'status_advanced',
-          'status_updated',
-          'order_synced',
-          'status_auto_updated'
-      )
+      LEFT JOIN order_tracking ot
+        ON ot.receiver_id = r.id
+        OR (ot.order_id = o.id AND ot.item_ref = oi.item_ref)
       WHERE oi.item_ref ILIKE $1
-      ORDER BY o.created_at DESC, oi.id, ct."timestamp" DESC
+      ORDER BY o.created_at DESC, oi.id, ot.created_time DESC
     `;
 
     const { rows } = await pool.query(query, [pattern]);
@@ -3641,7 +3622,7 @@ export async function getOrderByItemRef(req, res) {
         ord.receivers[recvKey] = {
           receiver_id: row.receiver_id || null,
           status: receiverCurrent,
-          eta: row.tracking_eta || null,
+          eta: null,
           items: {},
           current_status: receiverCurrent,
           status_history: [],
@@ -3651,35 +3632,25 @@ export async function getOrderByItemRef(req, res) {
 
       const recv = ord.receivers[recvKey];
 
-      // ── Status history (deduplicated by ct.id) ──
-      if (row.ct_tracking_id) {
+      if (row.ot_tracking_id) {
         const alreadyExists = recv.status_history.some(
-          (h) => h.tracking_id === row.ct_tracking_id,
+          (h) => h.tracking_id === row.ot_tracking_id,
         );
 
         if (!alreadyExists) {
-          const notes = [
-            row.reason ? `Reason: ${row.reason}` : "",
-            row.location ? `Location: ${row.location}` : "",
-            row.ct_details?.notes ? row.ct_details.notes : "",
-          ]
-            .filter(Boolean)
-            .join(" | ");
-
           recv.status_history.push({
-            tracking_id: row.ct_tracking_id,
-            old_status: row.old_status || null,
-            status: row.ct_new_status,
-            time: row.ct_timestamp,
-            event_type: row.ct_event_type,
-            reason: row.reason || null,
-            location: row.location || null,
-            notes: notes || null,
+            tracking_id: row.ot_tracking_id,
+            old_status: row.ot_old_status || null,
+            status: row.ot_new_status,
+            time: row.ot_timestamp,
+            created_by: row.ot_created_by || null,
+            eta: row.ot_eta || null,
+            etd: row.ot_etd || null,
+            consignment_number: row.ot_consignment_number || null,
           });
         }
       }
 
-      // ── Item (only the single item shown in the layout) ──
       if (row.item_id && !recv.items[row.item_id]) {
         recv.items[row.item_id] = {
           item_id: row.item_id,
@@ -3698,6 +3669,7 @@ export async function getOrderByItemRef(req, res) {
 
         if (recv.status_history.length > 0) {
           recv.latest_tracking_status = recv.status_history[0].status;
+          recv.eta = recv.status_history[0].eta || null;
         } else {
           recv.latest_tracking_status = null;
         }
