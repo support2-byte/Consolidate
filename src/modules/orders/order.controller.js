@@ -1830,68 +1830,6 @@ function getStatusMessage(status) {
   );
 }
 
-export async function getNotificationSettings(typeCode) {
-  console.log(
-    `[getNotificationSettings] Starting for type_code: "${typeCode}"`,
-  );
-
-  try {
-    const client = await pool.connect();
-    console.log("[DB] Client connected");
-
-    const result = await client.query(
-      `
-      SELECT
-        nt.type_code,
-        nt.name,
-        ns.enabled,
-        ns.subject,
-        ns.heading,
-        ns.additional_content,
-        ns.trigger_statuses
-      FROM notification_types nt
-      LEFT JOIN notification_settings ns ON ns.type_id = nt.id
-      WHERE nt.type_code = $1
-    `,
-      [typeCode],
-    );
-
-    console.log(`[DB] Rows returned: ${result.rows.length}`);
-
-    if (result.rows.length === 0) {
-      console.log(
-        `[getNotificationSettings] No matching type_code "${typeCode}" found in notification_types`,
-      );
-      client.release();
-      return null;
-    }
-
-    const row = result.rows[0];
-    console.log(`[DB] Found settings:`, {
-      type_code: row.type_code,
-      name: row.name,
-      enabled: row.enabled,
-      trigger_statuses_raw: row.trigger_statuses,
-    });
-
-    const settings = {
-      ...row,
-      trigger_statuses: row.trigger_statuses
-        ? row.trigger_statuses.split(",").map((s) => s.trim().toLowerCase())
-        : [],
-    };
-
-    client.release();
-    return settings;
-  } catch (err) {
-    console.error(
-      `[getNotificationSettings] DB error for "${typeCode}":`,
-      err.message,
-    );
-    return null;
-  }
-}
-
 function safeParseJsonArrayForMultiple(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
