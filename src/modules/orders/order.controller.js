@@ -1,5 +1,4 @@
 import pool from "../../db/pool.js";
-import sendOrderEmail from "../../middleware/nodeMailer.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
 import logger from "../../services/logger.js";
 import {
@@ -8,6 +7,7 @@ import {
 } from "../../services/calculateEta.js";
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
+import { notifyOrderStatusUpdate } from "../../services/sendOrderEmail.js";
 
 function normalizeDate(dateStr) {
   if (!dateStr) return null;
@@ -361,6 +361,31 @@ export async function createOrder(req, res) {
     );
 
     await client.query("COMMIT");
+
+    if (
+      b.send_email_notification === "true" ||
+      b.send_email_notification === true
+    ) {
+      const recipientEmail = owner.email?.trim();
+      if (recipientEmail) {
+        try {
+          await pool.query(
+            `INSERT INTO email_queue (order_id, recipient_email, recipient_name, email_type)
+         VALUES ($1, $2, $3, $4)`,
+            [orderId, recipientEmail, owner.name || null, "order_created"],
+          );
+        } catch (queueErr) {
+          console.error(
+            "[createOrder] Failed to enqueue email:",
+            queueErr.message,
+          );
+        }
+      } else {
+        console.warn(
+          `[createOrder] Order ${orderId} requested email but owner has no email`,
+        );
+      }
+    }
 
     res.status(201).json({
       success: true,
@@ -3035,209 +3060,6 @@ export async function removeContainerAssignments(req, res) {
   }
 }
 
-async function sendUpdateToSubscribers(orderId, newStatus, oldStatus) {
-  try {
-    const orderQuery = `
-      SELECT o.booking_ref, o.eta, o.updated_at as last_updated, o.sender_name, o.receiver_name, o.receiver_item_ref
-      FROM orders o
-      LEFT JOIN receivers r ON o.id = r.order_id
-      WHERE o.id = $1
-    `;
-    const orderResult = await pool.query(orderQuery, [orderId]);
-    if (orderResult.rowCount === 0) {
-      return;
-    }
-
-    const order = orderResult.rows[0];
-    const tz = "Asia/Dubai"; // RGSL timezone
-    const now = new Date().toLocaleString("en-US", { timeZone: tz });
-    const etaFormatted = order.eta
-      ? new Date(order.eta).toLocaleDateString("en-GB")
-      : "—";
-    const route = `${order.sender_name || ""} to ${order.receiver_name || ""}`;
-    const subQuery = `SELECT email FROM notifications WHERE order_id = $1 AND reference_id = $2`;
-    const subResult = await pool.query(subQuery, [orderId, order.reference_id]);
-    const subscribers = subResult.rows
-      .map((row) => row.email)
-      .filter((email) => email && email.includes("@"));
-
-    const shipmentData = {
-      statusLabel: "" || `Status: ${newStatus}`,
-      statusMsg:
-        "phase.msg" || `Updated from "${oldStatus}" to "${newStatus}".`,
-      refId: order.reference_id || order.booking_ref || "—",
-      orderId: order.booking_ref || "—",
-      route: route,
-      etaFormatted,
-      lastUpdated: now,
-      trackLink: `https://ordertracking.royalgulfshipping.com/?ref=${encodeURIComponent(order.reference_id || order.booking_ref)}`,
-    };
-    const email = "support2@royalgulfshipping.com";
-  } catch (err) {
-    console.error("Subscriber email error:", err);
-  }
-}
-
-/**
- * Sends a shipment / order status update email to the receiver
- * @param {string} email - Recipient email address
- * @param {Object} shipmentData - Data from the notification logic
- * @param {string} [shipmentData.receiverName]
- * @param {string} [shipmentData.statusLabel]
- * @param {string} [shipmentData.statusMsg]
- * @param {string} [shipmentData.refId]
- * @param {string|number} [shipmentData.orderId]
- * @param {string} [shipmentData.route]
- * @param {string} [shipmentData.etaFormatted]
- * @param {string|Date} [shipmentData.lastUpdated]
- * @param {string} [shipmentData.trackLink]
- * @param {string} [shipmentData.currentStatus] - Used for status filtering
- * @param {string} [notificationType='order-status-update'] - Type code for settings lookup
- * @returns {Promise<{success: boolean, messageId?: string, error?: string, skipped?: boolean}>}
- */
-export async function sendShipmentEmail(
-  email,
-  shipmentData,
-  notificationType = "order-status-update",
-) {
-  if (!email || typeof email !== "string" || !email.trim().includes("@")) {
-    console.warn(`Invalid or missing email: ${email}`);
-    return { success: false, error: "Invalid email address" };
-  }
-
-  const receiverName =
-    String(shipmentData.receiverName || "Valued Customer")
-      .trim()
-      .replace(/\|.*$/, "")
-      .replace(/\s+/g, " ") || "Valued Customer";
-
-  const safeData = {
-    statusLabel: String(shipmentData.statusLabel || "Shipment Updated"),
-    statusMsg: String(
-      shipmentData.statusMsg || "We have an update on your shipment.",
-    ),
-    refId: String(shipmentData.refId || "—"),
-    orderId: String(shipmentData.orderId || "—"),
-    route: String(shipmentData.route || "—"),
-    etaFormatted: String(shipmentData.etaFormatted || "To be confirmed"),
-    trackLink: String(
-      shipmentData.trackLink || "https://consolidatetracking.onrender.com/",
-    ),
-    receiverName,
-  };
-
-  let lastUpdatedStr = new Date().toLocaleString("en-GB");
-  if (shipmentData.lastUpdated) {
-    try {
-      const date = new Date(shipmentData.lastUpdated);
-      lastUpdatedStr = !isNaN(date.getTime())
-        ? date.toLocaleString("en-GB", {
-            dateStyle: "medium",
-            timeStyle: "short",
-          })
-        : String(shipmentData.lastUpdated);
-    } catch {
-      lastUpdatedStr = String(shipmentData.lastUpdated);
-    }
-  }
-  safeData.lastUpdated = lastUpdatedStr;
-
-  const templateData = {
-    type: "shipment",
-    ...safeData,
-    updatedItems: Array.isArray(shipmentData.updatedItems)
-      ? shipmentData.updatedItems
-      : [],
-    currentStatus: shipmentData.currentStatus || shipmentData.statusLabel || "",
-  };
-
-  try {
-    const settings = await getNotificationSettings(notificationType);
-
-    if (!settings || settings.enabled === false) {
-      return {
-        success: false,
-        skipped: true,
-        message: `Notification ${notificationType} is disabled`,
-      };
-    }
-
-    let finalSubject = `Royal Gulf Shipping – ${templateData.statusLabel} (Ref: ${templateData.refId})`;
-
-    if (settings.subject) {
-      finalSubject = settings.subject
-        .replace(/{type_name}/gi, settings.name || notificationType)
-        .replace(/{ref_id}/gi, templateData.refId || "—")
-        .replace(/{order_number}/gi, templateData.orderId || "—")
-        .replace(/{status}/gi, templateData.statusLabel || "")
-        .replace(
-          /{customer_name}/gi,
-          templateData.receiverName || "Valued Customer",
-        );
-    }
-
-    let incomingStatus = String(
-      templateData.currentStatus || templateData.statusLabel || "",
-    )
-      .toLowerCase()
-      .trim();
-
-    const normalizedIncoming = incomingStatus
-      .replace(/\s+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^shipment-?/i, "");
-
-    const allowedNormalized = (settings.trigger_statuses || []).map((s) =>
-      String(s)
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^shipment-?/i, ""),
-    );
-
-    const isAllowed =
-      allowedNormalized.length === 0 ||
-      allowedNormalized.includes(normalizedIncoming) ||
-      allowedNormalized.includes(incomingStatus);
-
-    if (!isAllowed) {
-      return {
-        success: false,
-        skipped: true,
-        message: `Status "${incomingStatus}" not configured for notifications`,
-      };
-    }
-
-    templateData.customSubject = finalSubject;
-
-    const result = await sendOrderEmail(email, notificationType, templateData);
-
-    if (result.success) {
-    } else {
-      console.error(
-        `Failed sending shipment email to ${receiverName} (${email}): ${result.error || "Unknown error"}`,
-      );
-    }
-
-    return result;
-  } catch (err) {
-    console.error(
-      `Shipment email fatal error for ${email} (${receiverName}):`,
-      {
-        message: err.message,
-        stack: err.stack?.substring(0, 500),
-        notificationType,
-        email,
-      },
-    );
-    return {
-      success: false,
-      error: err.message || "Unexpected error during email preparation",
-    };
-  }
-}
-
 export async function removeOrderItem(req, res) {
   let client;
 
@@ -3507,7 +3329,7 @@ export async function updateSpecificItemsStatus(req, res) {
   const { orderId } = req.params;
   const {
     itemRefs,
-    receiverId, // optional – extra safety filter
+    receiverId,
     status,
     notifyClient = true,
     notifyParties = true,
@@ -3529,7 +3351,6 @@ export async function updateSpecificItemsStatus(req, res) {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    // 1. Validate & normalize status against statuses table
     const trimmedStatus = (status || "").trim();
 
     if (!trimmedStatus) {
@@ -3552,7 +3373,6 @@ export async function updateSpecificItemsStatus(req, res) {
 
     const normalizedStatus = statusResult.rows[0].order_status;
 
-    // 2. Update order_items
     let extraWhere = "";
     const queryParams = [normalizedStatus, Number(orderId), itemRefs];
 
@@ -3588,7 +3408,6 @@ export async function updateSpecificItemsStatus(req, res) {
       ...new Set(updatedRows.map((r) => r.receiver_id)),
     ];
 
-    // 3. Auto-upgrade receiver status if all items delivered
     for (const rid of affectedReceiverIds) {
       const agg = await client.query(
         `
@@ -3701,113 +3520,60 @@ export async function updateSpecificItemsStatus(req, res) {
     const orderResult = await pool.query(
       `
       SELECT 
-        booking_ref,
-        place_of_loading,
-        place_of_delivery,
-        TO_CHAR(eta, 'DD Mon YYYY') AS eta_formatted,
-        sender_email,
-        sender_name
-      FROM orders 
-      WHERE id = $1
+        o.booking_ref,
+        pol.name AS pol_name,
+        pod.name AS pod_name,
+        TO_CHAR(o.eta, 'DD Mon YYYY') AS eta_formatted,
+        o.sender_email,
+        o.sender_name,
+        MAX(r.receiver_name) AS receiver_name
+      FROM orders o
+      LEFT JOIN places pol ON o.place_of_loading = pol.id
+      LEFT JOIN places pod ON o.place_of_delivery = pod.id
+      LEFT JOIN receivers r ON r.order_id = o.id AND r.id = ANY($2::int[])
+      WHERE o.id = $1
+      GROUP BY o.id, pol.name, pod.name
     `,
-      [Number(orderId)],
+      [Number(orderId), affectedReceiverIds],
     );
 
     const order = orderResult.rows[0] || {};
 
     const routeDisplay =
-      order.place_of_loading && order.place_of_delivery
-        ? `${order.place_of_loading} → ${order.place_of_delivery}`
-        : order.place_of_delivery || order.place_of_loading || "—";
+      order.pol_name && order.pod_name
+        ? `${order.pol_name} → ${order.pod_name}`
+        : order.pod_name || order.pol_name || "—";
 
-    const templateBase = {
-      statusLabel: normalizedStatus,
-      statusMsg: getStatusMessage(normalizedStatus),
-      refId: order.booking_ref || "—",
-      orderId: orderId,
-      route: routeDisplay,
-      etaFormatted: order.eta_formatted || "—",
-      lastUpdated: new Date(),
-      trackLink: "https://consolidatetracking.onrender.com/",
-      currentStatus: normalizedStatus,
-    };
+    const itemsForEmail = updatedRows.map((r) => ({
+      itemRef: r.item_ref,
+      receiverId: r.receiver_id,
+      status: r.consignment_status,
+    }));
 
-    const peopleRes = await pool.query(
-      `
-      -- Sender
-      SELECT
-        'sender' AS party,
-        sender_email AS email,
-        sender_name  AS name
-      FROM orders
-      WHERE id = $1
-        AND sender_email IS NOT NULL
-        AND sender_email != ''
-
-      UNION ALL
-
-      -- Affected receivers
-      SELECT
-        'receiver' AS party,
-        receiver_email  AS email,
-        receiver_name   AS name
-      FROM receivers
-      WHERE id = ANY($2::int[])
-        AND receiver_email IS NOT NULL
-        AND receiver_email != ''
-    `,
-      [Number(orderId), affectedReceiverIds],
-    );
-
-    const people = peopleRes.rows;
-
-    const emailPromises = [];
-
-    for (const person of people) {
-      if (!person.email?.trim()) continue;
-
-      const isSender = person.party === "sender";
-
-      const notificationType = isSender
-        ? "order-status-update"
-        : "order-status-update";
-
-      const templateData = {
-        ...templateBase,
-        receiverName: isSender
-          ? "Valued Customer"
-          : person.name?.trim() || "Receiver",
-      };
-
-      //     emailPromises.push(
-      // //  sendShipmentEmail(person.email, templateData, notificationType)
-      //         .then(result => {
-      //           if (result.success) {
-      //             console.log(`Email sent to ${person.party} (${person.email})`);
-      //           } else {
-      //             console.warn(`Email failed for ${person.party} (${person.email}): ${result.error || 'Unknown error'}`);
-      //           }          })
-      //         .catch(err => {
-      //           console.error(`Email exception for ${person.email}: ${err.message}`);
-      //         })
-      //     );
+    if (notifyClient || notifyParties) {
+      setImmediate(() => {
+        notifyOrderStatusUpdate(Number(orderId), {
+          receiverName: order.receiver_name || "Valued Customer",
+          statusLabel: normalizedStatus,
+          statusMsg: getStatusMessage(normalizedStatus),
+          refId: order.booking_ref || "—",
+          route: routeDisplay,
+          etaFormatted: order.eta_formatted || "—",
+          trackLink: "https://consolidatetracking.onrender.com/",
+          updatedItems: itemsForEmail,
+        }).catch((err) => {
+          console.error("Background notification error:", err.message);
+        });
+      });
     }
 
-    // Non-blocking – fire and forget
-    Promise.allSettled(emailPromises);
-
-    // 10. Success response
+    // 11. Success response
     return res.status(200).json({
       success: true,
       updatedCount: updateResult.rowCount,
-      updatedItems: updatedRows.map((r) => ({
-        itemRef: r.item_ref,
-        receiverId: r.receiver_id,
-        status: r.consignment_status,
-      })),
+      updatedItems: itemsForEmail,
       eta: calculatedEta,
       etd: calculatedEtd,
-      notifiedCount: people.length,
       message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`,
     });
   } catch (err) {
@@ -3849,6 +3615,8 @@ export async function getOrderByItemRef(req, res) {
         o.booking_ref,
         o.place_of_loading,
         o.place_of_delivery,
+        pol.name AS place_of_loading_name,
+        pod.name AS place_of_delivery_name,
         r.id AS receiver_id,
         r.status AS receiver_base_status,
         ot.eta AS tracking_eta,
@@ -3866,6 +3634,8 @@ export async function getOrderByItemRef(req, res) {
         ct.location
       FROM order_items oi
       INNER JOIN orders o ON oi.order_id = o.id
+      LEFT JOIN places pol ON pol.id = o.place_of_loading
+      LEFT JOIN places pod ON pod.id = o.place_of_delivery
       LEFT JOIN receivers r ON oi.receiver_id = r.id
       LEFT JOIN LATERAL (
         SELECT *
@@ -3910,8 +3680,8 @@ export async function getOrderByItemRef(req, res) {
         orderMap[orderId] = {
           order_id: orderId,
           booking_ref: row.booking_ref,
-          place_of_loading: row.place_of_loading || null,
-          place_of_delivery: row.place_of_delivery || null,
+          place_of_loading: row.place_of_loading_name || null,
+          place_of_delivery: row.place_of_delivery_name || null,
           receivers: {},
         };
       }

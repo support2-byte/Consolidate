@@ -20,6 +20,11 @@ import {
   removeOrderItem,
   getAssignedOrderById,
 } from "./order.controller.js";
+import {
+  sendShipmentEmail,
+  subscribeToShipment,
+} from "../../services/sendOrderEmail.js";
+import logger from "../../services/logger.js";
 
 const router = express.Router();
 
@@ -305,30 +310,33 @@ router.post(
  * @swagger
  * /api/orders/notify/me:
  *   post:
- *     summary: Trigger a shipment notification email (currently a stub)
+ *     summary: Subscribe an email to order status updates and send the first notification
  *     tags: [Orders]
- *     parameters:
- *       - in: query
- *         name: email
- *         required: true
- *         schema: { type: string, format: email }
  *     requestBody:
- *       required: false
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             description: Shipment data payload
+ *             required: [email, orderId]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               orderId: { type: integer }
+ *               referenceId: { type: string }
+ *               statusLabel: { type: string }
+ *               statusMsg: { type: string }
  *     responses:
  *       200:
- *         description: Notification triggered
+ *         description: Notification sent
  */
 router.post("/notify/me", async (req, res) => {
-  const { email } = req.query;
-  const shipmentData = req.body;
-  console.log("hit", email, shipmentData);
-  // await sendShipmentEmail(email, shipmentData);
-  res.json({ success: true });
+  try {
+    const result = await subscribeToShipment(req.body);
+    res.json(result);
+  } catch (err) {
+    logger.error("notify/me failed", { error: err.message });
+    res.status(500).json({ success: false, error: "Internal error" });
+  }
 });
 
 /**

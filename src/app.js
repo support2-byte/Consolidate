@@ -13,7 +13,6 @@ import orderRoutes from "./modules/orders/orderRoutes.js";
 import consignmentRoutes from "./modules/consignment/consignment.routes.js";
 import optionsRoutes from "./modules/options/options.routes.js";
 import monitorRoutes from "./modules/monitoring/monitorRoutes.js";
-import sendOrderEmail from "./middleware/nodeMailer.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
 // import "./jobs/customerSync.js";
@@ -28,7 +27,7 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
   ? process.env.CLIENT_ORIGINS.split(",").map((o) => o.trim())
   : [
       "http://localhost:5173",
-      "http://127.0.0.1:5501",
+      "http://127.0.0.1:5500",
       "http://localhost:3000",
       "http://localhost:5000",
       "http://127.0.0.1:5000",
@@ -54,6 +53,8 @@ function isOriginAllowed(origin) {
     return origin === pattern;
   });
 }
+
+// app.use(cors());
 
 app.use(
   cors({
