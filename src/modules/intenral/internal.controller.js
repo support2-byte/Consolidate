@@ -1,5 +1,12 @@
-import pool from "../../db/pool";
-import { sendOrderConfirmationEmail } from "../../services/sendOrderConfirmationEmail.js";
+import pool from "../../db/pool.js";
+import logger from "../../services/logger.js";
+import {
+  notifyOrderStatusUpdate,
+  sendShipmentEmail,
+} from "../../services/sendOrderEmail.js";
+
+const BATCH_SIZE = 5;
+const INTERNAL_SECRET = process.env.EMAIL_QUEUE_SECRET;
 
 export const processEmailQueue = async (req, res) => {
   const provided = req.headers["x-internal-secret"];
@@ -42,11 +49,26 @@ export const processEmailQueue = async (req, res) => {
   const results = [];
   for (const row of batch) {
     try {
-      await sendOrderConfirmationEmail({
-        to: row.recipient_email,
-        name: row.recipient_name,
-        orderId: row.order_id,
-      });
+      let result;
+
+      if (row.email_type === "order_created") {
+        result = await sendShipmentEmail({
+          email: row.recipient_email,
+          orderId: row.order_id,
+          receiverName: row.recipient_name || "Valued Customer",
+        });
+      } else if (row.email_type === "order_update") {
+        result = await notifyOrderStatusUpdate(row.order_id, {
+          receiverName: row.recipient_name || "Valued Customer",
+        });
+      } else {
+        throw new Error(`Unsupported email_type "${row.email_type}"`);
+      }
+
+      if (!result.success) {
+        throw new Error(result.error || result.message || "Send failed");
+      }
+
       await pool.query(
         `UPDATE email_queue SET status = 'sent', sent_at = now() WHERE id = $1`,
         [row.id],
@@ -69,4 +91,55 @@ export const processEmailQueue = async (req, res) => {
     processed: results.length,
     results,
   });
+};
+export const verifyRecaptcha = async (req, res) => {
+  const { token } = req.body;
+
+  if (!token || typeof token !== "string") {
+    return res.status(400).json({ success: false, error: "Missing token" });
+  }
+
+  const secretKey = process.env.RECAPTCHA_SECRET_KEY;
+  if (!secretKey) {
+    logger.error("RECAPTCHA_SECRET_KEY is not set");
+    return res
+      .status(500)
+      .json({ success: false, error: "Server misconfiguration" });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      secret: secretKey,
+      response: token,
+    });
+
+    const googleRes = await fetch(
+      "https://www.google.com/recaptcha/api/siteverify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+      },
+    );
+
+    const data = await googleRes.json();
+
+    const minScore = 0.5;
+    const passed =
+      data.success && (data.score === undefined || data.score >= minScore);
+
+    if (!passed) {
+      logger.info("reCAPTCHA verification failed", {
+        errorCodes: data["error-codes"],
+        score: data.score,
+      });
+    }
+
+    return res.json({ success: passed, score: data.score ?? null });
+  } catch (error) {
+    logger.error("reCAPTCHA verification error", { error: error.message });
+    return res
+      .status(500)
+      .json({ success: false, error: "Verification failed" });
+  }
 };

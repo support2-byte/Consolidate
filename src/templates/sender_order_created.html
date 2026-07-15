@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Royal Gulf Shipping – Subscription Confirmed</title>
+    <title>Royal Gulf Shipping – Shipment Update</title>
     <style>
       body {
         margin: 0;
@@ -99,7 +99,7 @@
         color: #475569;
         font-size: 14px;
         white-space: pre-line;
-      }
+      } /* Preserve line breaks for admin multi-line msg */
       table.info {
         width: 100%;
         border-collapse: collapse;
@@ -180,22 +180,14 @@
         <div class="tag">&#128276; Shipment Update</div>
         <!-- 🔔 -->
         <div class="content">
-          <h2 class="title">
-            Your subscription has been successfully confirmed.
-          </h2>
+          <h2 class="title">Your order has been created.</h2>
           <p>Dear Customer,</p>
-          <p>
-            You will now receive the latest news and shipment notifications
-            directly to your inbox.
-          </p>
+          <p>An order has been generated and is now pending further action.</p>
           <!-- Status block -->
           <div class="status">
-            <div class="label">&#128230; Subscription Confirmed</div>
-            <!-- 📦 -->
-            <div class="msg">
-              You have successfully subscribed to receive shipment updates from
-              Royal Gulf Shipping.
-            </div>
+            <div class="label">&#128674; <?= statusLabel ?></div>
+            <!-- 🚢 -->
+            <div class="msg"><?= statusMsg ?></div>
           </div>
 
           <!-- Progress mini-bar -->
@@ -221,6 +213,7 @@
                 height: 10px;
                 border-radius: 50%;
                 background: #faae56;
+                box-shadow: 0 0 0 4px rgba(250, 174, 86, 0.3);
               "
             ></div>
             <div
@@ -236,7 +229,7 @@
           <!-- Shipment details -->
           <table class="info" role="presentation">
             <tr>
-              <td>Ref ID</td>
+              <td>Booking Ref</td>
               <td>
                 <strong><?= refId ?></strong>
               </td>
@@ -244,10 +237,6 @@
             <tr>
               <td>Order ID</td>
               <td><?= orderId ?></td>
-            </tr>
-            <tr>
-              <td>Route</td>
-              <td><?= route ?></td>
             </tr>
             <tr>
               <td>ETA</td>
@@ -259,7 +248,7 @@
             </tr>
           </table>
 
-          <!-- CTA Button -->
+          <!-- CTA Button (moved outside table for proper structure) -->
           <a
             class="cta"
             href="<?= trackLink ?>"
@@ -272,6 +261,9 @@
             https://ordertracking.royalgulfshipping.com/ and paste your
             reference ID to track your shipment.
           </p>
+          <!-- <a href="https://royalgulfshipping.com/get-freight-quote/" target="_blank" rel="noopener noreferrer">
+    Get Your Freight Quote
+  </a> -->
           <p class="muted">
             You’re receiving this because you subscribed to shipment
             notifications on our website.

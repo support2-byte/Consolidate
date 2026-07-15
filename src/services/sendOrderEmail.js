@@ -14,7 +14,7 @@ function buildSubscriptionConfirmationHtml(templateData) {
   const pol = escapeHtml(templateData.place_of_loading || "—");
   const pod = escapeHtml(templateData.place_of_delivery || "—");
   const route = `${pol} &rarr; ${pod}`;
-  const eta = escapeHtml(templateData.etaFormatted || "—");
+  const eta = escapeHtml(templateData.eta || "—");
   const lastUpdated = escapeHtml(
     templateData.lastUpdated || new Date().toLocaleString(),
   );
@@ -32,8 +32,8 @@ function buildSubscriptionConfirmationHtml(templateData) {
   });
 }
 
-function buildOrderCreatedHtml(templateData) {
-  return renderTemplate("order_created.html", {
+function buildOrderCreatedHtmlForSender(templateData) {
+  return renderTemplate("sender_order_created.html", {
     statusLabel: escapeHtml(templateData.statusLabel || "Order Created"),
     statusMsg: escapeHtml(
       templateData.statusMsg ||
@@ -41,6 +41,27 @@ function buildOrderCreatedHtml(templateData) {
     ),
     refId: escapeHtml(templateData.refId || "—"),
     orderId: escapeHtml(templateData.orderId || "—"),
+    route: escapeHtml(templateData.route || "—"),
+    eta: escapeHtml(templateData.etaFormatted || "—"),
+    lastUpdated: escapeHtml(
+      templateData.lastUpdated || new Date().toLocaleString(),
+    ),
+    trackLink: escapeHtml(
+      templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+    ),
+  });
+}
+
+function buildOrderCreatedHtmlForReceiver(templateData) {
+  return renderTemplate("receiver_order_created.html", {
+    statusLabel: escapeHtml(templateData.statusLabel || "Order Created"),
+    statusMsg: escapeHtml(
+      templateData.statusMsg ||
+        "An order has been generated and is now pending further action.",
+    ),
+    refId: escapeHtml(templateData.refId || "—"),
+    orderId: escapeHtml(templateData.orderId || "—"),
+    route: escapeHtml(templateData.route || "—"),
     eta: escapeHtml(templateData.etaFormatted || "—"),
     lastUpdated: escapeHtml(
       templateData.lastUpdated || new Date().toLocaleString(),
@@ -70,7 +91,7 @@ function buildShipmentUpdateHtml(templateData) {
   });
 }
 
-async function sendOrderEmail(toEmails, templateData) {
+export async function sendOrderEmail(toEmails, templateData, recipientType) {
   const emails = (Array.isArray(toEmails) ? toEmails : [toEmails])
     .filter((e) => typeof e === "string" && e.includes("@"))
     .map((e) => e.trim());
@@ -79,9 +100,15 @@ async function sendOrderEmail(toEmails, templateData) {
     return { success: false, message: "No valid recipients" };
   }
 
-  const html = templateData.isNewOrder
-    ? buildOrderCreatedHtml(templateData)
-    : buildShipmentUpdateHtml(templateData);
+  let html;
+
+  if (templateData.isNewOrder && recipientType === "sender") {
+    html = buildOrderCreatedHtmlForSender(templateData);
+  } else if (templateData.isNewOrder && recipientType === "receiver") {
+    html = buildOrderCreatedHtmlForReceiver(templateData);
+  } else {
+    html = buildShipmentUpdateHtml(templateData);
+  }
 
   const mailOptions = {
     from: `"${process.env.EMAIL_FROM_NAME || "Royal Gulf Shipping"}" <${process.env.EMAIL_FROM_ADDRESS || "support@royalgulfshipping.com"}>`,
@@ -107,11 +134,12 @@ async function sendOrderEmail(toEmails, templateData) {
 }
 
 export async function sendShipmentEmail(shipmentData) {
-  const { email, orderId, referenceId } = shipmentData;
+  const { email, orderId, recipientId, recipientType } = shipmentData;
 
   if (!email || typeof email !== "string" || !email.trim().includes("@")) {
     return { success: false, error: "Invalid email address" };
   }
+
   if (!orderId) {
     return { success: false, error: "orderId is required" };
   }
@@ -121,6 +149,59 @@ export async function sendShipmentEmail(shipmentData) {
       .trim()
       .replace(/\s+/g, " ") || "Valued Customer";
 
+  let formNo = "—";
+  let etaFormatted = String(shipmentData.etaFormatted || "");
+  let route = String(shipmentData.route || "");
+  let itemRef = String(shipmentData.refId || shipmentData.referenceId || "");
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT o.rgl_booking_number, o.booking_ref, ot.eta
+        FROM orders o
+       LEFT JOIN order_tracking ot ON ot.order_id = o.id
+       WHERE o.id = $1
+       ORDER BY ot.created_time DESC
+       LIMIT 1`,
+      [orderId],
+    );
+
+    const order = rows[0];
+
+    formNo = order?.rgl_booking_number || "—";
+    itemRef = order?.booking_ref || "—";
+
+    if (!etaFormatted && order?.eta) {
+      etaFormatted = new Date(order.eta).toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    }
+  } catch (err) {
+    logger.error("Failed to fetch order details for order created email", {
+      orderId,
+      error: err.message,
+    });
+  }
+
+  if (recipientType === "receiver" && recipientId) {
+    try {
+      const { rows } = await pool.query(
+        `SELECT item_ref FROM order_items WHERE receiver_id = $1 ORDER BY id ASC LIMIT 1`,
+        [recipientId],
+      );
+      itemRef = rows[0]?.item_ref || "";
+    } catch (err) {
+      logger.error("Failed to fetch item_ref for order created email", {
+        orderId,
+        recipientId,
+        error: err.message,
+      });
+    }
+  }
+
+  if (!itemRef) itemRef = "—";
+
   const templateData = {
     isNewOrder: true,
     receiverName,
@@ -129,9 +210,9 @@ export async function sendShipmentEmail(shipmentData) {
       shipmentData.statusMsg ||
         "An order has been generated and is now pending further action.",
     ),
-    refId: String(shipmentData.refId || referenceId || "—"),
-    orderId: String(orderId),
-    etaFormatted: String(shipmentData.etaFormatted || ""),
+    refId: itemRef,
+    orderId: formNo,
+    etaFormatted,
     trackLink: String(
       shipmentData.trackLink || "https://consolidatetracking.onrender.com/",
     ),
@@ -140,32 +221,16 @@ export async function sendShipmentEmail(shipmentData) {
       : [],
   };
 
-  try {
-    await pool.query(
-      `INSERT INTO notification_subscriptions (order_id, reference_id, email)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (order_id, email)
-       DO UPDATE SET reference_id = EXCLUDED.reference_id, updated_at = now()`,
-      [orderId, referenceId || templateData.refId, email.trim()],
-    );
-  } catch (err) {
-    logger.error("Failed to save notification subscription", {
-      orderId,
-      email,
-      error: err.message,
-    });
-  }
-
-  return sendOrderEmail(email, templateData);
+  return sendOrderEmail(email, templateData, recipientType);
 }
 
 export async function notifyOrderStatusUpdate(orderId, statusData) {
-  const { rows } = await pool.query(
-    `SELECT email FROM notification_subscriptions WHERE order_id = $1`,
+  const { rows: subscriptions } = await pool.query(
+    `SELECT email, reference_id FROM notification_subscriptions WHERE order_id = $1`,
     [orderId],
   );
 
-  if (rows.length === 0) {
+  if (subscriptions.length === 0) {
     return {
       success: false,
       skipped: true,
@@ -173,29 +238,72 @@ export async function notifyOrderStatusUpdate(orderId, statusData) {
     };
   }
 
-  const templateData = {
-    isNewOrder: false,
-    receiverName: statusData.receiverName || "Valued Customer",
-    statusLabel: String(statusData.statusLabel || "Shipment Updated"),
-    statusMsg: String(
-      statusData.statusMsg || "We have an update on your shipment.",
-    ),
-    refId: String(statusData.refId || "—"),
-    orderId: String(orderId),
-    route: String(statusData.route || ""),
-    etaFormatted: String(statusData.etaFormatted || ""),
-    trackLink: String(
-      statusData.trackLink || "https://consolidatetracking.onrender.com/",
-    ),
-    updatedItems: Array.isArray(statusData.updatedItems)
-      ? statusData.updatedItems
-      : [],
-  };
+  const groupedByRef = subscriptions.reduce((acc, sub) => {
+    const ref = sub.reference_id || "—";
+    if (!acc[ref]) acc[ref] = [];
+    acc[ref].push(sub.email);
+    return acc;
+  }, {});
 
-  return sendOrderEmail(
-    rows.map((r) => r.email),
-    templateData,
-  );
+  const results = [];
+
+  for (const [itemRef, emails] of Object.entries(groupedByRef)) {
+    const { rows } = await pool.query(
+      `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number,
+              pol.name AS pol_name, pod.name AS pod_name
+        FROM order_tracking ot
+        JOIN orders o ON o.id = ot.order_id
+        LEFT JOIN places pol ON pol.id = o.place_of_loading
+        LEFT JOIN places pod ON pod.id = o.place_of_delivery
+        WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
+        ORDER BY ot.created_time DESC
+        LIMIT 1`,
+      [itemRef],
+    );
+
+    if (rows.length === 0) {
+      logger.error("No order_tracking record found for subscribed item_ref", {
+        orderId,
+        itemRef,
+      });
+      continue;
+    }
+    const tracking = rows[0];
+
+    const route =
+      statusData.route ||
+      `${tracking.pol_name || "—"} → ${tracking.pod_name || "—"}`;
+
+    const templateData = {
+      isNewOrder: false,
+      receiverName: statusData.receiverName || "Valued Customer",
+      statusLabel: String(
+        statusData.statusLabel || tracking.current_status || "Shipment Updated",
+      ),
+      statusMsg: String(
+        statusData.statusMsg || "We have an update on your shipment.",
+      ),
+      refId: itemRef,
+      orderId: tracking.rgl_booking_number || "—",
+      route,
+      etaFormatted: tracking.eta
+        ? new Date(tracking.eta).toLocaleDateString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+          })
+        : "",
+      trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+      updatedItems: Array.isArray(statusData.updatedItems)
+        ? statusData.updatedItems
+        : [],
+    };
+
+    const result = await sendOrderEmail(emails, templateData);
+    results.push({ itemRef, emails, ...result });
+  }
+
+  return { success: results.every((r) => r.success), results };
 }
 
 export async function subscribeToShipment(shipmentData) {
@@ -210,9 +318,12 @@ export async function subscribeToShipment(shipmentData) {
   }
 
   const { rows } = await pool.query(
-    `SELECT id,
-            (SELECT status FROM receivers r WHERE r.order_id = orders.id LIMIT 1) AS current_status
-     FROM orders WHERE booking_ref = $1 LIMIT 1`,
+    `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number
+      FROM order_tracking ot
+      JOIN orders o ON o.id = ot.order_id
+      WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
+      ORDER BY ot.created_time DESC
+      LIMIT 1`,
     [referenceId],
   );
 
@@ -226,7 +337,7 @@ export async function subscribeToShipment(shipmentData) {
       `INSERT INTO notification_subscriptions (order_id, reference_id, email)
        VALUES ($1, $2, $3)
        ON CONFLICT (order_id, email) DO UPDATE SET updated_at = now()`,
-      [order.id, referenceId, email.trim()],
+      [order.order_id, referenceId, email.trim()],
     );
   } catch (err) {
     logger.error("Failed to save subscription", {
@@ -243,10 +354,11 @@ export async function subscribeToShipment(shipmentData) {
     subject: `You're subscribed to updates for shipment ${referenceId}`,
     html: buildSubscriptionConfirmationHtml({
       refId: referenceId,
-      orderId: order.id,
+      orderId: order.rgl_booking_number || "—",
       place_of_loading: place_of_loading || "—",
       place_of_delivery: place_of_delivery || "—",
-      etaFormatted: order.eta_formatted || "",
+      currentStatus: order.current_status || "",
+      eta: order.eta || "",
       trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(referenceId)}`,
     }),
   };

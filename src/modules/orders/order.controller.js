@@ -24,6 +24,7 @@ export async function createOrder(req, res) {
     const b = req.body || {};
     const files = req.files || {};
     const isSender = (b.sender_type || "sender") === "sender";
+    const emailTargets = [];
 
     let shippingParties = [];
     try {
@@ -95,6 +96,9 @@ export async function createOrder(req, res) {
     const newGatepass = buildFileList("gatepass_existing", "gatepass");
 
     const ownerPrefix = isSender ? "sender" : "receiver";
+    // The "shippingParties" (panel2) role is the opposite of the owner role
+    const partyPrefix = isSender ? "receiver" : "sender";
+
     const owner = {
       name: b[`${ownerPrefix}_name`] || "",
       contact: b[`${ownerPrefix}_contact`] || "",
@@ -182,6 +186,26 @@ export async function createOrder(req, res) {
     const trackingData = [];
     const trackingRows = [];
 
+    const ownerWantsEmail =
+      b.send_email_notification === true ||
+      b.send_email_notification === "true";
+
+    if (ownerWantsEmail) {
+      const ownerEmail = (owner.email || "").trim();
+      if (ownerEmail) {
+        emailTargets.push({
+          id: senderId,
+          type: "sender",
+          email: ownerEmail,
+          name: owner.name,
+        });
+      } else {
+        console.warn(
+          `[createOrder] Owner (sender ${senderId}) requested email but has no email set`,
+        );
+      }
+    }
+
     for (let i = 0; i < shippingParties.length; i++) {
       const p = shippingParties[i];
       const items = itemsByParty[i] || [];
@@ -239,7 +263,48 @@ export async function createOrder(req, res) {
           receiverItemRefs,
         ],
       );
+
       const receiverId = recResult.rows[0].id;
+
+      const wantsEmail =
+        p.send_email_notification === true ||
+        p.send_email_notification === "true" ||
+        p.sendEmailNotification === true ||
+        p.sendEmailNotification === "true";
+
+      const partyEmail = (
+        p[`${partyPrefix}_email`] ||
+        p[`${partyPrefix}Email`] ||
+        p.receiver_email ||
+        p.receiverEmail ||
+        p.sender_email ||
+        p.senderEmail ||
+        ""
+      ).trim();
+
+      const partyName =
+        p[`${partyPrefix}_name`] ||
+        p[`${partyPrefix}Name`] ||
+        p.receiver_name ||
+        p.receiverName ||
+        p.sender_name ||
+        p.senderName ||
+        "";
+
+      if (wantsEmail) {
+        if (partyEmail) {
+          emailTargets.push({
+            id: receiverId,
+            type: "receiver",
+            email: partyEmail,
+            name: partyName,
+          });
+        } else {
+          console.warn(
+            `[createOrder] Receiver ${receiverId} requested email but has no email (checked ${partyPrefix}_email/${partyPrefix}Email)`,
+          );
+        }
+      }
 
       for (const item of items) {
         const itemRef = item.item_ref || item.itemRef || "";
@@ -362,27 +427,33 @@ export async function createOrder(req, res) {
 
     await client.query("COMMIT");
 
-    if (
-      b.send_email_notification === "true" ||
-      b.send_email_notification === true
-    ) {
-      const recipientEmail = owner.email?.trim();
-      if (recipientEmail) {
-        try {
-          await pool.query(
-            `INSERT INTO email_queue (order_id, recipient_email, recipient_name, email_type)
-         VALUES ($1, $2, $3, $4)`,
-            [orderId, recipientEmail, owner.name || null, "order_created"],
-          );
-        } catch (queueErr) {
-          console.error(
-            "[createOrder] Failed to enqueue email:",
-            queueErr.message,
-          );
-        }
-      } else {
-        console.warn(
-          `[createOrder] Order ${orderId} requested email but owner has no email`,
+    if (emailTargets.length) {
+      try {
+        const values = [];
+        const placeholders = emailTargets
+          .map((t, idx) => {
+            const base = idx * 6;
+            values.push(
+              orderId,
+              t.id,
+              t.type,
+              t.email,
+              t.name || null,
+              "order_created",
+            );
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+          })
+          .join(", ");
+
+        await pool.query(
+          `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type)
+           VALUES ${placeholders}`,
+          values,
+        );
+      } catch (queueErr) {
+        console.error(
+          "[createOrder] Failed to enqueue receiver emails:",
+          queueErr.message,
         );
       }
     }
@@ -3181,6 +3252,7 @@ export async function removeOrderItem(req, res) {
     if (client) client.release();
   }
 }
+
 export async function removeReceiver(req, res) {
   let client;
   try {
@@ -3489,23 +3561,53 @@ export async function updateSpecificItemsStatus(req, res) {
     }));
 
     if (notifyClient || notifyParties) {
-      setImmediate(() => {
-        notifyOrderStatusUpdate(Number(orderId), {
-          receiverName: order.receiver_name || "Valued Customer",
-          statusLabel: normalizedStatus,
-          statusMsg: getStatusMessage(normalizedStatus),
-          refId: order.booking_ref || "—",
-          route: routeDisplay,
-          etaFormatted: order.eta_formatted || "—",
-          trackLink: "https://consolidatetracking.onrender.com/",
-          updatedItems: itemsForEmail,
-        }).catch((err) => {
-          console.error("Background notification error:", err.message);
-        });
-      });
+      try {
+        const receiversRes = await pool.query(
+          `SELECT id, receiver_email, receiver_name
+         FROM receivers
+        WHERE id = ANY($1::int[])`,
+          [affectedReceiverIds],
+        );
+
+        const recipients = receiversRes.rows.filter((r) =>
+          (r.receiver_email || "").trim(),
+        );
+
+        if (recipients.length) {
+          const values = [];
+          const placeholders = recipients
+            .map((r, idx) => {
+              const base = idx * 6;
+              values.push(
+                Number(orderId),
+                r.id,
+                "receiver",
+                r.receiver_email.trim(),
+                r.receiver_name || null,
+                "order_update",
+              );
+              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+            })
+            .join(", ");
+
+          await pool.query(
+            `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type)
+      VALUES ${placeholders}`,
+            values,
+          );
+        } else {
+          console.warn(
+            `[updateSpecificItemsStatus] No receiver emails found for order ${orderId}`,
+          );
+        }
+      } catch (queueErr) {
+        console.error(
+          "[updateSpecificItemsStatus] Failed to enqueue update emails:",
+          queueErr.message,
+        );
+      }
     }
 
-    // 11. Success response
     return res.status(200).json({
       success: true,
       updatedCount: updateResult.rowCount,
@@ -3551,6 +3653,7 @@ export async function getOrderByItemRef(req, res) {
       SELECT 
         o.id AS order_id,
         o.booking_ref,
+        o.rgl_booking_number,
         o.place_of_loading,
         o.place_of_delivery,
         pol.name AS place_of_loading_name,
@@ -3599,6 +3702,7 @@ export async function getOrderByItemRef(req, res) {
         orderMap[orderId] = {
           order_id: orderId,
           booking_ref: row.booking_ref,
+          rgl_booking_number: row.rgl_booking_number,
           place_of_loading: row.place_of_loading_name || null,
           place_of_delivery: row.place_of_delivery_name || null,
           receivers: {},
