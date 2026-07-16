@@ -1657,6 +1657,8 @@ export async function updateContainerStatus(req, res) {
           SELECT
             id,
             receiver_ref,
+            receiver_email,
+            receiver_name,
             status
           FROM receivers
           WHERE id = $1
@@ -1678,6 +1680,8 @@ export async function updateContainerStatus(req, res) {
             oi.receiver_id,
             oi.item_ref,
             s.sender_ref,
+            s.sender_email,
+            s.sender_name,
             s.consignment_number
           FROM order_items oi
           LEFT JOIN senders s
@@ -1739,6 +1743,46 @@ export async function updateContainerStatus(req, res) {
               eta,
             ],
           );
+
+          if (receiver.receiver_email) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                item.order_id,
+                receiver.id,
+                "receiver",
+                receiver.receiver_email,
+                receiver.receiver_name,
+                "order_update",
+                item.item_ref,
+              ],
+            );
+          }
+
+          if (item.sender_id && item.sender_email) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                item.order_id,
+                item.sender_id,
+                "sender",
+                item.sender_email,
+                item.sender_name,
+                "order_update",
+                item.item_ref,
+              ],
+            );
+          }
         }
 
         await client.query(

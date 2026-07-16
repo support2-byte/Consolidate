@@ -1119,7 +1119,7 @@ export const getOrders = async (req, res) => {
                               ),
 
                               'status',
-                              cm.status,
+                              COALESCE(cah.status, cm.status),
 
                               'assign_total_box',
                               COALESCE(oi.assigned_boxes::text, '0'),
@@ -1141,6 +1141,15 @@ export const getOrders = async (req, res) => {
 
                           JOIN container_master cm
                             ON cm.container_number = container_num
+
+                          LEFT JOIN LATERAL (
+                            SELECT cah.status
+                            FROM container_assignment_history cah
+                            WHERE cah.order_id = o.id
+                              AND cah.cid = cm.cid
+                            ORDER BY cah.id DESC
+                            LIMIT 1
+                          ) cah ON true
 
                           WHERE r2.id = oi.receiver_id
                         ),
@@ -1922,6 +1931,27 @@ function safeParseJsonArrayForMultiple(value) {
   return [];
 }
 
+function safeParseJsonArray(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+
+  try {
+    const parsed = JSON.parse(val);
+    if (Array.isArray(parsed)) return parsed;
+    // If parsed value is a string, wrap in array
+    if (typeof parsed === "string") return [parsed];
+  } catch {
+    // Fallback: treat as comma-separated string or single value
+    return val
+      .toString()
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
 export async function assignContainersBatch(req, res) {
   let client;
   try {
@@ -2022,6 +2052,7 @@ export async function assignContainersBatch(req, res) {
         SELECT
           id,
           receiver_name,
+          receiver_email,
           qty_delivered,
           total_number,
           total_weight,
@@ -2047,6 +2078,12 @@ export async function assignContainersBatch(req, res) {
         skipped.push({ ...ass, reason: "receiver already fully delivered" });
         continue;
       }
+
+      const senderRes = await client.query(
+        `SELECT id, sender_email, sender_name FROM senders WHERE order_id = $1 LIMIT 1`,
+        [orderIdNum],
+      );
+      const sender = senderRes.rows[0] || null;
 
       const itemsRes = await client.query(
         `
@@ -2251,6 +2288,46 @@ export async function assignContainersBatch(req, res) {
         ],
       );
 
+      if (receiver.receiver_email) {
+        await client.query(
+          `
+          INSERT INTO email_queue (
+            order_id, recipient_id, recipient_type,
+            recipient_email, recipient_name, email_type, status, item_ref
+          ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+          `,
+          [
+            orderIdNum,
+            receiverIdNum,
+            "receiver",
+            receiver.receiver_email,
+            receiver.receiver_name,
+            "container_assigned",
+            itemRef,
+          ],
+        );
+      }
+
+      if (sender?.sender_email) {
+        await client.query(
+          `
+          INSERT INTO email_queue (
+            order_id, recipient_id, recipient_type,
+            recipient_email, recipient_name, email_type, status, item_ref
+          ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+          `,
+          [
+            orderIdNum,
+            sender.id,
+            "sender",
+            sender.sender_email,
+            sender.sender_name,
+            "container_assigned",
+            itemRef,
+          ],
+        );
+      }
+
       results.push({
         orderId: orderIdNum,
         receiverId: receiverIdNum,
@@ -2329,27 +2406,6 @@ export async function assignContainersBatch(req, res) {
   }
 }
 
-function safeParseJsonArray(val) {
-  if (!val) return [];
-  if (Array.isArray(val)) return val;
-
-  try {
-    const parsed = JSON.parse(val);
-    if (Array.isArray(parsed)) return parsed;
-    // If parsed value is a string, wrap in array
-    if (typeof parsed === "string") return [parsed];
-  } catch {
-    // Fallback: treat as comma-separated string or single value
-    return val
-      .toString()
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
 export async function assignContainersToOrders(req, res) {
   let client;
   try {
@@ -2380,13 +2436,19 @@ export async function assignContainersToOrders(req, res) {
       const orderAssign = assignments[orderId];
       let orderAssignedQty = 0;
 
+      const senderRes = await client.query(
+        `SELECT id, sender_email, sender_name FROM senders WHERE order_id = $1 LIMIT 1`,
+        [orderId],
+      );
+      const sender = senderRes.rows[0] || null;
+
       for (const recIdStr in orderAssign) {
         const recId = Number(recIdStr);
         const recAssign = orderAssign[recIdStr];
 
         const receiverRes = await client.query(
           `
-          SELECT id, qty_delivered, containers, total_number
+          SELECT id, qty_delivered, containers, total_number, receiver_name, receiver_email
             FROM receivers
             WHERE id = $1 AND order_id = $2
           FOR UPDATE
@@ -2564,6 +2626,46 @@ export async function assignContainersToOrders(req, res) {
           `,
             [newBoxes, newKg, JSON.stringify(containerDetails), item.id],
           );
+
+          if (receiver.receiver_email) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                orderId,
+                recId,
+                "receiver",
+                receiver.receiver_email,
+                receiver.receiver_name,
+                "container_assigned",
+                itemRef,
+              ],
+            );
+          }
+
+          if (sender?.sender_email) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                orderId,
+                sender.id,
+                "sender",
+                sender.sender_email,
+                sender.sender_name,
+                "container_assigned",
+                itemRef,
+              ],
+            );
+          }
 
           receiverAssignedQty += assignedThisItemQty;
           receiverAssignedKg += assignedThisItemKg;
@@ -3568,36 +3670,67 @@ export async function updateSpecificItemsStatus(req, res) {
         WHERE id = ANY($1::int[])`,
           [affectedReceiverIds],
         );
+        const receiverMap = new Map(receiversRes.rows.map((r) => [r.id, r]));
 
-        const recipients = receiversRes.rows.filter((r) =>
-          (r.receiver_email || "").trim(),
+        const senderRes = await pool.query(
+          `SELECT id, sender_email, sender_name
+           FROM senders
+          WHERE order_id = $1
+          LIMIT 1`,
+          [Number(orderId)],
         );
+        const sender = senderRes.rows[0] || null;
 
-        if (recipients.length) {
-          const values = [];
-          const placeholders = recipients
-            .map((r, idx) => {
-              const base = idx * 6;
-              values.push(
-                Number(orderId),
-                r.id,
-                "receiver",
-                r.receiver_email.trim(),
-                r.receiver_name || null,
-                "order_update",
-              );
-              return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
-            })
-            .join(", ");
+        const values = [];
+        const placeholders = [];
+        let idx = 0;
 
+        for (const row of updatedRows) {
+          const receiver = receiverMap.get(row.receiver_id);
+          if (receiver?.receiver_email?.trim()) {
+            const base = idx * 7;
+            values.push(
+              Number(orderId),
+              receiver.id,
+              "receiver",
+              receiver.receiver_email.trim(),
+              receiver.receiver_name || null,
+              "order_update",
+              row.item_ref,
+            );
+            placeholders.push(
+              `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+            );
+            idx++;
+          }
+
+          if (sender?.sender_email?.trim()) {
+            const base = idx * 7;
+            values.push(
+              Number(orderId),
+              sender.id,
+              "sender",
+              sender.sender_email.trim(),
+              sender.sender_name || null,
+              "order_update",
+              row.item_ref,
+            );
+            placeholders.push(
+              `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+            );
+            idx++;
+          }
+        }
+
+        if (placeholders.length) {
           await pool.query(
-            `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type)
-      VALUES ${placeholders}`,
+            `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type, item_ref)
+              VALUES ${placeholders.join(", ")}`,
             values,
           );
         } else {
           console.warn(
-            `[updateSpecificItemsStatus] No receiver emails found for order ${orderId}`,
+            `[updateSpecificItemsStatus] No receiver/sender emails found for order ${orderId}`,
           );
         }
       } catch (queueErr) {

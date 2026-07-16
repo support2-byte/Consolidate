@@ -9,7 +9,7 @@ import {
 export const getAllNotifications = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.recipient_type,
+      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.item_ref, eq.recipient_type,
               eq.recipient_email, eq.recipient_name, eq.email_type, eq.status,
               eq.attempts, eq.last_error, eq.created_at, eq.sent_at
          FROM email_queue eq
