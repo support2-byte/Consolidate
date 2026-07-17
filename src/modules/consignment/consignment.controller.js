@@ -1,6 +1,7 @@
 import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
+import logger from "../../services/logger.js";
 
 function safeParseJsonArray(val) {
   if (!val) return [];
@@ -1199,7 +1200,7 @@ export async function createConsignment(req, res) {
               "receiver",
               r.email,
               r.name,
-              "order_created",
+              "consignment_created",
               r.item_ref,
             ],
           );
@@ -1231,7 +1232,7 @@ export async function createConsignment(req, res) {
               "sender",
               s.email,
               s.name,
-              "order_created",
+              "consignment_created",
               s.item_ref,
             ],
           );
@@ -1559,7 +1560,7 @@ export async function updateConsignment(req, res) {
                 "receiver",
                 r.email,
                 r.name,
-                "order_update",
+                "order_status_update",
                 r.item_ref,
               ],
             );
@@ -1591,7 +1592,7 @@ export async function updateConsignment(req, res) {
                 "sender",
                 s.email,
                 s.name,
-                "order_update",
+                "order_status_update",
                 s.item_ref,
               ],
             );
@@ -1823,12 +1824,9 @@ export async function advanceStatus(req, res) {
 
       const orderIdsRes = await client.query(
         `
-        SELECT jsonb_array_elements(orders::jsonb)->>'id'
-        AS order_id
-
-        FROM consignments
-
-        WHERE id=$1
+          SELECT jsonb_array_elements_text(orders::jsonb) AS order_id
+          FROM consignments
+          WHERE id=$1
         `,
         [numericId],
       );
@@ -1884,7 +1882,7 @@ export async function advanceStatus(req, res) {
               "receiver",
               r.email,
               r.name,
-              "order_update",
+              "order_status_update",
               r.item_ref,
             ],
           );
@@ -1916,7 +1914,7 @@ export async function advanceStatus(req, res) {
               "sender",
               s.email,
               s.name,
-              "order_update",
+              "order_status_update",
               s.item_ref,
             ],
           );
@@ -2280,7 +2278,7 @@ export async function changeConsignmentStatus(req, res) {
                   "receiver",
                   receiver_email,
                   receiver_name,
-                  "order_update",
+                  "order_status_update",
                   itemRow.item_ref,
                 ],
               );
@@ -2321,7 +2319,7 @@ export async function changeConsignmentStatus(req, res) {
               "sender",
               s.email,
               s.name,
-              "order_update",
+              "order_status_update",
               s.item_ref,
             ],
           );

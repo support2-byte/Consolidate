@@ -190,6 +190,11 @@ export async function createOrder(req, res) {
       b.send_email_notification === true ||
       b.send_email_notification === "true";
 
+    const allItemRefs = flatOrderItems
+      .map((it) => it.item_ref || it.itemRef || "")
+      .filter(Boolean)
+      .join(",");
+
     if (ownerWantsEmail) {
       const ownerEmail = (owner.email || "").trim();
       if (ownerEmail) {
@@ -198,6 +203,7 @@ export async function createOrder(req, res) {
           type: "sender",
           email: ownerEmail,
           name: owner.name,
+          itemRef: allItemRefs || owner.ref || "",
         });
       } else {
         console.warn(
@@ -298,6 +304,7 @@ export async function createOrder(req, res) {
             type: "receiver",
             email: partyEmail,
             name: partyName,
+            itemRef: receiverItemRefs,
           });
         } else {
           console.warn(
@@ -432,7 +439,7 @@ export async function createOrder(req, res) {
         const values = [];
         const placeholders = emailTargets
           .map((t, idx) => {
-            const base = idx * 6;
+            const base = idx * 7;
             values.push(
               orderId,
               t.id,
@@ -440,14 +447,15 @@ export async function createOrder(req, res) {
               t.email,
               t.name || null,
               "order_created",
+              t.itemRef || null,
             );
-            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`;
           })
           .join(", ");
 
         await pool.query(
-          `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type)
-           VALUES ${placeholders}`,
+          `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type, item_ref)
+              VALUES ${placeholders}`,
           values,
         );
       } catch (queueErr) {
@@ -2302,7 +2310,7 @@ export async function assignContainersBatch(req, res) {
             "receiver",
             receiver.receiver_email,
             receiver.receiver_name,
-            "container_assigned",
+            "order_assigned",
             itemRef,
           ],
         );
@@ -2322,7 +2330,7 @@ export async function assignContainersBatch(req, res) {
             "sender",
             sender.sender_email,
             sender.sender_name,
-            "container_assigned",
+            "order_assigned",
             itemRef,
           ],
         );
@@ -2641,7 +2649,7 @@ export async function assignContainersToOrders(req, res) {
                 "receiver",
                 receiver.receiver_email,
                 receiver.receiver_name,
-                "container_assigned",
+                "order_assigned",
                 itemRef,
               ],
             );
@@ -2661,7 +2669,7 @@ export async function assignContainersToOrders(req, res) {
                 "sender",
                 sender.sender_email,
                 sender.sender_name,
-                "container_assigned",
+                "order_assigned",
                 itemRef,
               ],
             );
@@ -3695,7 +3703,7 @@ export async function updateSpecificItemsStatus(req, res) {
               "receiver",
               receiver.receiver_email.trim(),
               receiver.receiver_name || null,
-              "order_update",
+              "order_status_update",
               row.item_ref,
             );
             placeholders.push(
@@ -3712,7 +3720,7 @@ export async function updateSpecificItemsStatus(req, res) {
               "sender",
               sender.sender_email.trim(),
               sender.sender_name || null,
-              "order_update",
+              "order_status_update",
               row.item_ref,
             );
             placeholders.push(

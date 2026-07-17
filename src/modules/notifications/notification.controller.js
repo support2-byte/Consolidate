@@ -2,6 +2,7 @@ import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import {
   notifyOrderStatusUpdate,
+  notifySingleStatusUpdate,
   sendOrderEmail,
   sendShipmentEmail,
 } from "../../services/sendOrderEmail.js";
@@ -90,18 +91,19 @@ export const resendNotification = async (req, res) => {
       result = await sendShipmentEmail({
         email: notif.recipient_email,
         orderId: notif.order_id,
+        itemRef: notif.item_ref,
         recipientId: notif.recipient_id,
         recipientType: notif.recipient_type,
         receiverName: notif.recipient_name || "Valued Customer",
       });
-    } else if (notif.email_type === "order_update") {
-      result = await notifyOrderStatusUpdate(notif.order_id, {
-        receiverName: notif.recipient_name || "Valued Customer",
-      });
     } else {
-      return res.status(400).json({
-        success: false,
-        message: `Unsupported email_type "${notif.email_type}" for resend`,
+      result = await notifySingleStatusUpdate({
+        email: notif.recipient_email,
+        itemRef: notif.item_ref,
+        orderId: notif.order_id,
+        recipientId: notif.recipient_id,
+        recipientType: notif.recipient_type,
+        receiverName: notif.recipient_name || "Valued Customer",
       });
     }
 
