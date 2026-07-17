@@ -1352,48 +1352,43 @@ export async function getOrdersConsignments(req, res) {
         )
       )`;
 
+      if (pol) {
+        params.push(parseInt(pol, 10));
+        whereClause += ` AND o.place_of_loading = $${params.length}`;
+      }
+
+      if (pod) {
+        params.push(parseInt(pod, 10));
+        whereClause += ` AND o.place_of_delivery = $${params.length}`;
+      }
+
       if (consignment_id) {
-        if (pol) {
-          params.push(pol.trim());
-          whereClause += ` AND LOWER(TRIM(o.place_of_loading)) = LOWER(TRIM($${params.length}))`;
-        }
-
-        if (pod) {
-          params.push(pod.trim());
-          whereClause += ` AND LOWER(TRIM(o.place_of_delivery)) = LOWER(TRIM($${params.length}))`;
-        }
-
         params.push(parseInt(consignment_id, 10));
         const consignmentParam = params.length;
 
         whereClause += `
+        AND EXISTS (
+          SELECT 1
+          FROM consignments c
+          WHERE c.id = $${consignmentParam}
+            AND c.orders @> to_jsonb(o.id)
+        )
+      `;
+      } else {
+        params.push(validIds);
+        const containerParam = params.length;
+
+        whereClause += `
           AND EXISTS (
             SELECT 1
-            FROM consignments c
-            WHERE c.id = $${consignmentParam}
-              AND c.orders @> to_jsonb(o.id)
-          )
-        `;
-      } else {
-        if (pol) {
-          params.push(String(pol.trim()));
-          whereClause += ` AND o.place_of_loading = $${params.length}`;
-        }
-        if (pod) {
-          params.push(String(pod.trim()));
-          whereClause += ` AND o.place_of_delivery = $${params.length}`;
-        }
-        params.push(validIds);
-        const chContainerParam = params.length;
-        whereClause += ` AND EXISTS (
-            SELECT 1
-            FROM container_assignment_history ch
-            WHERE ch.order_id = o.id
-              AND ch.cid = ANY($${chContainerParam}::int[])
-              AND COALESCE(ch.status, 'Ready for Loading') IN (
-                'Ready for Loading',
-                'Loaded'
-              )
+            FROM receivers r
+            JOIN order_items oi
+              ON oi.receiver_id = r.id
+            JOIN order_tracking ot
+              ON ot.item_ref = oi.item_ref
+            WHERE r.order_id = o.id
+              AND ot.container_id = ANY($${containerParam}::int[])
+              AND ot.status IN ('Ready for Loading', 'Loaded')
           )
         `;
       }
@@ -1419,30 +1414,40 @@ export async function getOrdersConsignments(req, res) {
     `;
 
     const shippingDetailsSub = `
-      (SELECT COALESCE(json_agg(json_build_object(
-        'id', oi.id,
-        'category', COALESCE(oi.category, ''),
-        'subcategory', COALESCE(oi.subcategory, ''),
-        'type', COALESCE(oi.type, ''),
-        'itemRef', COALESCE(oi.item_ref, ''),
-        'status', COALESCE(ot_item.status, 'Created'),
-        'totalNumber', COALESCE(oi.total_number, 0),
-        'weight', COALESCE(oi.weight, 0),
-        'containerDetails',${containerDetailsSub},
-        'remainingItems',  COALESCE(oi.total_number, 0) - COALESCE((
-            SELECT SUM((cd_obj->>'assign_total_box')::int)
-            FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-          ), 0)
-      ) ORDER BY oi.id), '[]'::json)
+    (
+      SELECT COALESCE(
+        json_agg(
+          json_build_object(
+            'id', oi.id,
+            'category', COALESCE(oi.category, ''),
+            'subcategory', COALESCE(oi.subcategory, ''),
+            'type', COALESCE(oi.type, ''),
+            'itemRef', COALESCE(oi.item_ref, ''),
+            'status', ot_item.status,
+            'totalNumber', COALESCE(oi.total_number, 0),
+            'weight', COALESCE(oi.weight, 0),
+            'containerDetails', ${containerDetailsSub},
+            'remainingItems',
+              COALESCE(oi.total_number, 0) - COALESCE((
+                SELECT SUM((cd_obj->>'assign_total_box')::int)
+                FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+              ), 0)
+          )
+          ORDER BY oi.id
+        ),
+        '[]'::json
+      )
       FROM order_items oi
-      LEFT JOIN LATERAL (
+      JOIN LATERAL (
         SELECT ot.status
         FROM order_tracking ot
         WHERE ot.item_ref = oi.item_ref
+          AND ot.status IN ('Ready for Loading', 'Loaded')
         ORDER BY ot.created_time DESC
         LIMIT 1
       ) ot_item ON true
-      WHERE oi.receiver_id = r.id)
+      WHERE oi.receiver_id = r.id
+    )
     `;
 
     const receiversSub = `
