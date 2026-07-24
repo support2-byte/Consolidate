@@ -873,6 +873,39 @@ export const updateStatus = async (req, res) => {
   }
 };
 
+export const toggleSendEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { send_email } = req.body;
+
+    const updatedStatus = await pool.query(
+      `UPDATE statuses SET send_email = $1
+       WHERE id = $2
+       RETURNING *`,
+      [send_email, id],
+    );
+
+    if (updatedStatus.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Send Email not found!" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Email Notification enabled!",
+      status: updatedStatus.rows[0],
+    });
+  } catch (err) {
+    logger.error("Error updating send email for statuses:", {
+      error: err.message,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
 export const deleteStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1202,10 +1235,10 @@ export const getDashboardData = async (req, res) => {
       ),
 
       client.query(`
-        SELECT r.status, COUNT(DISTINCT r.order_id) as count 
-        FROM receivers r 
-        WHERE r.status IS NOT NULL 
-        GROUP BY r.status
+        SELECT oi.status, COUNT(DISTINCT oi.order_id) as count 
+        FROM order_items oi 
+        WHERE oi.status IS NOT NULL 
+        GROUP BY oi.status
       `),
 
       client.query(`SELECT COUNT(*) as total FROM customers`),
@@ -1249,5 +1282,28 @@ export const getDashboardData = async (req, res) => {
       .json({ success: false, message: "Failed to fetch dashboard data" });
   } finally {
     client.release();
+  }
+};
+
+export const getModules = async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT * FROM modules");
+    if (rows.length === 0) {
+      logger.warn("No Modules Found!");
+      return res
+        .status(404)
+        .json({ success: false, message: "No Modules Found!" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      modules: rows,
+    });
+  } catch (error) {
+    logger.error("Failed to fetch modules", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong!",
+    });
   }
 };

@@ -985,11 +985,11 @@ export async function getUsageHistory(req, res) {
         LEFT JOIN orders o 
           ON cah.order_id = o.id 
           AND o.status != 'Cancelled'
-        LEFT JOIN consignments con
-          ON con.orders @> to_jsonb(cah.order_id)
         LEFT JOIN container_consignment_history cch
-          ON cch.consignment_id = con.id
+          ON cch.consignment_id = cah.consignment_id
           AND cch.container_id = cah.cid
+        LEFT JOIN consignments con
+          ON con.id = cch.consignment_id
         LEFT JOIN order_items oi ON oi.id = cah.detail_id
         WHERE cah.cid = $1
           AND con.id IS NOT NULL
@@ -1139,7 +1139,6 @@ export async function deleteContainer(req, res) {
       return res.status(404).json({ error: "Container not found" });
     }
 
-    console.log("Deactivated container:", cid);
     res.json({ message: "Container deactivated" });
   } catch (err) {
     console.error("pool error:", err.message);
@@ -1274,7 +1273,6 @@ export const releaseContainer = async (req, res) => {
 };
 
 export async function getAllContainersForConsignment(req, res) {
-  console.log("getAllContainers called with query:", req.query);
   try {
     const {
       container_number,
@@ -1376,24 +1374,20 @@ export async function getAllContainersForConsignment(req, res) {
       baseFrom += orderJoin;
     }
 
-    // Use CTE to compute derived_status
     const innerQuery = `${selectClause} ${baseFrom} WHERE ${whereClause}`;
 
-    // Prepare params for limit/offset (always added)
     let fullParams = [...baseValues];
     let statusWhere = "";
 
     if (status && status !== "") {
-      // Filter by specific status
       const statusParamIndex = baseValues.length + 1;
       statusWhere = `WHERE derived_status = $${statusParamIndex}`;
       fullParams.push(status);
     }
 
-    // Add limit and offset
     const limitParamIndex = fullParams.length + 1;
     const offsetParamIndex = limitParamIndex + 1;
-    fullParams.push(parseInt(limit), parseInt(offset)); // FIXED: Ensure offset is int
+    fullParams.push(parseInt(limit), parseInt(offset));
 
     let fullQuery;
     if (status && status !== "") {
@@ -1405,7 +1399,6 @@ export async function getAllContainersForConsignment(req, res) {
         LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
       `;
     } else {
-      // No status filter: show all
       fullQuery = `
         WITH container_summary AS (${innerQuery})
         SELECT * FROM container_summary 
@@ -1414,7 +1407,6 @@ export async function getAllContainersForConsignment(req, res) {
       `;
     }
 
-    // FIXED: Count query - Reuse innerQuery, apply status filter outside CTE
     let countParams = [...baseValues];
     let countStatusWhere = "";
     if (status && status !== "") {
@@ -1428,24 +1420,11 @@ export async function getAllContainersForConsignment(req, res) {
       ${countStatusWhere}
     `;
 
-    console.log("Generated Query:", fullQuery); // Add logging for debugging
-    console.log("Generated Count Query:", countQuery);
-    console.log("Full Params:", fullParams);
-    console.log("Count Params:", countParams);
-
     const rowsResult = await pool.query(fullQuery, fullParams);
     const countResult = await pool.query(countQuery, countParams);
 
     const rows = rowsResult.rows;
 
-    console.log(
-      "Fetched containers:",
-      rows.length,
-      "Total:",
-      parseInt(countResult.rows[0].total),
-      "Filters:",
-      { ...req.query, status },
-    );
     res.json({
       data: rows,
       total: parseInt(countResult.rows[0].total || 0),
@@ -1606,15 +1585,16 @@ export async function updateContainerStatus(req, res) {
     if (container_status && current_status) {
       const statusResult = await client.query(
         `
-        SELECT order_status, days_offset
-        FROM statuses
-        WHERE container_status = $1
+          SELECT order_status, days_offset, send_email
+          FROM statuses
+          WHERE container_status = $1
         `,
         [container_status],
       );
 
       const order_status = statusResult.rows[0]?.order_status ?? null;
       const days_offset = statusResult.rows[0]?.days_offset ?? null;
+      const statusSendEmail = statusResult.rows[0]?.send_email === true;
 
       let eta = null;
       let daysUntil = null;
@@ -1635,21 +1615,46 @@ export async function updateContainerStatus(req, res) {
 
       const assignmentResult = await client.query(
         `
-          UPDATE container_assignment_history
+          UPDATE container_assignment_history cah
           SET status = $1
-          WHERE cid = $2
-            AND action_type = 'ASSIGN'
-            AND status = $3
-          RETURNING receiver_id
+          FROM order_items oi
+          WHERE cah.detail_id = oi.id
+            AND cah.order_id = oi.order_id
+            AND cah.receiver_id = oi.receiver_id
+            AND cah.cid = $2
+            AND cah.action_type = 'ASSIGN'
+            AND cah.status = $3
+          RETURNING cah.receiver_id, cah.detail_id, cah.consignment_id
         `,
         [container_status, cid, current_status],
       );
 
       const receiverIds = [
         ...new Set(
-          assignmentResult.rows.map((row) => row.receiver_id).filter(Boolean),
+          assignmentResult.rows.map((r) => r.receiver_id).filter(Boolean),
         ),
       ];
+
+      const detailIds = [
+        ...new Set(
+          assignmentResult.rows.map((r) => r.detail_id).filter(Boolean),
+        ),
+      ];
+
+      const consignmentIdByDetailId = new Map(
+        assignmentResult.rows.map((r) => [r.detail_id, r.consignment_id]),
+      );
+
+      if (detailIds.length) {
+        await client.query(
+          `
+          UPDATE order_items
+          SET status = $1, updated_at = NOW()
+          WHERE id = ANY($2::int[])
+          `,
+          [order_status, detailIds],
+        );
+      }
 
       for (const receiverId of receiverIds) {
         const receiverResult = await client.query(
@@ -1657,6 +1662,8 @@ export async function updateContainerStatus(req, res) {
           SELECT
             id,
             receiver_ref,
+            receiver_email,
+            receiver_name,
             status
           FROM receivers
           WHERE id = $1
@@ -1673,55 +1680,46 @@ export async function updateContainerStatus(req, res) {
         const itemsResult = await client.query(
           `
           SELECT
+            oi.id,
             oi.order_id,
             oi.sender_id,
             oi.receiver_id,
             oi.item_ref,
             s.sender_ref,
-            s.consignment_number
+            s.sender_email,
+            s.sender_name
           FROM order_items oi
           LEFT JOIN senders s
             ON s.id = oi.sender_id
           WHERE oi.receiver_id = $1
+            AND oi.id = ANY($2::int[])
           `,
-          [receiverId],
+          [receiverId, detailIds],
         );
 
         for (const item of itemsResult.rows) {
           await client.query(
             `
-            INSERT INTO order_tracking (
-              order_id,
-              sender_id,
-              sender_ref,
-              receiver_id,
-              receiver_ref,
-              container_id,
-              consignment_number,
-              status,
-              old_status,
-              item_ref,
-              created_by,
-              created_time,
-              eta,
-              etd
-            )
-            VALUES (
-              $1,
-              $2,
-              $3,
-              $4,
-              $5,
-              $6,
-              $7,
-              $8,
-              $9,
-              $10,
-              $11,
-              NOW(),
-              $12,
-              $13
-            )
+              INSERT INTO order_tracking (
+                order_id,
+                sender_id,
+                sender_ref,
+                receiver_id,
+                receiver_ref,
+                container_id,
+                consignment_id,
+                status,
+                old_status,
+                item_ref,
+                created_by,
+                created_time,
+                eta,
+                etd,
+                module_id
+              )
+              VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14
+              )
             `,
             [
               item.order_id,
@@ -1730,15 +1728,56 @@ export async function updateContainerStatus(req, res) {
               item.receiver_id,
               receiver.receiver_ref,
               cid,
-              item.consignment_number,
+              consignmentIdByDetailId.get(item.id) ?? null,
               container_status,
               oldStatus,
               item.item_ref,
               created_by,
               eta,
               eta,
+              4,
             ],
           );
+
+          if (receiver.receiver_email && statusSendEmail) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                item.order_id,
+                receiver.id,
+                "receiver",
+                receiver.receiver_email,
+                receiver.receiver_name,
+                "order_update",
+                item.item_ref,
+              ],
+            );
+          }
+
+          if (item.sender_id && item.sender_email && statusSendEmail) {
+            await client.query(
+              `
+              INSERT INTO email_queue (
+                order_id, recipient_id, recipient_type,
+                recipient_email, recipient_name, email_type, status, item_ref
+              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+              `,
+              [
+                item.order_id,
+                item.sender_id,
+                "sender",
+                item.sender_email,
+                item.sender_name,
+                "order_update",
+                item.item_ref,
+              ],
+            );
+          }
         }
 
         await client.query(

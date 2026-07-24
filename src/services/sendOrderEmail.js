@@ -2,220 +2,76 @@ import pool from "../db/pool.js";
 import { transporter } from "../middleware/nodeMailer.js";
 import { escapeHtml } from "./escapeHtml.js";
 import logger from "./logger.js";
+import { renderTemplate } from "./renderTemplate.js";
 
 function buildSubject(templateData) {
   return `Royal Gulf Shipping – ${templateData.statusLabel} (Ref: ${templateData.refId || "—"})`;
 }
 
 function buildSubscriptionConfirmationHtml(templateData) {
-  const currentYear = new Date().getFullYear();
-  const receiverName = escapeHtml(
-    templateData.receiverName || "Valued Customer",
-  );
   const refId = escapeHtml(templateData.refId || "—");
-  const pol = escapeHtml(templateData.place_of_loading || "");
-  const pod = escapeHtml(templateData.place_of_delivery || "");
-  const currentStatus = escapeHtml(templateData.currentStatus || "");
+  const orderId = escapeHtml(templateData.orderId || "—");
+  const pol = escapeHtml(templateData.place_of_loading || "—");
+  const pod = escapeHtml(templateData.place_of_delivery || "—");
+  const route = `${pol} &rarr; ${pod}`;
+  const eta = escapeHtml(templateData.eta || "—");
+  const lastUpdated = escapeHtml(
+    templateData.lastUpdated || new Date().toLocaleString(),
+  );
   const trackLink = escapeHtml(
     templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
   );
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Subscribed to Shipment Updates</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height:1.5; color:#1e293b; background:#f8fafc; margin:0; }
-    .wrap { max-width:600px; margin:0 auto; background:white; border-radius:8px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.08); }
-    .logo-bar { padding:24px; text-align:center; background:#0f172a; }
-    .logo { max-width:220px; height:auto; }
-    .brand { text-align:center; padding:16px 24px; background:#0f172a; color:white; }
-    .brand h1 { margin:0; font-size:22px; }
-    .brand p { margin:4px 0 0; opacity:0.8; font-size:14px; }
-    .accent { border:none; height:4px; background:linear-gradient(90deg, #097D76, #F38120); margin:0; }
-    .tag-row { padding:24px; }
-    .tag { display:inline-block; padding:6px 12px; background:#097D76; color:white; font-weight:600; border-radius:4px; margin-bottom:12px; font-size:13px; letter-spacing:0.3px; }
-    .title { margin:0 0 16px; color:#1e293b; font-size:22px; }
-    .info-box { padding:16px; background:#f9fafb; border-radius:8px; margin:16px 0; border:1px solid #eef2f7; }
-    .info-row { display:flex; justify-content:space-between; padding:6px 0; font-size:14px; }
-    .info-row .k { color:#64748b; }
-    .info-row .v { font-weight:700; color:#0f172a; }
-    .cta { display:inline-block; margin:20px 0; padding:14px 32px; background:#F38120; color:white; text-decoration:none; font-weight:600; border-radius:6px; }
-    .foot { text-align:center; padding:24px; background:#f1f5f9; font-size:13px; color:#64748b; }
-    .muted { color:#64748b; font-size:13px; }
-  </style>
-</head>
-<body style="padding:16px;background:#f8fafc;">
-  <div class="wrap">
-    <div class="logo-bar">
-      <img class="logo" src="https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg" alt="Royal Gulf Shipping Logo">
-    </div>
-    <div class="brand">
-      <h1>Royal Gulf Shipping & Logistics LLC</h1>
-      <p>Dubai • London • Karachi • Shenzhen</p>
-    </div>
-    <hr class="accent">
-    <div class="tag-row">
-      <div class="tag">Subscribed</div>
-      <div class="content">
-        <h2 class="title">You're subscribed to updates for shipment ${refId}</h2>
-        <p>Dear ${receiverName},</p>
-        <p>You'll now receive an email every time the status of this shipment changes.</p>
-
-        <div class="info-box">
-          <div class="info-row"><span class="k">Reference ID</span><span class="v">${refId}</span></div>
-          <div class="info-row"><span class="k">Route</span><span class="v">${pol} -> ${pod}</span></div>
-          ${currentStatus ? `<div class="info-row"><span class="k">Current Status</span><span class="v">${currentStatus}</span></div>` : ""}
-        </div>
-
-        <a class="cta" href="${trackLink}" target="_blank" rel="noopener noreferrer">Track This Shipment</a>
-
-        <p class="muted">Didn't request this? You can ignore this email — no further updates will be sent unless this reference ID is tracked again from our site.</p>
-      </div>
-    </div>
-    <div class="foot">
-      © ${currentYear} Royal Gulf Shipping & Logistics LLC — All rights reserved.<br>
-      Need help? Call <a href="tel:+971555658321" style="color:#097D76;">+971 555 658 321</a> or email
-      <a href="mailto:sales@royalgulfshipping.com" style="color:#097D76;">sales@royalgulfshipping.com</a>
-    </div>
-  </div>
-</body>
-</html>`;
+  return renderTemplate("subscription_confirmed.html", {
+    refId,
+    orderId,
+    route,
+    eta,
+    lastUpdated,
+    trackLink,
+  });
 }
 
-function buildHtml(templateData) {
-  const currentYear = new Date().getFullYear();
-  const receiverName = escapeHtml(
-    templateData.receiverName || "Valued Customer",
-  );
-  const statusLabel = escapeHtml(templateData.statusLabel || "Status Updated");
-  const statusMsg = escapeHtml(
-    templateData.statusMsg || "We are working on your shipment.",
-  );
-  const trackLink = escapeHtml(
-    templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
-  );
-  const refId = escapeHtml(templateData.refId || "—");
-  const route = escapeHtml(templateData.route || "");
-  const etaFormatted = escapeHtml(templateData.etaFormatted || "");
-
-  let routeEtaHtml = "";
-  if (route || etaFormatted) {
-    routeEtaHtml = `
-      <div style="display:flex; gap:12px; margin:16px 0; flex-wrap:wrap;">
-        ${
-          route
-            ? `
-        <div style="flex:1; min-width:160px; background:#f9fafb; border:1px solid #eef2f7; border-radius:10px; padding:10px 14px;">
-          <div style="font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px;">Route</div>
-          <div style="font-weight:700; font-size:14px; margin-top:4px;">${route}</div>
-        </div>`
-            : ""
-        }
-        ${
-          etaFormatted
-            ? `
-        <div style="flex:1; min-width:160px; background:#f9fafb; border:1px solid #eef2f7; border-radius:10px; padding:10px 14px;">
-          <div style="font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:0.5px;">Estimated Arrival</div>
-          <div style="font-weight:700; font-size:14px; margin-top:4px;">${etaFormatted}</div>
-        </div>`
-            : ""
-        }
-      </div>`;
-  }
-
-  let itemsHtml = "";
-  if (
-    Array.isArray(templateData.updatedItems) &&
-    templateData.updatedItems.length > 0
-  ) {
-    const rows = templateData.updatedItems
-      .map(
-        (item) =>
-          `<div style="margin-bottom:4px;">${escapeHtml(item.itemRef || "—")}</div>`,
-      )
-      .join("");
-    itemsHtml = `
-      <h3 style="margin:20px 0 10px; font-size:18px;">Your Updated Shipments</h3>
-      <table role="presentation" style="width:100%; border-collapse:collapse;">
-        <tr style="background:#f1f5f9;">
-          <td style="padding:10px; font-weight:bold;">Item Ref</td>
-          <td style="padding:10px;">${rows}</td>
-        </tr>
-      </table>`;
-  }
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Royal Gulf Shipping – Shipment Update</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height:1.5; color:#1e293b; background:#f8fafc; margin:0; }
-    .wrap { max-width:600px; margin:0 auto; background:white; border-radius:8px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.08); }
-    .logo-bar { padding:24px; text-align:center; background:#0f172a; }
-    .logo { max-width:220px; height:auto; }
-    .brand { text-align:center; padding:16px 24px; background:#0f172a; color:white; }
-    .brand h1 { margin:0; font-size:22px; }
-    .brand p { margin:4px 0 0; opacity:0.8; font-size:14px; }
-    .accent { border:none; height:4px; background:linear-gradient(90deg, #097D76, #F38120); margin:0; }
-    .tag-row { padding:24px; }
-    .tag { display:inline-block; padding:6px 12px; background:#097D76; color:white; font-weight:600; border-radius:4px; margin-bottom:12px; font-size:13px; letter-spacing:0.3px; }
-    .title { margin:0 0 16px; color:#1e293b; font-size:24px; }
-    .status { padding:16px; background:#effaf9; border-radius:8px; margin:16px 0; border:1px solid #097D76; }
-    .status .status-heading { font-size:12px; font-weight:700; color:#097D76; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
-    .status .label { font-weight:700; color:#0f172a; font-size:18px; margin-bottom:6px; }
-    .status .msg { color:#475569; font-size:14px; }
-    .cta { display:inline-block; margin:20px 0; padding:14px 32px; background:#F38120; color:white; text-decoration:none; font-weight:600; border-radius:6px; }
-    .foot { text-align:center; padding:24px; background:#f1f5f9; font-size:13px; color:#64748b; }
-    .muted { color:#64748b; font-size:13px; }
-  </style>
-</head>
-<body style="padding:16px;background:#f8fafc;">
-  <div class="wrap">
-    <div class="logo-bar">
-      <img class="logo" src="https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg" alt="Royal Gulf Shipping Logo">
-    </div>
-    <div class="brand">
-      <h1>Royal Gulf Shipping & Logistics LLC</h1>
-      <p>Dubai • London • Karachi • Shenzhen</p>
-    </div>
-    <hr class="accent">
-    <div class="tag-row">
-      <div class="tag">Shipment ${escapeHtml(refId)}</div>
-      <div class="content">
-        <h2 class="title">${statusLabel}</h2>
-        <p>Dear ${receiverName},</p>
-        <div class="status">
-          <div class="status-heading">Current Status</div>
-          <div class="label">${statusLabel}</div>
-          <div class="msg">${statusMsg}</div>
-        </div>
-        ${routeEtaHtml}
-        ${itemsHtml}
-        <a class="cta" style="text-decoraion:none" href="${trackLink}" target="_blank" rel="noopener noreferrer">View Live Tracking</a>
-        <p class="muted" style="margin:16px 0;">
-          If the button doesn't work, visit:<br>
-          <a href="https://ordertracking.royalgulfshipping.com/">https://ordertracking.royalgulfshipping.com/</a><br>
-          and enter reference ID: <strong>${refId}</strong>
-        </p>
-        <p class="muted">You're receiving this because you subscribed to shipment notifications.</p>
-      </div>
-    </div>
-    <div class="foot">
-      © ${currentYear} Royal Gulf Shipping & Logistics LLC — All rights reserved.<br>
-      Need help? Call <a href="tel:+971555658321" style="color:#097D76;">+971 555 658 321</a> or email
-      <a href="mailto:sales@royalgulfshipping.com" style="color:#097D76;">sales@royalgulfshipping.com</a>
-    </div>
-  </div>
-</body>
-</html>`;
+function buildOrderCreatedHtml(templateData) {
+  return renderTemplate("order_created.html", {
+    statusLabel: escapeHtml(templateData.statusLabel || "Order Created"),
+    statusMsg: escapeHtml(
+      templateData.statusMsg ||
+        "An order has been generated and is now pending further action.",
+    ),
+    refId: escapeHtml(templateData.refId || "—"),
+    orderId: escapeHtml(templateData.orderId || "—"),
+    route: escapeHtml(templateData.route || "—"),
+    eta: escapeHtml(templateData.etaFormatted || "—"),
+    lastUpdated: escapeHtml(
+      templateData.lastUpdated || new Date().toLocaleString(),
+    ),
+    trackLink: escapeHtml(
+      templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+    ),
+  });
 }
 
-async function sendOrderEmail(toEmails, templateData) {
+function buildShipmentUpdateHtml(templateData) {
+  return renderTemplate("shipment_update.html", {
+    statusLabel: escapeHtml(templateData.statusLabel || "Shipment Updated"),
+    statusMsg: escapeHtml(
+      templateData.statusMsg || "We have an update on your shipment.",
+    ),
+    refId: escapeHtml(templateData.refId || "—"),
+    orderId: escapeHtml(templateData.orderId || "—"),
+    route: escapeHtml(templateData.route || "—"),
+    eta: escapeHtml(templateData.etaFormatted || "—"),
+    lastUpdated: escapeHtml(
+      templateData.lastUpdated || new Date().toLocaleString(),
+    ),
+    trackLink: escapeHtml(
+      templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+    ),
+  });
+}
+
+export async function sendOrderEmail(toEmails, templateData) {
   const emails = (Array.isArray(toEmails) ? toEmails : [toEmails])
     .filter((e) => typeof e === "string" && e.includes("@"))
     .map((e) => e.trim());
@@ -224,11 +80,15 @@ async function sendOrderEmail(toEmails, templateData) {
     return { success: false, message: "No valid recipients" };
   }
 
+  const html = templateData.isNewOrder
+    ? buildOrderCreatedHtml(templateData)
+    : buildShipmentUpdateHtml(templateData);
+
   const mailOptions = {
     from: `"${process.env.EMAIL_FROM_NAME || "Royal Gulf Shipping"}" <${process.env.EMAIL_FROM_ADDRESS || "support@royalgulfshipping.com"}>`,
     to: emails.join(", "),
     subject: buildSubject(templateData),
-    html: buildHtml(templateData),
+    html,
   };
 
   try {
@@ -248,13 +108,26 @@ async function sendOrderEmail(toEmails, templateData) {
 }
 
 export async function sendShipmentEmail(shipmentData) {
-  const { email, orderId, referenceId } = shipmentData;
+  const { email, orderId, itemRef: passedItemRef } = shipmentData;
 
   if (!email || typeof email !== "string" || !email.trim().includes("@")) {
     return { success: false, error: "Invalid email address" };
   }
+
   if (!orderId) {
     return { success: false, error: "orderId is required" };
+  }
+
+  const notificationsEnabled = await isNotificationEnabled(
+    passedItemRef || shipmentData.refId || shipmentData.referenceId,
+  );
+
+  if (!notificationsEnabled) {
+    return {
+      success: false,
+      skipped: true,
+      message: `Notifications for this item's current status are disabled`,
+    };
   }
 
   const receiverName =
@@ -262,47 +135,231 @@ export async function sendShipmentEmail(shipmentData) {
       .trim()
       .replace(/\s+/g, " ") || "Valued Customer";
 
+  let formNo = "—";
+  let etaFormatted = String(shipmentData.etaFormatted || "");
+  let route = String(shipmentData.route || "");
+  const itemRef =
+    passedItemRef || shipmentData.refId || shipmentData.referenceId || "—";
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT o.rgl_booking_number, o.booking_ref, ot.eta
+        FROM orders o
+       LEFT JOIN order_tracking ot ON ot.order_id = o.id
+       WHERE o.id = $1
+       ORDER BY ot.created_time DESC
+       LIMIT 1`,
+      [orderId],
+    );
+
+    const order = rows[0];
+    formNo = order?.rgl_booking_number || "—";
+
+    if (!etaFormatted && order?.eta) {
+      etaFormatted = new Date(order.eta).toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    }
+  } catch (err) {
+    logger.error("Failed to fetch order details for order created email", {
+      orderId,
+      error: err.message,
+    });
+  }
+
   const templateData = {
+    isNewOrder: true,
     receiverName,
-    statusLabel: String(shipmentData.statusLabel || "Shipment Updated"),
+    statusLabel: String(shipmentData.statusLabel || "Order Created"),
     statusMsg: String(
-      shipmentData.statusMsg || "We have an update on your shipment.",
+      shipmentData.statusMsg ||
+        "An order has been generated and is now pending further action.",
     ),
-    refId: String(shipmentData.refId || referenceId || "—"),
+    refId: itemRef,
+    orderId: formNo,
+    route,
+    etaFormatted,
     trackLink: String(
-      shipmentData.trackLink || "https://consolidatetracking.onrender.com/",
+      shipmentData.trackLink ||
+        `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
     ),
     updatedItems: Array.isArray(shipmentData.updatedItems)
       ? shipmentData.updatedItems
       : [],
   };
 
-  try {
-    await pool.query(
-      `INSERT INTO notification_subscriptions (order_id, reference_id, email)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (order_id, email)
-       DO UPDATE SET reference_id = EXCLUDED.reference_id, updated_at = now()`,
-      [orderId, referenceId || templateData.refId, email.trim()],
-    );
-  } catch (err) {
-    logger.error("Failed to save notification subscription", {
-      orderId,
-      email,
-      error: err.message,
-    });
-  }
-
   return sendOrderEmail(email, templateData);
 }
 
-export async function notifyOrderStatusUpdate(orderId, statusData) {
+async function getSubscribedEmails(itemRef, orderId) {
   const { rows } = await pool.query(
-    `SELECT email FROM notification_subscriptions WHERE order_id = $1`,
-    [orderId],
+    `SELECT DISTINCT email
+       FROM notification_subscriptions
+      WHERE (reference_id IS NOT NULL AND TRIM(reference_id) ILIKE TRIM($1))
+         OR (order_id IS NOT NULL AND order_id = $2)`,
+    [itemRef, orderId],
+  );
+  return rows.map((r) => r.email).filter(Boolean);
+}
+
+function mergeRecipients(primaryEmails, subscriberEmails) {
+  const seen = new Map();
+  for (const e of [...primaryEmails, ...subscriberEmails]) {
+    if (!e) continue;
+    const key = e.trim().toLowerCase();
+    if (!seen.has(key)) seen.set(key, e.trim());
+  }
+  return [...seen.values()];
+}
+
+async function buildAndSendTracking(
+  itemRef,
+  orderId,
+  primaryEmails,
+  statusData,
+) {
+  const { rows } = await pool.query(
+    `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number,
+            pol.name AS pol_name, pod.name AS pod_name
+       FROM order_tracking ot
+       JOIN orders o ON o.id = ot.order_id
+       LEFT JOIN places pol ON pol.id = o.place_of_loading
+       LEFT JOIN places pod ON pod.id = o.place_of_delivery
+      WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
+      ORDER BY ot.created_time DESC
+      LIMIT 1`,
+    [itemRef],
   );
 
   if (rows.length === 0) {
+    logger.error("No order_tracking record found for item_ref", { itemRef });
+    return { itemRef, success: false, error: "No tracking record found" };
+  }
+
+  const tracking = rows[0];
+
+  const notificationsEnabled = await isNotificationEnabled(itemRef);
+  if (!notificationsEnabled) {
+    logger.info("Notification skipped: disabled for this status", {
+      itemRef,
+      status: tracking.current_status,
+    });
+    return {
+      itemRef,
+      success: false,
+      skipped: true,
+      message: `Notifications for status "${tracking.current_status}" are disabled`,
+    };
+  }
+
+  const subscriberEmails = await getSubscribedEmails(itemRef, orderId);
+  const emails = mergeRecipients(primaryEmails, subscriberEmails);
+
+  if (emails.length === 0) {
+    logger.error("No recipients (primary or subscribed) for item_ref", {
+      itemRef,
+    });
+    return { itemRef, success: false, error: "No recipients found" };
+  }
+
+  const route =
+    statusData.route ||
+    `${tracking.pol_name || "—"} → ${tracking.pod_name || "—"}`;
+
+  const templateData = {
+    isNewOrder: false,
+    receiverName: statusData.receiverName || "Valued Customer",
+    statusLabel: String(
+      statusData.statusLabel || tracking.current_status || "Shipment Updated",
+    ),
+    statusMsg: String(
+      statusData.statusMsg || "We have an update on your shipment.",
+    ),
+    refId: itemRef,
+    orderId: tracking.rgl_booking_number || "—",
+    route,
+    etaFormatted: tracking.eta
+      ? new Date(tracking.eta).toLocaleDateString("en-GB", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+        })
+      : "",
+    trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+    updatedItems: Array.isArray(statusData.updatedItems)
+      ? statusData.updatedItems
+      : [],
+  };
+
+  const result = await sendOrderEmail(emails, templateData);
+  return { itemRef, emails, ...result };
+}
+
+async function isNotificationEnabled(itemRef) {
+  const { rows } = await pool.query(
+    `SELECT s.send_email
+       FROM order_items oi
+       JOIN statuses s ON s.order_status = oi.status
+      WHERE TRIM(oi.item_ref) ILIKE TRIM($1)
+      LIMIT 1`,
+    [itemRef],
+  );
+
+  if (rows.length === 0) {
+    logger.error("isNotificationEnabled: no order_items row for item_ref", {
+      itemRef,
+    });
+    return true;
+  }
+
+  return rows[0].send_email === true;
+}
+
+export async function notifyOrderStatusUpdate(orderId, statusData) {
+  const groupedByRef = subscriptions.reduce((acc, sub) => {
+    const ref = sub.reference_id || "—";
+    if (!acc[ref]) acc[ref] = [];
+    acc[ref].push(sub.email);
+    return acc;
+  }, {});
+
+  const results = [];
+  for (const [itemRef, emails] of Object.entries(groupedByRef)) {
+    results.push(await buildAndSendTracking(itemRef, emails, statusData));
+  }
+
+  return { success: results.every((r) => r.success), results };
+}
+
+export async function notifySingleStatusUpdate(statusData) {
+  if (!statusData.itemRef) {
+    return { success: false, error: "Missing itemRef in statusData" };
+  }
+  const primaryEmails = statusData.email ? [statusData.email] : [];
+  const result = await buildAndSendTracking(
+    statusData.itemRef,
+    statusData.orderId,
+    primaryEmails,
+    statusData,
+  );
+  return {
+    success: result.success,
+    skipped: result.skipped,
+    message: result.message,
+    error: result.error,
+    results: [result],
+  };
+}
+
+export async function notifySubscriber(orderId, statusData) {
+  const { rows: subscriptions } = await pool.query(
+    `SELECT email, reference_id FROM notification_subscriptions WHERE order_id = $1`,
+    [orderId],
+  );
+
+  if (subscriptions.length === 0) {
     return {
       success: false,
       skipped: true,
@@ -310,27 +367,72 @@ export async function notifyOrderStatusUpdate(orderId, statusData) {
     };
   }
 
-  const templateData = {
-    receiverName: statusData.receiverName || "Valued Customer",
-    statusLabel: String(statusData.statusLabel || "Shipment Updated"),
-    statusMsg: String(
-      statusData.statusMsg || "We have an update on your shipment.",
-    ),
-    refId: String(statusData.refId || "—"),
-    route: String(statusData.route || ""),
-    etaFormatted: String(statusData.etaFormatted || ""),
-    trackLink: String(
-      statusData.trackLink || "https://consolidatetracking.onrender.com/",
-    ),
-    updatedItems: Array.isArray(statusData.updatedItems)
-      ? statusData.updatedItems
-      : [],
-  };
+  const groupedByRef = subscriptions.reduce((acc, sub) => {
+    const ref = sub.reference_id || "—";
+    if (!acc[ref]) acc[ref] = [];
+    acc[ref].push(sub.email);
+    return acc;
+  }, {});
 
-  return sendOrderEmail(
-    rows.map((r) => r.email),
-    templateData,
-  );
+  const results = [];
+
+  for (const [itemRef, emails] of Object.entries(groupedByRef)) {
+    const { rows } = await pool.query(
+      `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number,
+              pol.name AS pol_name, pod.name AS pod_name
+        FROM order_tracking ot
+        JOIN orders o ON o.id = ot.order_id
+        LEFT JOIN places pol ON pol.id = o.place_of_loading
+        LEFT JOIN places pod ON pod.id = o.place_of_delivery
+        WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
+        ORDER BY ot.created_time DESC
+        LIMIT 1`,
+      [itemRef],
+    );
+
+    if (rows.length === 0) {
+      logger.error("No order_tracking record found for subscribed item_ref", {
+        orderId,
+        itemRef,
+      });
+      continue;
+    }
+    const tracking = rows[0];
+
+    const route =
+      statusData.route ||
+      `${tracking.pol_name || "—"} → ${tracking.pod_name || "—"}`;
+
+    const templateData = {
+      isNewOrder: false,
+      receiverName: statusData.receiverName || "Valued Customer",
+      statusLabel: String(
+        statusData.statusLabel || tracking.current_status || "Shipment Updated",
+      ),
+      statusMsg: String(
+        statusData.statusMsg || "We have an update on your shipment.",
+      ),
+      refId: itemRef,
+      orderId: tracking.rgl_booking_number || "—",
+      route,
+      etaFormatted: tracking.eta
+        ? new Date(tracking.eta).toLocaleDateString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+          })
+        : "",
+      trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+      updatedItems: Array.isArray(statusData.updatedItems)
+        ? statusData.updatedItems
+        : [],
+    };
+
+    const result = await sendOrderEmail(emails, templateData);
+    results.push({ itemRef, emails, ...result });
+  }
+
+  return { success: results.every((r) => r.success), results };
 }
 
 export async function subscribeToShipment(shipmentData) {
@@ -345,9 +447,12 @@ export async function subscribeToShipment(shipmentData) {
   }
 
   const { rows } = await pool.query(
-    `SELECT id,
-            (SELECT status FROM receivers r WHERE r.order_id = orders.id LIMIT 1) AS current_status
-     FROM orders WHERE booking_ref = $1 LIMIT 1`,
+    `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number
+      FROM order_tracking ot
+      JOIN orders o ON o.id = ot.order_id
+      WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
+      ORDER BY ot.created_time DESC
+      LIMIT 1`,
     [referenceId],
   );
 
@@ -361,7 +466,7 @@ export async function subscribeToShipment(shipmentData) {
       `INSERT INTO notification_subscriptions (order_id, reference_id, email)
        VALUES ($1, $2, $3)
        ON CONFLICT (order_id, email) DO UPDATE SET updated_at = now()`,
-      [order.id, referenceId, email.trim()],
+      [order.order_id, referenceId, email.trim()],
     );
   } catch (err) {
     logger.error("Failed to save subscription", {
@@ -378,10 +483,12 @@ export async function subscribeToShipment(shipmentData) {
     subject: `You're subscribed to updates for shipment ${referenceId}`,
     html: buildSubscriptionConfirmationHtml({
       refId: referenceId,
+      orderId: order.rgl_booking_number || "—",
       place_of_loading: place_of_loading || "—",
       place_of_delivery: place_of_delivery || "—",
       currentStatus: order.current_status || "",
-      trackLink: `https://consolidatetracking.onrender.com/?ref=${encodeURIComponent(referenceId)}`,
+      eta: order.eta || "",
+      trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(referenceId)}`,
     }),
   };
 

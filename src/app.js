@@ -13,9 +13,10 @@ import orderRoutes from "./modules/orders/orderRoutes.js";
 import consignmentRoutes from "./modules/consignment/consignment.routes.js";
 import optionsRoutes from "./modules/options/options.routes.js";
 import monitorRoutes from "./modules/monitoring/monitorRoutes.js";
+import internalRoutes from "./modules/intenral/internal.route.js";
+import notificationRoutes from "./modules/notifications/notification.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
-// import "./jobs/customerSync.js";
 
 dotenv.config();
 
@@ -54,8 +55,6 @@ function isOriginAllowed(origin) {
     return origin === pattern;
   });
 }
-
-// app.use(cors());
 
 app.use(
   cors({
@@ -121,6 +120,8 @@ app.use("/api/options", optionsRoutes);
 app.use("/api/zohoCustomer", webhook);
 app.use("/api/customerPanals", getCustomersPanel);
 app.use("/api/monitoring", monitorRoutes);
+app.use("/api/internal", internalRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.get("/health", (_req, res) => {

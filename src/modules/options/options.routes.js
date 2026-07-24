@@ -40,6 +40,8 @@ import {
   updateBugReport,
   deleteBugReport,
   getDashboardData,
+  toggleSendEmail,
+  getModules,
 } from "./options.controllers.js";
 import { bugReportUpload } from "../../middleware/upload.js";
 
@@ -780,6 +782,8 @@ router.get("/allStatus", getAllStatus);
  */
 router.put("/updateStatus/:id", updateStatus);
 
+router.put("/toggleSendEmail/:id", toggleSendEmail);
+
 /**
  * @swagger
  * /api/options/addStatus:
@@ -918,5 +922,7 @@ router.put(
 router.delete("/bug-report/:id", deleteBugReport);
 
 router.get("/dashboard", getDashboardData);
+
+router.get("/modules", getModules);
 
 export default router;
