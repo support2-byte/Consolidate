@@ -141,6 +141,15 @@ export async function createOrder(req, res) {
       });
     }
 
+    // ── Load send_email gate per status from the statuses table ──
+    const statusEmailRes = await client.query(
+      `SELECT order_status, send_email FROM statuses`,
+    );
+    const sendEmailMap = {};
+    statusEmailRes.rows.forEach((r) => {
+      sendEmailMap[r.order_status] = r.send_email === true;
+    });
+
     const ordersResult = await withUserAudit(
       req,
       `INSERT INTO orders (
@@ -185,9 +194,19 @@ export async function createOrder(req, res) {
     const trackingData = [];
     const trackingRows = [];
 
-    const ownerWantsEmail =
+    // ── Owner (sender) email gate: requested flag AND status send_email must both be true ──
+    const ownerStatus = b.status || "Created";
+    const ownerRequestedEmail =
       b.send_email_notification === true ||
       b.send_email_notification === "true";
+    const ownerWantsEmail =
+      ownerRequestedEmail && sendEmailMap[ownerStatus] === true;
+
+    if (ownerRequestedEmail && !ownerWantsEmail) {
+      console.warn(
+        `[createOrder] Owner (sender ${senderId}) requested email but status "${ownerStatus}" has send_email=false; skipping`,
+      );
+    }
 
     const allItemRefsList = flatOrderItems
       .map((it) => it.item_ref || it.itemRef || "")
@@ -282,11 +301,21 @@ export async function createOrder(req, res) {
 
       const receiverId = recResult.rows[0].id;
 
-      const wantsEmail =
+      // ── Party email gate: requested flag AND this party's status send_email must both be true ──
+      const partyStatus = p.status || b.status || "Created";
+      const partyRequestedEmail =
         p.send_email_notification === true ||
         p.send_email_notification === "true" ||
         p.sendEmailNotification === true ||
         p.sendEmailNotification === "true";
+      const wantsEmail =
+        partyRequestedEmail && sendEmailMap[partyStatus] === true;
+
+      if (partyRequestedEmail && !wantsEmail) {
+        console.warn(
+          `[createOrder] Receiver ${receiverId} requested email but status "${partyStatus}" has send_email=false; skipping`,
+        );
+      }
 
       const partyEmail = (
         p[`${partyPrefix}_email`] ||
@@ -374,7 +403,6 @@ export async function createOrder(req, res) {
           normEtd || normEta,
           req.user?.username || req.user?.email || req.user?.id || "system",
           itemRef,
-          req.user?.username || req.user?.email || req.user?.id || "system",
           5,
         ]);
       }
