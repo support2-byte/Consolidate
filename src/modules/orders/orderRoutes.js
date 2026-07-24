@@ -19,6 +19,8 @@ import {
   removeReceiver,
   removeOrderItem,
   getAssignedOrderById,
+  getPdfData,
+  getOrderTracking,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -41,6 +43,8 @@ const router = express.Router();
  *         description: Orders grouped by consignment
  */
 router.get("/consignmentsOrders", requireAuth, getOrdersConsignments);
+
+router.get("/trackingHistory", getOrderTracking);
 
 /**
  * @swagger
@@ -503,5 +507,7 @@ router.delete("/:orderId/order-items/:itemId", removeOrderItem);
  *         description: Order or receiver not found
  */
 router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
+
+router.get("/pdf-data/:orderId", getPdfData);
 
 export default router;

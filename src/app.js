@@ -17,7 +17,6 @@ import internalRoutes from "./modules/intenral/internal.route.js";
 import notificationRoutes from "./modules/notifications/notification.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
-// import "./jobs/customerSync.js";
 
 dotenv.config();
 

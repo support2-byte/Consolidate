@@ -118,6 +118,18 @@ export async function sendShipmentEmail(shipmentData) {
     return { success: false, error: "orderId is required" };
   }
 
+  const notificationsEnabled = await isNotificationEnabled(
+    passedItemRef || shipmentData.refId || shipmentData.referenceId,
+  );
+
+  if (!notificationsEnabled) {
+    return {
+      success: false,
+      skipped: true,
+      message: `Notifications for this item's current status are disabled`,
+    };
+  }
+
   const receiverName =
     String(shipmentData.receiverName || "Valued Customer")
       .trim()
@@ -227,6 +239,21 @@ async function buildAndSendTracking(
   }
 
   const tracking = rows[0];
+
+  const notificationsEnabled = await isNotificationEnabled(itemRef);
+  if (!notificationsEnabled) {
+    logger.info("Notification skipped: disabled for this status", {
+      itemRef,
+      status: tracking.current_status,
+    });
+    return {
+      itemRef,
+      success: false,
+      skipped: true,
+      message: `Notifications for status "${tracking.current_status}" are disabled`,
+    };
+  }
+
   const subscriberEmails = await getSubscribedEmails(itemRef, orderId);
   const emails = mergeRecipients(primaryEmails, subscriberEmails);
 
@@ -270,6 +297,26 @@ async function buildAndSendTracking(
   return { itemRef, emails, ...result };
 }
 
+async function isNotificationEnabled(itemRef) {
+  const { rows } = await pool.query(
+    `SELECT s.send_email
+       FROM order_items oi
+       JOIN statuses s ON s.order_status = oi.status
+      WHERE TRIM(oi.item_ref) ILIKE TRIM($1)
+      LIMIT 1`,
+    [itemRef],
+  );
+
+  if (rows.length === 0) {
+    logger.error("isNotificationEnabled: no order_items row for item_ref", {
+      itemRef,
+    });
+    return true;
+  }
+
+  return rows[0].send_email === true;
+}
+
 export async function notifyOrderStatusUpdate(orderId, statusData) {
   const groupedByRef = subscriptions.reduce((acc, sub) => {
     const ref = sub.reference_id || "—";
@@ -297,7 +344,13 @@ export async function notifySingleStatusUpdate(statusData) {
     primaryEmails,
     statusData,
   );
-  return { success: result.success, results: [result] };
+  return {
+    success: result.success,
+    skipped: result.skipped,
+    message: result.message,
+    error: result.error,
+    results: [result],
+  };
 }
 
 export async function notifySubscriber(orderId, statusData) {

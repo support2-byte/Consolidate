@@ -5,7 +5,7 @@ import {
   sendShipmentEmail,
 } from "../../services/sendOrderEmail.js";
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 20;
 const INTERNAL_SECRET = process.env.EMAIL_QUEUE_SECRET;
 
 export const processEmailQueue = async (req, res) => {
@@ -92,6 +92,7 @@ export const processEmailQueue = async (req, res) => {
     results,
   });
 };
+
 export const verifyRecaptcha = async (req, res) => {
   const { token } = req.body;
 

@@ -9,6 +9,9 @@ export async function createOrderTracking(
     itemRef = null,
     eta = null,
     etd = null,
+    consignmentId = null,
+    moduleId = null,
+    updatedBy = null,
   },
 ) {
   const orderRes = await client.query(
@@ -33,6 +36,23 @@ export async function createOrderTracking(
 
   const order = orderRes.rows[0];
 
+  let resolvedConsignmentId = consignmentId;
+  if (resolvedConsignmentId == null && containerId) {
+    const cahRes = await client.query(
+      `
+      SELECT consignment_id
+      FROM container_assignment_history
+      WHERE cid = $1
+        AND order_id = $2
+        AND receiver_id = $3
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [containerId, orderId, receiverId],
+    );
+    resolvedConsignmentId = cahRes.rows[0]?.consignment_id ?? null;
+  }
+
   await client.query(
     `
     INSERT INTO order_tracking (
@@ -42,15 +62,18 @@ export async function createOrderTracking(
       receiver_id,
       receiver_ref,
       container_id,
+      consignment_id,
       status,
       old_status,
       created_by,
       item_ref,
       eta,
-      etd
+      etd,
+      module_id
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+      $1, $2, $3, $4, $5, $6, $7,
+      $8, $9, $10, $11, $12, $13, $14
     )
   `,
     [
@@ -60,12 +83,14 @@ export async function createOrderTracking(
       receiverId,
       order.receiver_ref,
       containerId,
+      resolvedConsignmentId,
       status,
       "Created",
       createdBy,
       itemRef,
       eta,
       etd,
+      moduleId,
     ],
   );
 }

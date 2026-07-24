@@ -109,6 +109,17 @@ export const resendNotification = async (req, res) => {
 
     if (!result.success) {
       const errMsg = result.error || result.message || "Unknown error";
+
+      if (result.skipped) {
+        await pool.query(
+          `UPDATE email_queue SET status = 'skipped', last_error = $2 WHERE id = $1`,
+          [id, errMsg],
+        );
+        return res
+          .status(200)
+          .json({ success: false, skipped: true, message: errMsg });
+      }
+
       await pool.query(
         `UPDATE email_queue
             SET status = 'failed', attempts = attempts + 1, last_error = $2
@@ -118,13 +129,6 @@ export const resendNotification = async (req, res) => {
       logger.error("Resend notification failed", { id, error: errMsg });
       return res.status(500).json({ success: false, message: errMsg });
     }
-
-    await pool.query(
-      `UPDATE email_queue
-          SET status = 'sent', sent_at = now(), attempts = attempts + 1, last_error = NULL
-        WHERE id = $1`,
-      [id],
-    );
 
     return res.status(200).json({ success: true, message: "Email sent" });
   } catch (error) {

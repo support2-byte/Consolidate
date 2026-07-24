@@ -96,7 +96,6 @@ export async function createOrder(req, res) {
     const newGatepass = buildFileList("gatepass_existing", "gatepass");
 
     const ownerPrefix = isSender ? "sender" : "receiver";
-    // The "shippingParties" (panel2) role is the opposite of the owner role
     const partyPrefix = isSender ? "receiver" : "sender";
 
     const owner = {
@@ -190,21 +189,32 @@ export async function createOrder(req, res) {
       b.send_email_notification === true ||
       b.send_email_notification === "true";
 
-    const allItemRefs = flatOrderItems
+    const allItemRefsList = flatOrderItems
       .map((it) => it.item_ref || it.itemRef || "")
-      .filter(Boolean)
-      .join(",");
+      .filter(Boolean);
 
     if (ownerWantsEmail) {
       const ownerEmail = (owner.email || "").trim();
       if (ownerEmail) {
-        emailTargets.push({
-          id: senderId,
-          type: "sender",
-          email: ownerEmail,
-          name: owner.name,
-          itemRef: allItemRefs || owner.ref || "",
-        });
+        if (allItemRefsList.length) {
+          for (const ref of allItemRefsList) {
+            emailTargets.push({
+              id: senderId,
+              type: "sender",
+              email: ownerEmail,
+              name: owner.name,
+              itemRef: ref,
+            });
+          }
+        } else {
+          emailTargets.push({
+            id: senderId,
+            type: "sender",
+            email: ownerEmail,
+            name: owner.name,
+            itemRef: owner.ref || "",
+          });
+        }
       } else {
         console.warn(
           `[createOrder] Owner (sender ${senderId}) requested email but has no email set`,
@@ -299,13 +309,29 @@ export async function createOrder(req, res) {
 
       if (wantsEmail) {
         if (partyEmail) {
-          emailTargets.push({
-            id: receiverId,
-            type: "receiver",
-            email: partyEmail,
-            name: partyName,
-            itemRef: receiverItemRefs,
-          });
+          const partyItemRefs = items
+            .map((it) => it.item_ref || it.itemRef || "")
+            .filter(Boolean);
+
+          if (partyItemRefs.length) {
+            for (const ref of partyItemRefs) {
+              emailTargets.push({
+                id: receiverId,
+                type: "receiver",
+                email: partyEmail,
+                name: partyName,
+                itemRef: ref,
+              });
+            }
+          } else {
+            emailTargets.push({
+              id: receiverId,
+              type: "receiver",
+              email: partyEmail,
+              name: partyName,
+              itemRef: "",
+            });
+          }
         } else {
           console.warn(
             `[createOrder] Receiver ${receiverId} requested email but has no email (checked ${partyPrefix}_email/${partyPrefix}Email)`,
@@ -348,23 +374,34 @@ export async function createOrder(req, res) {
           normEtd || normEta,
           req.user?.username || req.user?.email || req.user?.id || "system",
           itemRef,
+          req.user?.username || req.user?.email || req.user?.id || "system",
+          5,
         ]);
       }
 
       for (const row of trackingRows) {
         await client.query(
-          `INSERT INTO order_tracking (
-            order_id,
-            sender_id,
-            sender_ref,
-            receiver_id,
-            status,
-            eta,
-            etd,
-            created_by,
-            item_ref
-          )
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          `
+            INSERT INTO order_tracking (
+              order_id,
+              sender_id,
+              sender_ref,
+              receiver_id,
+              status,
+              eta,
+              etd,
+              created_by,
+              item_ref,
+              created_time,
+              module_id
+            )
+            VALUES (
+              $1, $2, $3, $4, $5,
+              $6, $7, $8, $9,
+              NOW(),
+              $10
+            )
+          `,
           row,
         );
       }
@@ -1265,18 +1302,14 @@ export async function getOrdersConsignments(req, res) {
     let whereClause = "WHERE 1=1";
     let params = [];
 
-    if (status) {
-      params.push(status);
-      whereClause += ` AND o.status = $${params.length}`;
-    }
-
     if (booking_ref) {
       params.push(`%${booking_ref}%`);
       whereClause += ` AND o.booking_ref ILIKE $${params.length}`;
     }
 
+    let validIds = [];
     if (container_id) {
-      const validIds = container_id
+      validIds = container_id
         .split(",")
         .map((id) => parseInt(id.trim()))
         .filter((id) => !isNaN(id));
@@ -1294,104 +1327,59 @@ export async function getOrdersConsignments(req, res) {
         });
       }
 
-      const containerResult = await client.query(
-        "SELECT cid, container_number FROM container_master WHERE cid = ANY($1::int[])",
-        [validIds],
-      );
-
-      if (containerResult.rowCount === 0) {
-        return res.json({
-          success: true,
-          data: [],
-          pagination: {
-            page: safePage,
-            limit: safeLimit,
-            total: 0,
-            totalPages: 0,
-          },
-        });
-      }
-
-      const containerNumbers = containerResult.rows.map(
-        (r) => r.container_number,
-      );
-
-      const otConditions = validIds
-        .map((id) => {
-          params.push(id);
-          return `ot.container_id = $${params.length}`;
-        })
-        .join(" OR ");
-
-      const cmConditions = containerNumbers
-        .map((num) => {
-          params.push(`%${num}%`);
-          return `cm.container_number ILIKE $${params.length}`;
-        })
-        .join(" OR ");
-
-      const receiverContainerConditions = containerNumbers
-        .map((num) => {
-          params.push(`%${num}%`);
-          return `EXISTS (
-          SELECT 1 FROM jsonb_array_elements_text(r.containers) AS cont
-          WHERE cont ILIKE $${params.length}
-        )`;
-        })
-        .join(" OR ");
-
-      whereClause += ` AND (
-        (${otConditions}) OR
-        (${cmConditions}) OR
-        EXISTS (
-          SELECT 1 FROM receivers r
-          WHERE r.order_id = o.id
-            AND r.containers IS NOT NULL
-            AND jsonb_typeof(r.containers) = 'array'
-            AND (${receiverContainerConditions})
-        )
-      )`;
-
-      if (pol) {
-        params.push(parseInt(pol, 10));
-        whereClause += ` AND o.place_of_loading = $${params.length}`;
-      }
-
-      if (pod) {
-        params.push(parseInt(pod, 10));
-        whereClause += ` AND o.place_of_delivery = $${params.length}`;
-      }
+      params.push(validIds);
+      const chContainerParam = params.length;
 
       if (consignment_id) {
         params.push(parseInt(consignment_id, 10));
-        const consignmentParam = params.length;
+        const cidParam = params.length;
 
-        whereClause += `
-        AND EXISTS (
-          SELECT 1
-          FROM consignments c
-          WHERE c.id = $${consignmentParam}
-            AND c.orders @> to_jsonb(o.id)
-        )
-      `;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM order_items oi
+          JOIN container_assignment_history cah ON cah.detail_id = oi.id
+          WHERE oi.order_id = o.id
+            AND cah.cid = ANY($${chContainerParam}::int[])
+            AND cah.consignment_id = $${cidParam}
+        )`;
       } else {
-        params.push(validIds);
-        const containerParam = params.length;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM order_items oi
+          JOIN container_assignment_history cah ON cah.detail_id = oi.id
+          WHERE oi.order_id = o.id
+            AND cah.cid = ANY($${chContainerParam}::int[])
+            AND cah.consignment_id IS NULL
+        )`;
 
-        whereClause += `
-          AND EXISTS (
-            SELECT 1
-            FROM receivers r
-            JOIN order_items oi
-              ON oi.receiver_id = r.id
-            JOIN order_tracking ot
-              ON ot.item_ref = oi.item_ref
-            WHERE r.order_id = o.id
-              AND ot.container_id = ANY($${containerParam}::int[])
-              AND ot.status IN ('Ready for Loading', 'Loaded')
-          )
-        `;
+        if (pol) {
+          params.push(String(pol.trim()));
+          whereClause += ` AND o.place_of_loading = $${params.length}`;
+        }
+        if (pod) {
+          params.push(String(pod.trim()));
+          whereClause += ` AND o.place_of_delivery = $${params.length}`;
+        }
       }
+    }
+
+    if (consignment_id && !container_id) {
+      if (pol) {
+        params.push(pol.trim());
+        whereClause += ` AND LOWER(TRIM(o.place_of_loading)) = LOWER(TRIM($${params.length}))`;
+      }
+      if (pod) {
+        params.push(pod.trim());
+        whereClause += ` AND LOWER(TRIM(o.place_of_delivery)) = LOWER(TRIM($${params.length}))`;
+      }
+
+      params.push(parseInt(consignment_id, 10));
+      const cidParam2 = params.length;
+
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM order_items oi
+        JOIN container_assignment_history cah ON cah.detail_id = oi.id
+        WHERE oi.order_id = o.id
+          AND cah.consignment_id = $${cidParam2}
+      )`;
     }
 
     const containerDetailsSub = `
@@ -1413,41 +1401,48 @@ export async function getOrdersConsignments(req, res) {
               ), '[]'::json)
     `;
 
-    const shippingDetailsSub = `
-    (
-      SELECT COALESCE(
-        json_agg(
-          json_build_object(
-            'id', oi.id,
-            'category', COALESCE(oi.category, ''),
-            'subcategory', COALESCE(oi.subcategory, ''),
-            'type', COALESCE(oi.type, ''),
-            'itemRef', COALESCE(oi.item_ref, ''),
-            'status', ot_item.status,
-            'totalNumber', COALESCE(oi.total_number, 0),
-            'weight', COALESCE(oi.weight, 0),
-            'containerDetails', ${containerDetailsSub},
-            'remainingItems',
-              COALESCE(oi.total_number, 0) - COALESCE((
-                SELECT SUM((cd_obj->>'assign_total_box')::int)
-                FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-              ), 0)
-          )
-          ORDER BY oi.id
-        ),
-        '[]'::json
-      )
+    const shippingDetailsSub = consignment_id
+      ? `
+      (SELECT COALESCE(json_agg(json_build_object(
+        'id', oi.id,
+        'category', COALESCE(oi.category, ''),
+        'subcategory', COALESCE(oi.subcategory, ''),
+        'type', COALESCE(oi.type, ''),
+        'itemRef', COALESCE(oi.item_ref, ''),
+        'status', COALESCE(oi.status, 'Created'),
+        'totalNumber', COALESCE(oi.total_number, 0),
+        'weight', COALESCE(oi.weight, 0),
+        'containerDetails',${containerDetailsSub},
+        'remainingItems',  COALESCE(oi.total_number, 0) - COALESCE((
+            SELECT SUM((cd_obj->>'assign_total_box')::int)
+            FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+          ), 0)
+      ) ORDER BY oi.id), '[]'::json)
       FROM order_items oi
-      JOIN LATERAL (
-        SELECT ot.status
-        FROM order_tracking ot
-        WHERE ot.item_ref = oi.item_ref
-          AND ot.status IN ('Ready for Loading', 'Loaded')
-        ORDER BY ot.created_time DESC
-        LIMIT 1
-      ) ot_item ON true
       WHERE oi.receiver_id = r.id
-    )
+        AND EXISTS (
+          SELECT 1 FROM container_assignment_history cah
+          WHERE cah.detail_id = oi.id AND cah.consignment_id = ${parseInt(consignment_id, 10)}
+        ))
+    `
+      : `
+      (SELECT COALESCE(json_agg(json_build_object(
+        'id', oi.id,
+        'category', COALESCE(oi.category, ''),
+        'subcategory', COALESCE(oi.subcategory, ''),
+        'type', COALESCE(oi.type, ''),
+        'itemRef', COALESCE(oi.item_ref, ''),
+        'status', COALESCE(oi.status, 'Created'),
+        'totalNumber', COALESCE(oi.total_number, 0),
+        'weight', COALESCE(oi.weight, 0),
+        'containerDetails',${containerDetailsSub},
+        'remainingItems',  COALESCE(oi.total_number, 0) - COALESCE((
+            SELECT SUM((cd_obj->>'assign_total_box')::int)
+            FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+          ), 0)
+      ) ORDER BY oi.id), '[]'::json)
+      FROM order_items oi
+      WHERE oi.receiver_id = r.id)
     `;
 
     const receiversSub = `
@@ -2151,21 +2146,20 @@ export async function assignContainersBatch(req, res) {
 
       let assignWeight = 0;
 
+      const totalW = Number(targetItem.weight || targetItem.total_weight || 0);
+      const alreadyAssignedWeight = Number(targetItem.assigned_weight_kg || 0);
+      const remainingWeight = totalW - alreadyAssignedWeight;
       if (ass.assignedWeightKg != null) {
-        assignWeight = Number(ass.assignedWeightKg);
+        assignWeight = Math.min(Number(ass.assignedWeightKg), remainingWeight);
+
         if (isNaN(assignWeight) || assignWeight < 0) {
-          skipped.push({ ...ass, reason: "Invalid custom assignedWeightKg" });
+          skipped.push({
+            ...ass,
+            reason: "Invalid custom assignedWeightKg",
+          });
           continue;
         }
       } else {
-        let totalW = Number(targetItem.total_weight || 0);
-        if (totalW <= 0)
-          totalW = receiver ? Number(receiver.total_weight || 0) : 0;
-
-        const alreadyAssignedWeight = Number(
-          targetItem.assigned_weight_kg || 0,
-        );
-        const remainingWeight = totalW - alreadyAssignedWeight;
         const fraction = assignBoxes / (remainingBoxes || 1);
         assignWeight = Number((fraction * remainingWeight).toFixed(2));
       }
@@ -2221,6 +2215,7 @@ export async function assignContainersBatch(req, res) {
         itemRef,
         eta,
         etd: eta,
+        moduleId: 5,
       });
 
       await client.query(
@@ -2284,62 +2279,24 @@ export async function assignContainersBatch(req, res) {
 
       await client.query(
         `
-        UPDATE order_items
-        SET
-          assigned_boxes = $1,
-          assigned_weight_kg = $2,
-          container_details = $3::jsonb,
-          assigned_at = NOW(),
-          updated_at = NOW()
-        WHERE id = $4
+          UPDATE order_items
+          SET
+            status = $1,
+            assigned_boxes = $2,
+            assigned_weight_kg = $3,
+            container_details = $4::jsonb,
+            assigned_at = NOW(),
+            updated_at = NOW()
+          WHERE id = $5
         `,
         [
+          trackingStatus,
           currentAssignedBoxes + assignBoxes,
           Number(targetItem.assigned_weight_kg || 0) + assignWeight,
           JSON.stringify(details),
           targetItemId,
         ],
       );
-
-      if (receiver.receiver_email) {
-        await client.query(
-          `
-          INSERT INTO email_queue (
-            order_id, recipient_id, recipient_type,
-            recipient_email, recipient_name, email_type, status, item_ref
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-          `,
-          [
-            orderIdNum,
-            receiverIdNum,
-            "receiver",
-            receiver.receiver_email,
-            receiver.receiver_name,
-            "order_assigned",
-            itemRef,
-          ],
-        );
-      }
-
-      if (sender?.sender_email) {
-        await client.query(
-          `
-          INSERT INTO email_queue (
-            order_id, recipient_id, recipient_type,
-            recipient_email, recipient_name, email_type, status, item_ref
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-          `,
-          [
-            orderIdNum,
-            sender.id,
-            "sender",
-            sender.sender_email,
-            sender.sender_name,
-            "order_assigned",
-            itemRef,
-          ],
-        );
-      }
 
       results.push({
         orderId: orderIdNum,
@@ -2628,57 +2585,18 @@ export async function assignContainersToOrders(req, res) {
 
           await client.query(
             `
-            UPDATE order_items
-            SET
-              assigned_boxes     = $1,
-              assigned_weight_kg = $2,
-              container_details  = $3::jsonb,
-              assigned_at        = NOW(),
-              updated_at         = NOW()
-            WHERE id = $4
-          `,
+              UPDATE order_items
+              SET
+                status              = 'Ready for Loading',
+                assigned_boxes      = $1,
+                assigned_weight_kg  = $2,
+                container_details   = $3::jsonb,
+                assigned_at         = NOW(),
+                updated_at          = NOW()
+              WHERE id = $4
+            `,
             [newBoxes, newKg, JSON.stringify(containerDetails), item.id],
           );
-
-          if (receiver.receiver_email) {
-            await client.query(
-              `
-              INSERT INTO email_queue (
-                order_id, recipient_id, recipient_type,
-                recipient_email, recipient_name, email_type, status, item_ref
-              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-              `,
-              [
-                orderId,
-                recId,
-                "receiver",
-                receiver.receiver_email,
-                receiver.receiver_name,
-                "order_assigned",
-                itemRef,
-              ],
-            );
-          }
-
-          if (sender?.sender_email) {
-            await client.query(
-              `
-              INSERT INTO email_queue (
-                order_id, recipient_id, recipient_type,
-                recipient_email, recipient_name, email_type, status, item_ref
-              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-              `,
-              [
-                orderId,
-                sender.id,
-                "sender",
-                sender.sender_email,
-                sender.sender_name,
-                "order_assigned",
-                itemRef,
-              ],
-            );
-          }
 
           receiverAssignedQty += assignedThisItemQty;
           receiverAssignedKg += assignedThisItemKg;
@@ -2726,6 +2644,7 @@ export async function assignContainersToOrders(req, res) {
               itemRef: tracking.itemRef,
               eta: trackingEta,
               etd: trackingEta,
+              moduleId: 5,
             });
           }
 
@@ -2931,6 +2850,7 @@ export async function removeContainerAssignments(req, res) {
               itemRef: removedItemRef,
               eta: revertEta,
               etd: revertEta,
+              moduleId: 5,
             });
 
             orderRemovedQty += receiverRemovedQty;
@@ -3106,6 +3026,7 @@ export async function removeContainerAssignments(req, res) {
               itemRef: item.item_ref,
               eta: itemRevertEta,
               etd: itemRevertEta,
+              moduleId: 5,
             });
 
             receiverRemovedQty += removedThisItemQty;
@@ -3483,12 +3404,12 @@ export async function updateSpecificItemsStatus(req, res) {
     }
 
     const statusResult = await client.query(
-      `SELECT order_status
-       FROM statuses
-       WHERE status = true
-         AND order_status ILIKE $1
-       ORDER BY sorting_number ASC
-       LIMIT 1`,
+      `SELECT order_status, send_email
+   FROM statuses
+   WHERE status = true
+     AND order_status ILIKE $1
+   ORDER BY sorting_number ASC
+   LIMIT 1`,
       [trimmedStatus],
     );
 
@@ -3497,6 +3418,7 @@ export async function updateSpecificItemsStatus(req, res) {
     }
 
     const normalizedStatus = statusResult.rows[0].order_status;
+    const statusSendEmail = statusResult.rows[0].send_email === true;
 
     let extraWhere = "";
     const queryParams = [normalizedStatus, Number(orderId), itemRefs];
@@ -3509,7 +3431,7 @@ export async function updateSpecificItemsStatus(req, res) {
     const updateResult = await client.query(
       `
       UPDATE order_items
-         SET consignment_status = $1,
+         SET status = $1,
              updated_at = CURRENT_TIMESTAMP
        WHERE order_id = $2
          AND item_ref = ANY($3::text[])${extraWhere}
@@ -3561,6 +3483,63 @@ export async function updateSpecificItemsStatus(req, res) {
       }
     }
 
+    const affectedItemIds = updatedRows.map((r) => r.id);
+
+    const consignmentLinkRes = await client.query(
+      `
+      SELECT DISTINCT ON (detail_id) detail_id, consignment_id
+      FROM container_assignment_history
+      WHERE detail_id = ANY($1::int[])
+        AND consignment_id IS NOT NULL
+      ORDER BY detail_id, created_at DESC
+      `,
+      [affectedItemIds],
+    );
+
+    const affectedConsignmentIds = [
+      ...new Set(consignmentLinkRes.rows.map((r) => r.consignment_id)),
+    ];
+
+    for (const consId of affectedConsignmentIds) {
+      const agg = await client.query(
+        `
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered
+        FROM order_items oi
+        JOIN (
+          SELECT DISTINCT ON (detail_id) detail_id, consignment_id
+          FROM container_assignment_history
+          WHERE consignment_id = $1
+          ORDER BY detail_id, created_at DESC
+        ) latest ON latest.detail_id = oi.id
+        `,
+        [consId],
+      );
+
+      const { total, delivered } = agg.rows[0];
+
+      if (total > 0 && delivered > 0 && delivered < total) {
+        await client.query(
+          `UPDATE consignments
+              SET status = 'Partially Delivered',
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status IS DISTINCT FROM 'Partially Delivered'`,
+          [consId],
+        );
+      } else if (total > 0 && delivered === total) {
+        await client.query(
+          `UPDATE consignments
+              SET status = 'Delivered',
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status IS DISTINCT FROM 'Delivered'`,
+          [consId],
+        );
+      }
+    }
+
     const { eta: calculatedEta } = await calculateETA(client, normalizedStatus);
     const calculatedEtd = calculatedEta;
 
@@ -3599,29 +3578,62 @@ export async function updateSpecificItemsStatus(req, res) {
     }
 
     for (const row of updatedRows) {
+      const consignmentRes = await client.query(
+        `
+          SELECT consignment_id
+          FROM container_assignment_history
+          WHERE detail_id = $1
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        [row.id],
+      );
+
       const lastTrackingRes = await client.query(
         `
-        SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_number, status
-        FROM order_tracking
-        WHERE order_id = $1
-          AND receiver_id = $2
-          AND item_ref = $3
-        ORDER BY created_time DESC
-        LIMIT 1
-      `,
+          SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_id, status
+          FROM order_tracking
+          WHERE order_id = $1
+            AND receiver_id = $2
+            AND item_ref = $3
+          ORDER BY created_time DESC
+          LIMIT 1
+        `,
         [Number(orderId), row.receiver_id, row.item_ref],
       );
 
       const last = lastTrackingRes.rows[0] || {};
+      const resolvedConsignmentId =
+        consignmentRes.rows[0]?.consignment_id ?? last.consignment_id ?? null;
 
       await client.query(
         `
-        INSERT INTO order_tracking 
-          (order_id, sender_id, sender_ref, receiver_id, receiver_ref,
-           container_id, consignment_number, status, old_status,
-           item_ref, eta, etd, created_by, created_time)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP)
-      `,
+          INSERT INTO order_tracking 
+            (
+              order_id,
+              sender_id,
+              sender_ref,
+              receiver_id,
+              receiver_ref,
+              container_id,
+              consignment_id,
+              status,
+              old_status,
+              item_ref,
+              eta,
+              etd,
+              created_by,
+              created_time,
+              module_id
+            )
+          VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10,
+            $11, $12, $13,
+            CURRENT_TIMESTAMP,
+            $14
+          )
+        `,
         [
           Number(orderId),
           last.sender_id ?? null,
@@ -3629,13 +3641,14 @@ export async function updateSpecificItemsStatus(req, res) {
           row.receiver_id,
           last.receiver_ref ?? null,
           last.container_id ?? null,
-          last.consignment_number ?? null,
+          resolvedConsignmentId,
           normalizedStatus,
           last.status ?? null,
           row.item_ref,
           calculatedEta,
           calculatedEtd,
           createdByLabel,
+          5,
         ],
       );
     }
@@ -3675,7 +3688,7 @@ export async function updateSpecificItemsStatus(req, res) {
       status: r.consignment_status,
     }));
 
-    if (notifyClient || notifyParties) {
+    if ((notifyClient || notifyParties) && statusSendEmail) {
       try {
         const receiversRes = await pool.query(
           `SELECT id, receiver_email, receiver_name
@@ -4694,6 +4707,7 @@ export const getAssignedOrderById = async (req, res) => {
       SELECT
         id,
         booking_ref,
+        rgl_booking_number,
         place_of_loading
       FROM orders
       WHERE id = $1
@@ -4811,6 +4825,7 @@ export const getAssignedOrderById = async (req, res) => {
     return res.status(200).json({
       id: orderResult.rows[0].id,
       booking_ref: orderResult.rows[0].booking_ref,
+      rgl_booking_number: orderResult.rows[0].rgl_booking_number,
       place_of_loading: orderResult.rows[0].place_of_loading,
       receivers: receiversResult.rows.map((r) => ({
         ...r,
@@ -4826,5 +4841,268 @@ export const getAssignedOrderById = async (req, res) => {
     });
   } finally {
     if (client) client.release();
+  }
+};
+
+function normalizeReceiver(row) {
+  return {
+    id: row.id,
+    receiverName: row.receiver_name || "",
+    receiverContact: row.receiver_contact || "",
+    receiverAddress: row.receiver_address || "",
+    receiverEmail: row.receiver_email || "",
+    containers: (() => {
+      try {
+        return typeof row.containers === "string"
+          ? JSON.parse(row.containers)
+          : row.containers || [];
+      } catch {
+        return [];
+      }
+    })(),
+    shippingdetails: row.shippingdetails || [],
+    shippingDetails: row.shippingdetails || [],
+    drop_off_details: row.drop_off_details || [],
+  };
+}
+
+export async function getPdfData(req, res) {
+  let client;
+  try {
+    const orderId = parseInt(req.params.orderId, 10);
+    if (isNaN(orderId) || orderId <= 0) {
+      return res.status(400).json({ error: "Invalid order ID" });
+    }
+
+    const RECEIVERS_QUERY = `
+      SELECT
+        r.id, r.order_id,
+        r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
+        r.containers,
+        sd_full.shippingdetails
+      FROM receivers r
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          json_build_object(
+            'id', oi.id,
+            'category', COALESCE(oi.category, ''),
+            'subcategory', COALESCE(oi.subcategory, ''),
+            -- itemName: what the PDFs should print as the product/goods description.
+            -- Prefer subcategory (the specific item, e.g. "LADIES SUITS"),
+            -- fall back to category only if subcategory is blank.
+            'itemName', COALESCE(NULLIF(oi.subcategory, ''), oi.category, ''),
+            'totalNumber', COALESCE(oi.total_number, 0)::int,
+            'weight', COALESCE(oi.weight, 0)::numeric,
+            'itemRef', COALESCE(oi.item_ref, ''),
+            'trackingEta', TO_CHAR(ot.eta, 'YYYY-MM-DD'),
+            -- containerAssignments: real assignment records for this item,
+            -- sourced from container_assignment_history by detail_id, NOT
+            -- from the (unreliable/empty) oi.container_details jsonb column.
+            'containerAssignments', COALESCE(cah_agg.assignments, '[]'::json),
+            -- containerDetails kept for backward compatibility with any
+            -- existing frontend code that still reads it; now built from the
+            -- same reliable source instead of oi.container_details.
+            'containerDetails', COALESCE(cah_agg.legacy_shape, '[]'::json)
+          ) ORDER BY oi.id
+        ) AS shippingdetails
+        FROM order_items oi
+        LEFT JOIN LATERAL (
+          SELECT eta FROM order_tracking t
+          WHERE t.receiver_id = r.id AND t.item_ref = oi.item_ref
+          ORDER BY t.created_time DESC LIMIT 1
+        ) ot ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            json_agg(
+              json_build_object(
+                'container_number', cah.container_number,
+                'cid', cah.cid,
+                'assigned_qty', COALESCE(cah.assigned_qty, 0)::int,
+                'assigned_weight_kg', COALESCE(cah.assigned_weight_kg, 0)::numeric,
+                'status', cah.status,
+                'action_type', cah.action_type,
+                'created_at', cah.created_at
+              ) ORDER BY cah.id
+            ) AS assignments,
+            json_agg(
+              json_build_object(
+                'container', json_build_object(
+                  'container_number', COALESCE(cah.container_number, '')
+                ),
+                'total_number', COALESCE(cah.assigned_qty, 0)::int,
+                'assign_weight', COALESCE(cah.assigned_weight_kg, 0)::text,
+                'assign_total_box', COALESCE(cah.assigned_qty, 0)::int,
+                'status', cah.status
+              ) ORDER BY cah.id
+            ) AS legacy_shape
+          FROM container_assignment_history cah
+          WHERE cah.detail_id = oi.id
+            -- action_type filter: only count actual assignments, not any
+            -- future REMOVE/UNASSIGN rows you may add to this history table.
+            AND cah.action_type = 'ASSIGN'
+        ) cah_agg ON TRUE
+        WHERE oi.receiver_id = r.id
+      ) sd_full ON TRUE
+      WHERE r.order_id = $1
+      ORDER BY r.id
+    `;
+
+    const DROPOFF_QUERY = `
+      SELECT receiver_id, json_agg(
+        json_build_object(
+          'drop_method', drop_method, 'dropoff_name', dropoff_name,
+          'drop_off_mobile', drop_off_mobile, 'plate_no', plate_no,
+          'drop_date', TO_CHAR(drop_date, 'YYYY-MM-DD')
+        ) ORDER BY id
+      ) AS drop_off_details
+      FROM drop_off_details WHERE order_id = $1 GROUP BY receiver_id
+    `;
+
+    const CONSIGNMENT_QUERY = `
+      SELECT
+        c.id,
+        c.consignment_number,
+        c.shipper,
+        c.shipper_address,
+        tp_shipper.contact_phone AS shipper_contact,
+        c.consignee,
+        c.consignee_address,
+        tp_consignee.contact_phone AS consignee_contact,
+        c.voyage,
+        v.name AS vessel_name,
+        c.shipping_line_name,
+        c.gross_weight,
+        c.containers,
+        c.seal_no,
+        c.customs_crn
+      FROM consignments c
+      LEFT JOIN third_parties tp_shipper ON tp_shipper.id = c.shipper_id
+      LEFT JOIN third_parties tp_consignee ON tp_consignee.id = c.consignee_id
+      LEFT JOIN vessels v ON v.id = c.vessel
+      WHERE c.orders @> to_jsonb($1::int)
+      LIMIT 1
+    `;
+    client = await pool.connect();
+
+    const orderResult = await client.query(
+      `
+        SELECT
+          o.id, o.booking_ref, o.rgl_booking_number, o.status, o.transport_type,
+          o.place_of_loading, o.final_destination, o.place_of_delivery,
+          o.truck_number, o.created_at,
+          s.sender_name, s.sender_contact, s.sender_address, s.sender_email,
+          t.transport_type, t.truck_number, t.drop_method, t.dropoff_name,
+          t.drop_off_mobile, t.plate_no, TO_CHAR(t.drop_date,'YYYY-MM-DD') AS drop_date
+        FROM orders o
+        LEFT JOIN senders s ON o.id = s.order_id
+        LEFT JOIN transport_details t ON o.id = t.order_id
+        WHERE o.id = $1
+      `,
+      [orderId],
+    );
+
+    if (orderResult.rowCount === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const orderRow = orderResult.rows[0];
+
+    const [receiversResult, dropOffResult, consignmentResult] =
+      await Promise.all([
+        client.query(RECEIVERS_QUERY, [orderId]),
+        client.query(DROPOFF_QUERY, [orderId]),
+        client.query(CONSIGNMENT_QUERY, [orderId]),
+      ]);
+
+    const dropOffMap = new Map(
+      dropOffResult.rows.map((r) => [r.receiver_id, r.drop_off_details || []]),
+    );
+
+    const receivers = receiversResult.rows.map((row) =>
+      normalizeReceiver({
+        ...row,
+        drop_off_details: dropOffMap.get(row.id) || [],
+      }),
+    );
+
+    let consignment = null;
+    if (consignmentResult.rowCount > 0) {
+      const c = consignmentResult.rows[0];
+      consignment = {
+        id: c.id,
+        consignment_number: c.consignment_number,
+        gross_weight: c.gross_weight,
+        vessel: c.vessel_name || "",
+        voyage: c.voyage || "",
+        shipping_line_name: c.shipping_line_name || "",
+        seal_no: c.seal_no || "", // <-- added: was selected by SQL, never returned
+        customs_crn: c.customs_crn || "", // <-- added: was selected by SQL, never returned
+        containers: (c.containers || []).map(
+          (ct) => ct.containerNo || ct.container_number || "",
+        ),
+        shipper: {
+          company_name: c.shipper || "",
+          address: c.shipper_address || "",
+          contact_phone: c.shipper_contact || "",
+        },
+        consignee: {
+          company_name: c.consignee || "",
+          address: c.consignee_address || "",
+          contact_phone: c.consignee_contact || "",
+        },
+      };
+    }
+
+    res.json({
+      ...orderRow,
+      receivers,
+      consignment,
+    });
+  } catch (err) {
+    console.error("Error in getPdfData:", err);
+    res.status(500).json({
+      error: "Failed to fetch PDF data",
+      details: err.message,
+    });
+  } finally {
+    if (client) client.release();
+  }
+}
+
+export const getOrderTracking = async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT 
+        ot.*,
+        o.rgl_booking_number,
+        o.booking_ref,
+        cm.container_number,
+        con.consignment_number,
+        m.name as module
+      FROM order_tracking ot
+      LEFT JOIN orders o ON o.id = ot.order_id
+      LEFT JOIN container_master cm ON cm.cid = ot.container_id
+      LEFT JOIN consignments con ON con.id = ot.consignment_id
+      LEFT JOIN modules m ON m.id = ot.module_id
+      ORDER BY ot.created_time DESC
+    `);
+
+    if (rows.length === 0) {
+      logger.warn("No Tracking Data Found");
+      return res.status(404).json({
+        success: false,
+        message: "No Tracking data found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      rows,
+    });
+  } catch (error) {
+    logger.error("Failed to get order tracking", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
   }
 };
