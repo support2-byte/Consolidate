@@ -16,8 +16,13 @@ import {
   getAllContainersForConsignment,
   getUnassignedOrders,
   updateContainerStatus,
+  deleteContainerAttachment,
+  getAttachmentSignedUrl,
   // getContainers
 } from "./container.controller.js";
+import { handleContainerUpload } from "../../middleware/handleUpload.js";
+import { requireAuth } from "../../modules/auth/auth.middleware.js";
+
 const router = express.Router();
 
 /**
@@ -224,7 +229,7 @@ router.get("/consignment-containers", getAllContainersForConsignment);
  *       400:
  *         description: Invalid input
  */
-router.post("/", createContainer);
+router.post("/", requireAuth, handleContainerUpload, createContainer);
 
 /**
  * @swagger
@@ -249,7 +254,7 @@ router.post("/", createContainer);
  *       404:
  *         description: Container not found
  */
-router.get("/:cid", getContainerById);
+router.get("/:cid", requireAuth, getContainerById);
 
 /**
  * @swagger
@@ -276,7 +281,7 @@ router.get("/:cid", getContainerById);
  *       404:
  *         description: Container not found
  */
-router.get("/:cid/usage-history", getUsageHistory);
+router.get("/:cid/usage-history", requireAuth, getUsageHistory);
 
 /**
  * @swagger
@@ -307,7 +312,7 @@ router.get("/:cid/usage-history", getUsageHistory);
  *       404:
  *         description: Container not found
  */
-router.put("/:cid", updateContainer);
+router.put("/:cid", requireAuth, handleContainerUpload, updateContainer);
 
 /**
  * @swagger
@@ -381,5 +386,13 @@ router.delete("/:cid", deleteContainer);
  *         description: Container not found
  */
 router.get("/:cid/unassigned-orders", getUnassignedOrders);
+
+router.delete(
+  "/:cid/attachments/:attachmentId",
+  requireAuth,
+  deleteContainerAttachment,
+);
+
+router.get("/attachments/:attachmentId/signed-url", getAttachmentSignedUrl);
 
 export default router;
