@@ -1,6 +1,13 @@
 import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
+import { v2 as cloudinary } from "cloudinary";
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 async function withTransaction(operation) {
   const client = await pool.connect();
@@ -272,8 +279,6 @@ export async function createContainer(req, res) {
       owner_type,
       remarks,
       created_by,
-      // SOC (owned)
-      // location, availability, manufacture_date, purchase_date, purchase_price, purchase_from, owned_by, available_at, currency,
       location,
       availability,
       derived_status,
@@ -284,7 +289,6 @@ export async function createContainer(req, res) {
       owned_by,
       available_at,
       currency,
-      // COC (hired)
       hire_start_date,
       hire_end_date,
       hired_by,
@@ -294,7 +298,6 @@ export async function createContainer(req, res) {
       place_of_destination,
     } = req.body;
 
-    // Validation
     if (!container_number || !container_size || !container_type) {
       return res
         .status(400)
@@ -343,7 +346,6 @@ export async function createContainer(req, res) {
         .json({ error: "Currency must be 3-letter code (e.g., USD)" });
     }
 
-    // Normalize dates (skip available_at since it's now string)
     const normManufactureDate = normalizeDate(manufacture_date);
     const normPurchaseDate = normalizeDate(purchase_date);
     const normHireStartDate = normalizeDate(hire_start_date);
@@ -364,6 +366,7 @@ export async function createContainer(req, res) {
     const checkQuery =
       "SELECT cid FROM container_master WHERE container_number = $1";
     const checkResult = await client.query(checkQuery, [container_number]);
+
     if (checkResult.rowCount > 0) {
       await client.query("ROLLBACK");
       return res.status(409).json({ error: "Container number already exists" });
@@ -385,6 +388,27 @@ export async function createContainer(req, res) {
     ];
     const masterResult = await client.query(masterQuery, masterValues);
     const cid = masterResult.rows[0].cid;
+
+    if (req.files?.length) {
+      const fileRows = req.files.map((f) => [
+        cid,
+        f.path,
+        f.filename || f.public_id,
+        f.mimetype?.startsWith("image/") ? "image" : "raw",
+        f.mimetype?.startsWith("image/") ? "upload" : "authenticated",
+        created_by,
+      ]);
+      const values = fileRows
+        .map(
+          (_, i) =>
+            `($${i * 6 + 1}, $${i * 6 + 2}, $${i * 6 + 3}, $${i * 6 + 4}, $${i * 6 + 5}, NOW(), $${i * 6 + 6})`,
+        )
+        .join(",");
+      await client.query(
+        `INSERT INTO container_attachments (container_id, url, public_id, resource_type, delivery_type, created_at, created_by) VALUES ${values}`,
+        fileRows.flat(),
+      );
+    }
 
     await client.query(
       "INSERT INTO container_status (cid, location, availability, status_notes, created_by) VALUES ($1, $2, $3, $4, $5)",
@@ -607,6 +631,27 @@ export async function updateContainer(req, res) {
       );
     }
 
+    if (req.files?.length) {
+      const fileRows = req.files.map((f) => [
+        cid,
+        f.path,
+        f.filename || f.public_id,
+        f.mimetype?.startsWith("image/") ? "image" : "raw",
+        f.mimetype?.startsWith("image/") ? "upload" : "authenticated",
+        created_by,
+      ]);
+      const values = fileRows
+        .map(
+          (_, i) =>
+            `($${i * 6 + 1}, $${i * 6 + 2}, $${i * 6 + 3}, $${i * 6 + 4}, $${i * 6 + 5}, NOW(), $${i * 6 + 6})`,
+        )
+        .join(",");
+      await client.query(
+        `INSERT INTO container_attachments (container_id, url, public_id, resource_type, delivery_type, created_at, created_by) VALUES ${values}`,
+        fileRows.flat(),
+      );
+    }
+
     await client.query("COMMIT");
 
     return res.status(200).json({
@@ -689,6 +734,7 @@ export const getAllContainers = async (req, res) => {
     });
   }
 };
+
 export async function getContainerById(req, res) {
   try {
     const { cid } = req.params;
@@ -716,7 +762,23 @@ export async function getContainerById(req, res) {
         chd.return_date::text, 
         chd.free_days, 
         chd.place_of_loading, 
-        chd.place_of_destination
+        chd.place_of_destination,
+        COALESCE(
+          (SELECT json_agg(
+             json_build_object(
+               'id', ca.id,
+               'url', ca.url,
+               'public_id', ca.public_id,
+               'resource_type', ca.resource_type,
+               'delivery_type', ca.delivery_type,
+               'created_at', ca.created_at
+             )
+             ORDER BY ca.created_at DESC
+           )
+           FROM container_attachments ca
+           WHERE ca.container_id = cm.cid),
+          '[]'
+        ) as attachments
     `;
     let fromClause = `
       FROM container_master cm
@@ -759,143 +821,12 @@ export async function getContainerById(req, res) {
       return res.status(404).json({ error: "Container not found" });
     }
 
-    console.log("Fetched container:", rows[0].container_number);
     res.json(rows[0]);
   } catch (err) {
     console.error("pool error:", err.message);
     res.status(500).json({ error: err.message || "Failed to fetch container" });
   }
 }
-// Updated Usage History endpoint - Combines container_status and container_assignment_history for comprehensive usage
-// export async function getUsageHistory(req, res) {
-//   try {
-//     const { cid } = req.params;
-//     if (!cid || isNaN(parseInt(cid))) {
-//       return res.status(400).json({ error: 'Valid CID is required' });
-//     }
-//     const containerId = parseInt(cid);
-
-//     // Union query to combine status changes and assignment events
-//     const historyQuery = `
-//       -- Status changes from container_status
-//       SELECT
-//         cs.created_time as event_time,
-//         'STATUS_CHANGE' as event_type,
-//         cs.availability as event_status,
-//         NULL as assigned_qty,
-//         NULL as action_type,
-//         cs.location as location,
-//         cs.status_notes as notes,
-//         cs.created_by as changed_by,
-//         NULL as previous_status,
-//         NULL as order_id,
-//         NULL as receiver_id,
-//         NULL as detail_id,
-//         cm.container_number,
-//         cm.owner_type,
-//         cpd.owned_by,
-//         chd.hired_by,
-//         o.id as job_id,
-//         o.booking_ref as job_no,
-//         o.place_of_loading as pol,
-//         o.final_destination as pod,
-//         o.created_at as start_date,
-//         o.updated_at as end_date,
-//         o.status as order_status
-//       FROM container_status cs
-//       JOIN container_master cm ON cs.cid = cm.cid
-//       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       LEFT JOIN orders o ON o.associated_container = cm.container_number
-//         AND o.status != 'Cancelled'
-//       WHERE cs.cid = $1
-
-//       UNION ALL
-
-//       -- Assignment events from container_assignment_history
-//       SELECT
-//         cah.created_at as event_time,
-//         'ASSIGNMENT' as event_type,
-//         cah.status as event_status,
-//         cah.assigned_qty,
-//         cah.action_type,
-//         NULL as location,  -- Assignments may not have location; could enhance if needed
-//         cah.notes,
-//         cah.changed_by,
-//         cah.previous_status,
-//         cah.order_id,
-//         cah.receiver_id,
-//         cah.detail_id,
-//         cm.container_number,
-//         cm.owner_type,
-//         cpd.owned_by,
-//         chd.hired_by,
-//         cah.order_id as job_id,  -- Reuse order_id as job_id
-//         o.booking_ref as job_no,
-//         o.place_of_loading as pol,
-//         o.final_destination as pod,
-//         o.created_at as start_date,
-//         o.updated_at as end_date,
-//         o.status as order_status
-//       FROM container_assignment_history cah
-//       JOIN container_master cm ON cah.cid = cm.cid
-//       LEFT JOIN container_purchase_details cpd ON cm.cid = cpd.cid
-//       LEFT JOIN container_hire_details chd ON cm.cid = chd.cid
-//       LEFT JOIN orders o ON cah.order_id = o.id
-//         AND o.status != 'Cancelled'
-//       WHERE cah.cid = $1
-
-//       ORDER BY event_time DESC
-//     `;
-
-//     const result = await pool.query(historyQuery, [containerId]);
-//     const history = result.rows;
-
-//     // Format for frontend (group by job if possible; enhance with event details)
-//     const formattedHistory = history.map(row => {
-//       const eventSummary = row.event_type === 'ASSIGNMENT'
-//         ? `${row.action_type} ${row.assigned_qty || 0} items (Prev: ${row.previous_status || 'N/A'})`
-//         : `Status: ${row.event_status} ${row.location ? `at ${row.location}` : ''}`;
-
-//       return {
-//         eventTime: row.event_time.toISOString().split('T')[0],  // YYYY-MM-DD
-//         eventType: row.event_type,
-//         eventSummary: eventSummary,
-//         jobNo: row.job_no || `JOB-${row.event_time.toISOString().split('T')[0].replace(/-/g, '')}`,
-//         pol: row.pol || (row.owner_type === 'soc' ? 'Self Depot' : 'Vendor Depot'),
-//         pod: row.pod || 'Destination Depot',
-//         startDate: row.start_date ? row.start_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
-//         endDate: row.end_date ? row.end_date.toISOString().split('T')[0] : row.event_time.toISOString().split('T')[0],
-//         statusProgression: [row.event_status],
-//         linkedOrders: row.job_no ? `ORD-${row.job_id}` : 'N/A',
-//         remarks: row.notes || eventSummary,
-//         changedBy: row.changed_by,
-//         orderId: row.order_id,
-//         receiverId: row.receiver_id,
-//         detailId: row.detail_id
-//       };
-//     });
-
-//     // Optional: Group by job/order for timeline view (if multiple events per job)
-//     const groupedHistory = {};
-//     formattedHistory.forEach(entry => {
-//       const key = entry.jobNo;
-//       if (!groupedHistory[key]) {
-//         groupedHistory[key] = [];
-//       }
-//       groupedHistory[key].push(entry);
-//     });
-
-//     console.log(`Fetched ${formattedHistory.length} combined history events for container ${containerId} (grouped into ${Object.keys(groupedHistory).length} jobs)`);
-//     res.json({
-//       rawEvents: formattedHistory,  // Detailed event list
-//       groupedByJob: groupedHistory  // Aggregated by job for easier UI rendering
-//     });
-//   } catch (err) {
-//     console.error("Error fetching usage history:", err);
-//     res.status(500).json({ error: 'Failed to fetch usage history', details: err.message });
-//   }
-// }
 
 export async function getUsageHistory(req, res) {
   try {
@@ -1813,5 +1744,58 @@ export async function updateContainerStatus(req, res) {
     if (client) {
       client.release();
     }
+  }
+}
+
+export async function deleteContainerAttachment(req, res) {
+  try {
+    const { cid, attachmentId } = req.params;
+    const result = await pool.query(
+      `DELETE FROM container_attachments WHERE id = $1 AND container_id = $2 RETURNING id`,
+      [attachmentId, cid],
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+    res.json({ message: "Attachment deleted" });
+  } catch (err) {
+    console.error("pool error:", err.message);
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to delete attachment" });
+  }
+}
+
+export async function getAttachmentSignedUrl(req, res) {
+  try {
+    const { attachmentId } = req.params;
+    const result = await pool.query(
+      `SELECT url, public_id, resource_type, delivery_type FROM container_attachments WHERE id = $1`,
+      [attachmentId],
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+    const att = result.rows[0];
+
+    if (att.delivery_type !== "authenticated") {
+      return res.json({ url: att.url });
+    }
+
+    const signedUrl = cloudinary.utils.private_download_url(
+      att.public_id,
+      null,
+      {
+        resource_type: att.resource_type,
+        type: "authenticated",
+        expires_at: Math.floor(Date.now() / 1000) + 300,
+      },
+    );
+    res.json({ url: signedUrl });
+  } catch (err) {
+    console.error("pool error:", err.message);
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to get attachment URL" });
   }
 }
