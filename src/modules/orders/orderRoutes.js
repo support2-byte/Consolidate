@@ -21,6 +21,7 @@ import {
   getAssignedOrderById,
   getPdfData,
   getOrderTracking,
+  notifySpecificItemsStatus,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -509,5 +510,7 @@ router.delete("/:orderId/order-items/:itemId", removeOrderItem);
 router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
 
 router.get("/pdf-data/:orderId", getPdfData);
+
+router.post("/:orderId/notify", notifySpecificItemsStatus);
 
 export default router;

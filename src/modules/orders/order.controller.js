@@ -3405,8 +3405,6 @@ export async function updateSpecificItemsStatus(req, res) {
     itemRefs,
     receiverId,
     status,
-    notifyClient = true,
-    notifyParties = true,
     forceRecalcEta = false,
   } = req.body || {};
 
@@ -3426,18 +3424,12 @@ export async function updateSpecificItemsStatus(req, res) {
     await client.query("BEGIN");
 
     const trimmedStatus = (status || "").trim();
-
     if (!trimmedStatus) {
       throw new Error("Status is required");
     }
 
     const statusResult = await client.query(
-      `SELECT order_status, send_email
-   FROM statuses
-   WHERE status = true
-     AND order_status ILIKE $1
-   ORDER BY sorting_number ASC
-   LIMIT 1`,
+      `SELECT order_status FROM statuses WHERE status = true AND order_status ILIKE $1 ORDER BY sorting_number ASC LIMIT 1`,
       [trimmedStatus],
     );
 
@@ -3446,7 +3438,6 @@ export async function updateSpecificItemsStatus(req, res) {
     }
 
     const normalizedStatus = statusResult.rows[0].order_status;
-    const statusSendEmail = statusResult.rows[0].send_email === true;
 
     let extraWhere = "";
     const queryParams = [normalizedStatus, Number(orderId), itemRefs];
@@ -3457,14 +3448,10 @@ export async function updateSpecificItemsStatus(req, res) {
     }
 
     const updateResult = await client.query(
-      `
-      UPDATE order_items
-         SET status = $1,
-             updated_at = CURRENT_TIMESTAMP
-       WHERE order_id = $2
-         AND item_ref = ANY($3::text[])${extraWhere}
-      RETURNING id, receiver_id, item_ref, consignment_status
-    `,
+      `UPDATE order_items
+          SET status = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = $2 AND item_ref = ANY($3::text[])${extraWhere}
+        RETURNING id, receiver_id, item_ref, consignment_status`,
       queryParams,
     );
 
@@ -3485,84 +3472,41 @@ export async function updateSpecificItemsStatus(req, res) {
 
     for (const rid of affectedReceiverIds) {
       const agg = await client.query(
-        `
-        SELECT 
-          COUNT(*) AS total,
-          COUNT(CASE WHEN consignment_status = 'Shipment Delivered' THEN 1 END) AS delivered
-        FROM order_items
-        WHERE receiver_id = $1
-      `,
+        `SELECT COUNT(*) AS total, COUNT(CASE WHEN consignment_status = 'Shipment Delivered' THEN 1 END) AS delivered FROM order_items WHERE receiver_id = $1`,
         [rid],
       );
-
       const { total, delivered } = agg.rows[0];
-
       if (total > 0 && delivered === total) {
         await client.query(
-          `
-          UPDATE receivers
-             SET status = 'Shipment Delivered',
-                 updated_at = CURRENT_TIMESTAMP
-           WHERE id = $1
-             AND status != 'Shipment Delivered'
-        `,
+          `UPDATE receivers SET status = 'Shipment Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status != 'Shipment Delivered'`,
           [rid],
         );
       }
     }
 
     const affectedItemIds = updatedRows.map((r) => r.id);
-
     const consignmentLinkRes = await client.query(
-      `
-      SELECT DISTINCT ON (detail_id) detail_id, consignment_id
-      FROM container_assignment_history
-      WHERE detail_id = ANY($1::int[])
-        AND consignment_id IS NOT NULL
-      ORDER BY detail_id, created_at DESC
-      `,
+      `SELECT DISTINCT ON (detail_id) detail_id, consignment_id FROM container_assignment_history WHERE detail_id = ANY($1::int[]) AND consignment_id IS NOT NULL ORDER BY detail_id, created_at DESC`,
       [affectedItemIds],
     );
 
     const affectedConsignmentIds = [
       ...new Set(consignmentLinkRes.rows.map((r) => r.consignment_id)),
     ];
-
     for (const consId of affectedConsignmentIds) {
       const agg = await client.query(
-        `
-        SELECT
-          COUNT(*) AS total,
-          COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered
-        FROM order_items oi
-        JOIN (
-          SELECT DISTINCT ON (detail_id) detail_id, consignment_id
-          FROM container_assignment_history
-          WHERE consignment_id = $1
-          ORDER BY detail_id, created_at DESC
-        ) latest ON latest.detail_id = oi.id
-        `,
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered FROM order_items oi JOIN (SELECT DISTINCT ON (detail_id) detail_id, consignment_id FROM container_assignment_history WHERE consignment_id = $1 ORDER BY detail_id, created_at DESC) latest ON latest.detail_id = oi.id`,
         [consId],
       );
-
       const { total, delivered } = agg.rows[0];
-
       if (total > 0 && delivered > 0 && delivered < total) {
         await client.query(
-          `UPDATE consignments
-              SET status = 'Partially Delivered',
-                  updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-              AND status IS DISTINCT FROM 'Partially Delivered'`,
+          `UPDATE consignments SET status = 'Partially Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IS DISTINCT FROM 'Partially Delivered'`,
           [consId],
         );
       } else if (total > 0 && delivered === total) {
         await client.query(
-          `UPDATE consignments
-              SET status = 'Delivered',
-                  updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-              AND status IS DISTINCT FROM 'Delivered'`,
+          `UPDATE consignments SET status = 'Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IS DISTINCT FROM 'Delivered'`,
           [consId],
         );
       }
@@ -3574,11 +3518,7 @@ export async function updateSpecificItemsStatus(req, res) {
     if (forceRecalcEta) {
       for (const rid of affectedReceiverIds) {
         await client.query(
-          `
-          UPDATE receivers 
-             SET eta = $1, updated_at = CURRENT_TIMESTAMP 
-           WHERE id = $2
-        `,
+          `UPDATE receivers SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
           [calculatedEta, rid],
         );
       }
@@ -3588,7 +3528,6 @@ export async function updateSpecificItemsStatus(req, res) {
       `SELECT MIN(eta) AS min_eta FROM receivers WHERE order_id = $1`,
       [Number(orderId)],
     );
-
     if (minEtaRes.rows[0]?.min_eta) {
       await client.query(
         `UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
@@ -3607,61 +3546,19 @@ export async function updateSpecificItemsStatus(req, res) {
 
     for (const row of updatedRows) {
       const consignmentRes = await client.query(
-        `
-          SELECT consignment_id
-          FROM container_assignment_history
-          WHERE detail_id = $1
-          ORDER BY created_at DESC
-          LIMIT 1
-        `,
+        `SELECT consignment_id FROM container_assignment_history WHERE detail_id = $1 ORDER BY created_at DESC LIMIT 1`,
         [row.id],
       );
-
       const lastTrackingRes = await client.query(
-        `
-          SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_id, status
-          FROM order_tracking
-          WHERE order_id = $1
-            AND receiver_id = $2
-            AND item_ref = $3
-          ORDER BY created_time DESC
-          LIMIT 1
-        `,
+        `SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_id, status FROM order_tracking WHERE order_id = $1 AND receiver_id = $2 AND item_ref = $3 ORDER BY created_time DESC LIMIT 1`,
         [Number(orderId), row.receiver_id, row.item_ref],
       );
-
       const last = lastTrackingRes.rows[0] || {};
       const resolvedConsignmentId =
         consignmentRes.rows[0]?.consignment_id ?? last.consignment_id ?? null;
 
       await client.query(
-        `
-          INSERT INTO order_tracking 
-            (
-              order_id,
-              sender_id,
-              sender_ref,
-              receiver_id,
-              receiver_ref,
-              container_id,
-              consignment_id,
-              status,
-              old_status,
-              item_ref,
-              eta,
-              etd,
-              created_by,
-              created_time,
-              module_id
-            )
-          VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10,
-            $11, $12, $13,
-            CURRENT_TIMESTAMP,
-            $14
-          )
-        `,
+        `INSERT INTO order_tracking (order_id, sender_id, sender_ref, receiver_id, receiver_ref, container_id, consignment_id, status, old_status, item_ref, eta, etd, created_by, created_time, module_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, $14)`,
         [
           Number(orderId),
           last.sender_id ?? null,
@@ -3683,122 +3580,9 @@ export async function updateSpecificItemsStatus(req, res) {
 
     await client.query("COMMIT");
 
-    const orderResult = await pool.query(
-      `
-      SELECT 
-        o.booking_ref,
-        pol.name AS pol_name,
-        pod.name AS pod_name,
-        TO_CHAR(o.eta, 'DD Mon YYYY') AS eta_formatted,
-        o.sender_email,
-        o.sender_name,
-        MAX(r.receiver_name) AS receiver_name
-      FROM orders o
-      LEFT JOIN places pol ON o.place_of_loading = pol.id
-      LEFT JOIN places pod ON o.place_of_delivery = pod.id
-      LEFT JOIN receivers r ON r.order_id = o.id AND r.id = ANY($2::int[])
-      WHERE o.id = $1
-      GROUP BY o.id, pol.name, pod.name
-    `,
-      [Number(orderId), affectedReceiverIds],
-    );
-
-    const order = orderResult.rows[0] || {};
-
-    const routeDisplay =
-      order.pol_name && order.pod_name
-        ? `${order.pol_name} → ${order.pod_name}`
-        : order.pod_name || order.pol_name || "—";
-
-    const itemsForEmail = updatedRows.map((r) => ({
-      itemRef: r.item_ref,
-      receiverId: r.receiver_id,
-      status: r.consignment_status,
-    }));
-
-    if ((notifyClient || notifyParties) && statusSendEmail) {
-      try {
-        const receiversRes = await pool.query(
-          `SELECT id, receiver_email, receiver_name
-         FROM receivers
-        WHERE id = ANY($1::int[])`,
-          [affectedReceiverIds],
-        );
-        const receiverMap = new Map(receiversRes.rows.map((r) => [r.id, r]));
-
-        const senderRes = await pool.query(
-          `SELECT id, sender_email, sender_name
-           FROM senders
-          WHERE order_id = $1
-          LIMIT 1`,
-          [Number(orderId)],
-        );
-        const sender = senderRes.rows[0] || null;
-
-        const values = [];
-        const placeholders = [];
-        let idx = 0;
-
-        for (const row of updatedRows) {
-          const receiver = receiverMap.get(row.receiver_id);
-          if (receiver?.receiver_email?.trim()) {
-            const base = idx * 7;
-            values.push(
-              Number(orderId),
-              receiver.id,
-              "receiver",
-              receiver.receiver_email.trim(),
-              receiver.receiver_name || null,
-              "order_status_update",
-              row.item_ref,
-            );
-            placeholders.push(
-              `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
-            );
-            idx++;
-          }
-
-          if (sender?.sender_email?.trim()) {
-            const base = idx * 7;
-            values.push(
-              Number(orderId),
-              sender.id,
-              "sender",
-              sender.sender_email.trim(),
-              sender.sender_name || null,
-              "order_status_update",
-              row.item_ref,
-            );
-            placeholders.push(
-              `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
-            );
-            idx++;
-          }
-        }
-
-        if (placeholders.length) {
-          await pool.query(
-            `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type, item_ref)
-              VALUES ${placeholders.join(", ")}`,
-            values,
-          );
-        } else {
-          console.warn(
-            `[updateSpecificItemsStatus] No receiver/sender emails found for order ${orderId}`,
-          );
-        }
-      } catch (queueErr) {
-        console.error(
-          "[updateSpecificItemsStatus] Failed to enqueue update emails:",
-          queueErr.message,
-        );
-      }
-    }
-
     return res.status(200).json({
       success: true,
       updatedCount: updateResult.rowCount,
-      updatedItems: itemsForEmail,
       eta: calculatedEta,
       etd: calculatedEtd,
       message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`,
@@ -3806,12 +3590,150 @@ export async function updateSpecificItemsStatus(req, res) {
   } catch (err) {
     if (client) await client.query("ROLLBACK");
     console.error("updateSpecificItemsStatus error:", err);
-    return res.status(500).json({
-      error: "Failed to update items",
-      details: err.message,
-    });
+    return res
+      .status(500)
+      .json({ error: "Failed to update items", details: err.message });
   } finally {
     if (client) client.release();
+  }
+}
+
+export async function notifySpecificItemsStatus(req, res) {
+  const { orderId } = req.params;
+  const {
+    itemRefs,
+    status,
+    notifyClient = true,
+    notifyParties = true,
+  } = req.body || {};
+
+  if (!Array.isArray(itemRefs) || itemRefs.length === 0) {
+    return res
+      .status(400)
+      .json({ error: "itemRefs must be a non-empty array" });
+  }
+
+  try {
+    const trimmedStatus = (status || "").trim();
+    if (!trimmedStatus) {
+      return res
+        .status(400)
+        .json({ error: "Status is required for notifications" });
+    }
+
+    const statusResult = await pool.query(
+      `SELECT order_status, send_email FROM statuses WHERE status = true AND order_status ILIKE $1 LIMIT 1`,
+      [trimmedStatus],
+    );
+
+    if (statusResult.rowCount === 0) {
+      return res
+        .status(400)
+        .json({ error: `Invalid status: "${trimmedStatus}"` });
+    }
+
+    const statusSendEmail = statusResult.rows[0].send_email === true;
+
+    if (!statusSendEmail || (!notifyClient && !notifyParties)) {
+      return res.status(200).json({
+        message: "Conditions not met to send emails for this status.",
+        queuedCount: 0,
+      });
+    }
+
+    const itemsRes = await pool.query(
+      `SELECT receiver_id, item_ref FROM order_items WHERE order_id = $1 AND item_ref = ANY($2::text[])`,
+      [Number(orderId), itemRefs],
+    );
+
+    if (itemsRes.rowCount === 0) {
+      return res
+        .status(404)
+        .json({ error: "No matching items found for notifications" });
+    }
+
+    const affectedRows = itemsRes.rows;
+    const affectedReceiverIds = [
+      ...new Set(affectedRows.map((r) => r.receiver_id)),
+    ];
+
+    const receiversRes = await pool.query(
+      `SELECT id, receiver_email, receiver_name FROM receivers WHERE id = ANY($1::int[])`,
+      [affectedReceiverIds],
+    );
+    const receiverMap = new Map(receiversRes.rows.map((r) => [r.id, r]));
+
+    const senderRes = await pool.query(
+      `SELECT id, sender_email, sender_name FROM senders WHERE order_id = $1 LIMIT 1`,
+      [Number(orderId)],
+    );
+    const sender = senderRes.rows[0] || null;
+
+    const values = [];
+    const placeholders = [];
+    let idx = 0;
+
+    for (const row of affectedRows) {
+      const receiver = receiverMap.get(row.receiver_id);
+
+      if (receiver?.receiver_email?.trim()) {
+        const base = idx * 7;
+        values.push(
+          Number(orderId),
+          receiver.id,
+          "receiver",
+          receiver.receiver_email.trim(),
+          receiver.receiver_name || null,
+          "order_status_update",
+          row.item_ref,
+        );
+        placeholders.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+        );
+        idx++;
+      }
+
+      if (sender?.sender_email?.trim()) {
+        const base = idx * 7;
+        values.push(
+          Number(orderId),
+          sender.id,
+          "sender",
+          sender.sender_email.trim(),
+          sender.sender_name || null,
+          "order_status_update",
+          row.item_ref,
+        );
+        placeholders.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+        );
+        idx++;
+      }
+    }
+
+    if (placeholders.length > 0) {
+      await pool.query(
+        `INSERT INTO email_queue (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type, item_ref) VALUES ${placeholders.join(", ")}`,
+        values,
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `Successfully queued ${idx} notification email(s).`,
+        queuedCount: idx,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "No valid email addresses found to notify.",
+      queuedCount: 0,
+    });
+  } catch (err) {
+    console.error("notifySpecificItemsStatus error:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to queue notifications", details: err.message });
   }
 }
 
