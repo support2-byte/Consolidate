@@ -15,7 +15,7 @@ export const getAllNotifications = async (req, res) => {
               eq.attempts, eq.last_error, eq.created_at, eq.sent_at
          FROM email_queue eq
          JOIN orders o ON o.id = eq.order_id
-        ORDER BY eq.created_at DESC`,
+        ORDER BY eq.created_at DESC, eq.id DESC`,
     );
     if (rows.length === 0) {
       logger.warn("No Email Notificaitons found!");
