@@ -29,6 +29,7 @@ function buildSubscriptionConfirmationHtml(templateData) {
     eta,
     lastUpdated,
     trackLink,
+    currentYear: new Date().getFullYear(),
   });
 }
 
@@ -49,6 +50,7 @@ function buildOrderCreatedHtml(templateData) {
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
+    currentYear: new Date().getFullYear(),
   });
 }
 
@@ -68,6 +70,7 @@ function buildShipmentUpdateHtml(templateData) {
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
+    currentYear: new Date().getFullYear(),
   });
 }
 
