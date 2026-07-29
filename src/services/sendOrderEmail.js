@@ -19,7 +19,7 @@ function buildSubscriptionConfirmationHtml(templateData) {
     templateData.lastUpdated || new Date().toLocaleString(),
   );
   const trackLink = escapeHtml(
-    templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+    templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
   );
 
   return renderTemplate("subscription_confirmed.html", {
@@ -47,7 +47,7 @@ function buildOrderCreatedHtml(templateData) {
       templateData.lastUpdated || new Date().toLocaleString(),
     ),
     trackLink: escapeHtml(
-      templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+      templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
   });
 }
@@ -66,7 +66,7 @@ function buildShipmentUpdateHtml(templateData) {
       templateData.lastUpdated || new Date().toLocaleString(),
     ),
     trackLink: escapeHtml(
-      templateData.trackLink || "https://ordertracking.royalgulfshipping.com/",
+      templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
   });
 }
@@ -183,7 +183,7 @@ export async function sendShipmentEmail(shipmentData) {
     etaFormatted,
     trackLink: String(
       shipmentData.trackLink ||
-        `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+        `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(itemRef)}`,
     ),
     updatedItems: Array.isArray(shipmentData.updatedItems)
       ? shipmentData.updatedItems
@@ -287,7 +287,7 @@ async function buildAndSendTracking(
           year: "numeric",
         })
       : "",
-    trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+    trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(itemRef)}`,
     updatedItems: Array.isArray(statusData.updatedItems)
       ? statusData.updatedItems
       : [],
@@ -422,7 +422,7 @@ export async function notifySubscriber(orderId, statusData) {
             year: "numeric",
           })
         : "",
-      trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(itemRef)}`,
+      trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(itemRef)}`,
       updatedItems: Array.isArray(statusData.updatedItems)
         ? statusData.updatedItems
         : [],
@@ -488,7 +488,7 @@ export async function subscribeToShipment(shipmentData) {
       place_of_delivery: place_of_delivery || "—",
       currentStatus: order.current_status || "",
       eta: order.eta || "",
-      trackLink: `https://consolidatetracking-1.onrender.com/?ref=${encodeURIComponent(referenceId)}`,
+      trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(referenceId)}`,
     }),
   };
 

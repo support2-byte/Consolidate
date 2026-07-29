@@ -130,9 +130,46 @@ export const resendNotification = async (req, res) => {
       return res.status(500).json({ success: false, message: errMsg });
     }
 
+    await pool.query(
+      `UPDATE email_queue
+          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
+        WHERE id = $1`,
+      [id],
+    );
+
     return res.status(200).json({ success: true, message: "Email sent" });
   } catch (error) {
     logger.error("Failed to resend notification", { id, error: error.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const deleteEmailQueue = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      "DELETE FROM email_queue WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (result.rowCount === 0) {
+      logger.info("Couldn't delete email queue", { emailId: id });
+
+      return res.status(404).json({
+        success: false,
+        message: "Email queue not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Email deleted from the queue",
+    });
+  } catch (error) {
+    logger.error("Failed to delete email queue", { id, error: error.message });
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
