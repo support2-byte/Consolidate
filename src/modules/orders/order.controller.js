@@ -3780,7 +3780,7 @@ export async function getOrderByItemRef(req, res) {
         ot.created_by AS ot_created_by,
         ot.eta AS ot_eta,
         ot.etd AS ot_etd,
-        ot.consignment_number AS ot_consignment_number
+        ot.consignment_id AS ot_consignment_number
       FROM order_items oi
       INNER JOIN orders o ON oi.order_id = o.id
       LEFT JOIN places pol ON pol.id = o.place_of_loading
