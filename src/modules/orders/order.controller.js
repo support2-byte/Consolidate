@@ -7,7 +7,6 @@ import {
 } from "../../services/calculateEta.js";
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
-import { notifyOrderStatusUpdate } from "../../services/sendOrderEmail.js";
 
 function normalizeDate(dateStr) {
   if (!dateStr) return null;

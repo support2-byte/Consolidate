@@ -1684,7 +1684,7 @@ export async function updateContainerStatus(req, res) {
                 "receiver",
                 receiver.receiver_email,
                 receiver.receiver_name,
-                "order_update",
+                "order_status_update",
                 item.item_ref,
               ],
             );
@@ -1704,7 +1704,7 @@ export async function updateContainerStatus(req, res) {
                 "sender",
                 item.sender_email,
                 item.sender_name,
-                "order_update",
+                "order_status_update",
                 item.item_ref,
               ],
             );
