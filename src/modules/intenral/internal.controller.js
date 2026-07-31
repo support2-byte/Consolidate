@@ -1,7 +1,7 @@
 import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import {
-  notifyOrderStatusUpdate,
+  notifySingleStatusUpdate,
   sendShipmentEmail,
 } from "../../services/sendOrderEmail.js";
 
@@ -20,7 +20,7 @@ export const processEmailQueue = async (req, res) => {
     await client.query("BEGIN");
 
     const result = await client.query(
-      `SELECT id, order_id, recipient_email, recipient_name, email_type
+      `SELECT id, order_id, item_ref, recipient_email, recipient_name, email_type
        FROM email_queue
        WHERE status = 'pending'
        ORDER BY created_at ASC
@@ -55,14 +55,34 @@ export const processEmailQueue = async (req, res) => {
         result = await sendShipmentEmail({
           email: row.recipient_email,
           orderId: row.order_id,
+          itemRef: row.item_ref,
           receiverName: row.recipient_name || "Valued Customer",
         });
-      } else if (row.email_type === "order_update") {
-        result = await notifyOrderStatusUpdate(row.order_id, {
+      } else if (row.email_type === "order_status_update") {
+        if (!row.item_ref) {
+          throw new Error("Missing item_ref for order_status_update queue row");
+        }
+        result = await notifySingleStatusUpdate({
+          itemRef: row.item_ref,
+          orderId: row.order_id,
+          email: row.recipient_email,
           receiverName: row.recipient_name || "Valued Customer",
         });
       } else {
         throw new Error(`Unsupported email_type "${row.email_type}"`);
+      }
+
+      if (result.skipped) {
+        await pool.query(
+          `UPDATE email_queue SET status = 'skipped', last_error = $2 WHERE id = $1`,
+          [row.id, result.message || "Skipped"],
+        );
+        results.push({
+          id: row.id,
+          status: "skipped",
+          message: result.message,
+        });
+        continue;
       }
 
       if (!result.success) {

@@ -1,7 +1,6 @@
 import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import {
-  notifyOrderStatusUpdate,
   notifySingleStatusUpdate,
   sendOrderEmail,
   sendShipmentEmail,

@@ -509,8 +509,62 @@ router.delete("/:orderId/order-items/:itemId", removeOrderItem);
  */
 router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
 
+/**
+ * @swagger
+ * /api/orders/pdf-data/{orderId}:
+ *   get:
+ *     summary: Get order data formatted for PDF generation
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: PDF-ready order data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Order'
+ *       404:
+ *         description: Order not found
+ */
 router.get("/pdf-data/:orderId", getPdfData);
 
+/**
+ * @swagger
+ * /api/orders/{orderId}/notify:
+ *   post:
+ *     summary: Send a status notification for specific items in an order
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [items]
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     itemRef: { type: string }
+ *                     status: { type: string }
+ *               email: { type: string, format: email }
+ *     responses:
+ *       200:
+ *         description: Notification sent
+ *       404:
+ *         description: Order not found
+ */
 router.post("/:orderId/notify", notifySpecificItemsStatus);
 
 export default router;
