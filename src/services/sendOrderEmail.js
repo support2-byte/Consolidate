@@ -4,6 +4,37 @@ import { escapeHtml } from "./escapeHtml.js";
 import logger from "./logger.js";
 import { renderTemplate } from "./renderTemplate.js";
 
+const KARACHI_TIMEZONE = "Asia/Karachi";
+
+function formatDate(date) {
+  if (!date) return "—";
+
+  return (
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: KARACHI_TIMEZONE,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(new Date(date)) + " (GMT+5)"
+  );
+}
+
+function formatDateTime(date) {
+  if (!date) return "—";
+
+  return (
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: KARACHI_TIMEZONE,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(date)) + " (GMT+5)"
+  );
+}
+
 function buildSubject(templateData) {
   return `Royal Gulf Shipping – ${templateData.statusLabel} (Ref: ${templateData.refId || "—"})`;
 }
@@ -16,7 +47,7 @@ function buildSubscriptionConfirmationHtml(templateData) {
   const route = `${pol} &rarr; ${pod}`;
   const eta = escapeHtml(templateData.eta || "—");
   const lastUpdated = escapeHtml(
-    templateData.lastUpdated || new Date().toLocaleString(),
+    templateData.lastUpdated || formatDateTime(new Date()),
   );
   const trackLink = escapeHtml(
     templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
@@ -45,7 +76,7 @@ function buildOrderCreatedHtml(templateData) {
     route: escapeHtml(templateData.route || "—"),
     eta: escapeHtml(templateData.etaFormatted || "—"),
     lastUpdated: escapeHtml(
-      templateData.lastUpdated || new Date().toLocaleString(),
+      templateData.lastUpdated || formatDateTime(new Date()),
     ),
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
@@ -65,7 +96,7 @@ function buildShipmentUpdateHtml(templateData) {
     route: escapeHtml(templateData.route || "—"),
     eta: escapeHtml(templateData.etaFormatted || "—"),
     lastUpdated: escapeHtml(
-      templateData.lastUpdated || new Date().toLocaleString(),
+      templateData.lastUpdated || formatDateTime(new Date()),
     ),
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
@@ -159,11 +190,7 @@ export async function sendShipmentEmail(shipmentData) {
     formNo = order?.rgl_booking_number || "—";
 
     if (!etaFormatted && order?.eta) {
-      etaFormatted = new Date(order.eta).toLocaleDateString("en-GB", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      });
+      etaFormatted = formatDate(order.eta);
     }
   } catch (err) {
     logger.error("Failed to fetch order details for order created email", {
@@ -283,13 +310,7 @@ async function buildAndSendTracking(
     refId: itemRef,
     orderId: tracking.rgl_booking_number || "—",
     route,
-    etaFormatted: tracking.eta
-      ? new Date(tracking.eta).toLocaleDateString("en-GB", {
-          day: "2-digit",
-          month: "short",
-          year: "numeric",
-        })
-      : "",
+    etaFormatted: tracking.eta ? formatDate(tracking.eta) : "",
     trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(itemRef)}`,
     updatedItems: Array.isArray(statusData.updatedItems)
       ? statusData.updatedItems
@@ -356,88 +377,6 @@ export async function notifySingleStatusUpdate(statusData) {
   };
 }
 
-export async function notifySubscriber(orderId, statusData) {
-  const { rows: subscriptions } = await pool.query(
-    `SELECT email, reference_id FROM notification_subscriptions WHERE order_id = $1`,
-    [orderId],
-  );
-
-  if (subscriptions.length === 0) {
-    return {
-      success: false,
-      skipped: true,
-      message: "No subscribers for this order",
-    };
-  }
-
-  const groupedByRef = subscriptions.reduce((acc, sub) => {
-    const ref = sub.reference_id || "—";
-    if (!acc[ref]) acc[ref] = [];
-    acc[ref].push(sub.email);
-    return acc;
-  }, {});
-
-  const results = [];
-
-  for (const [itemRef, emails] of Object.entries(groupedByRef)) {
-    const { rows } = await pool.query(
-      `SELECT ot.order_id, ot.eta, ot.status AS current_status, o.rgl_booking_number,
-              pol.name AS pol_name, pod.name AS pod_name
-        FROM order_tracking ot
-        JOIN orders o ON o.id = ot.order_id
-        LEFT JOIN places pol ON pol.id = o.place_of_loading
-        LEFT JOIN places pod ON pod.id = o.place_of_delivery
-        WHERE TRIM(ot.item_ref) ILIKE TRIM($1)
-        ORDER BY ot.created_time DESC
-        LIMIT 1`,
-      [itemRef],
-    );
-
-    if (rows.length === 0) {
-      logger.error("No order_tracking record found for subscribed item_ref", {
-        orderId,
-        itemRef,
-      });
-      continue;
-    }
-    const tracking = rows[0];
-
-    const route =
-      statusData.route ||
-      `${tracking.pol_name || "—"} → ${tracking.pod_name || "—"}`;
-
-    const templateData = {
-      isNewOrder: false,
-      receiverName: statusData.receiverName || "Valued Customer",
-      statusLabel: String(
-        statusData.statusLabel || tracking.current_status || "Shipment Updated",
-      ),
-      statusMsg: String(
-        statusData.statusMsg || "We have an update on your shipment.",
-      ),
-      refId: itemRef,
-      orderId: tracking.rgl_booking_number || "—",
-      route,
-      etaFormatted: tracking.eta
-        ? new Date(tracking.eta).toLocaleDateString("en-GB", {
-            day: "2-digit",
-            month: "short",
-            year: "numeric",
-          })
-        : "",
-      trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(itemRef)}`,
-      updatedItems: Array.isArray(statusData.updatedItems)
-        ? statusData.updatedItems
-        : [],
-    };
-
-    const result = await sendOrderEmail(emails, templateData);
-    results.push({ itemRef, emails, ...result });
-  }
-
-  return { success: results.every((r) => r.success), results };
-}
-
 export async function subscribeToShipment(shipmentData) {
   const { email, referenceId, place_of_loading, place_of_delivery } =
     shipmentData;
@@ -490,7 +429,7 @@ export async function subscribeToShipment(shipmentData) {
       place_of_loading: place_of_loading || "—",
       place_of_delivery: place_of_delivery || "—",
       currentStatus: order.current_status || "",
-      eta: order.eta || "",
+      eta: order.eta ? formatDate(order.eta) : "",
       trackLink: `https://trackorder.royalgulfshipping.com/?ref=${encodeURIComponent(referenceId)}`,
     }),
   };
