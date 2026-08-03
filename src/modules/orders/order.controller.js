@@ -1644,7 +1644,7 @@ export async function getOrderById(req, res) {
     `;
 
     const receiversQuery = `
-      SELECT 
+      SELECT
         r.id, r.order_id,
         r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
         r.receiver_marks_and_number AS "marksAndNumber",
@@ -1706,7 +1706,7 @@ export async function getOrderById(req, res) {
       ) ot ON TRUE
 
       WHERE oi.receiver_id = r.id
-    ) sd_full ON TRUE
+      ) sd_full ON TRUE
       WHERE r.order_id = $1
       ORDER BY r.id
     `;
@@ -3786,8 +3786,8 @@ export async function getOrderByItemRef(req, res) {
       LEFT JOIN places pod ON pod.id = o.place_of_delivery
       LEFT JOIN receivers r ON oi.receiver_id = r.id
       LEFT JOIN order_tracking ot
-        ON ot.receiver_id = r.id
-        OR (ot.order_id = o.id AND ot.item_ref = oi.item_ref)
+        ON ot.order_id = o.id
+        AND ot.item_ref = oi.item_ref
       WHERE oi.item_ref ILIKE $1
       ORDER BY o.created_at DESC, oi.id, ot.created_time DESC
     `;

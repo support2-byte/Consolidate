@@ -1410,7 +1410,7 @@ export async function getUnassignedOrders(req, res) {
       LEFT JOIN orders o
         ON cah.order_id = o.id
         AND o.status != 'Cancelled'
-      LEFT JOIN order_items oi ON oi.receiver_id = cah.receiver_id
+      LEFT JOIN order_items oi ON oi.id = cah.detail_id
       WHERE cah.cid = $1
         AND o.id IS NOT NULL
         AND cah.assigned_qty > 0
