@@ -1478,6 +1478,7 @@ export async function getOrdersConsignments(req, res) {
         r.id,
         r.receiver_name  AS receivername,
         r.containers,
+        r.receiver_marks_and_number AS marksAndNumber,
         ${shippingDetailsSub} AS shippingdetails,
           COALESCE((
             SELECT json_agg(json_build_object(
