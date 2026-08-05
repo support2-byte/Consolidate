@@ -1176,6 +1176,9 @@ export const getOrders = async (req, res) => {
                       'itemRef', oi.item_ref,
                       'status', oi.consignment_status,
 
+                      'deliveredQty', COALESCE(oi.delivered_qty, 0)::int,
+                      'remainingQty', COALESCE(oi.remaining_qty, oi.total_number, 0)::int,
+
                       'trackingEta', ot.eta,
                       'trackingStatus', ot.status,
 
@@ -1242,7 +1245,33 @@ export const getOrders = async (req, res) => {
                   WHERE oi.receiver_id = r.id
                 ),
                 '[]'::jsonb
-              )
+              ),
+
+              'collections',
+                COALESCE(
+                  (
+                    SELECT json_agg(
+                      json_build_object(
+                        'id', oc.id,
+                        'collectionMethod', oc.collection_method,
+                        'collectionScope', oc.collection_scope,
+                        'deliveryDate', oc.delivery_date,
+                        'items', COALESCE(
+                          (SELECT json_agg(json_build_object(
+                            'orderItemId', oci.order_item_id,
+                            'itemRef', oci.item_ref,
+                            'qtyDelivered', oci.qty_delivered
+                          ))
+                          FROM order_collection_items oci WHERE oci.collection_id = oc.id),
+                          '[]'::json
+                        )
+                      ) ORDER BY oc.id DESC
+                    )
+                    FROM order_collections oc
+                    WHERE oc.receiver_id = r.id
+                  ),
+                  '[]'::json
+                )
             )
             ORDER BY r.id
           ) AS receivers
@@ -1630,7 +1659,8 @@ export async function getOrderById(req, res) {
             'total_number',    COALESCE((elem->>'total_number')::int, 0),
             'assign_weight',   COALESCE(elem->>'assign_weight', '0'),
             'remaining_items', COALESCE((elem->>'remaining_items')::int, 0),
-            'assign_total_box', COALESCE(elem->>'assign_total_box', '0')
+            'assign_total_box', COALESCE(elem->>'assign_total_box', '0'),
+            'consignment_number', cons.consignment_number
           ) ORDER BY (elem->'container'->>'container_number')
         )
         FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) elem
@@ -1640,6 +1670,16 @@ export async function getOrderById(req, res) {
           WHERE cid = (elem->'container'->>'cid')::int
           ORDER BY sid DESC NULLS LAST LIMIT 1
         ) cs ON true
+        LEFT JOIN LATERAL (
+          SELECT cah.consignment_id
+          FROM container_assignment_history cah
+          WHERE cah.order_id = oi.order_id
+            AND cah.cid = (elem->'container'->>'cid')::int
+            AND cah.detail_id = oi.id
+          ORDER BY cah.id DESC
+          LIMIT 1
+        ) cah ON true
+        LEFT JOIN consignments cons ON cons.id = cah.consignment_id
         WHERE (elem->'container'->>'cid') ~ '^[0-9]+$'
       ), '[]'::json)
     `;
@@ -1685,13 +1725,16 @@ export async function getOrderById(req, res) {
           'shippingLine',      COALESCE(oi.shipping_line, ''),
           'containerDetails',  ${containerDetailsSub},
           'remainingItems',    GREATEST(
-             0,
+            0,
             COALESCE(oi.total_number, 0)::int -
             COALESCE((
               SELECT SUM((cd->>'assign_total_box')::int)
               FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd
             ), 0)
-          )::int
+          )::int,
+
+          'deliveredQty',       COALESCE(oi.delivered_qty, 0)::int,
+          'remainingQty',       COALESCE(oi.remaining_qty, oi.total_number, 0)::int
         )
         ORDER BY oi.id
       ) AS shippingdetails
@@ -1791,12 +1834,66 @@ export async function getOrderById(req, res) {
       dropOffResult.rows.map((r) => [r.receiver_id, r.drop_off_details || []]),
     );
 
+    const collectionsResult = await client.query(
+      `
+  SELECT 
+    oc.receiver_id,
+    json_agg(
+      json_build_object(
+        'id',                   oc.id,
+        'collectionMethod',     oc.collection_method,
+        'collectionScope',      oc.collection_scope,
+        'clientReceiverId',     oc.client_receiver_id,
+        'clientReceiverMobile', oc.client_receiver_mobile,
+        'plateNo',              oc.plate_no,
+        'deliveryDate',         TO_CHAR(oc.delivery_date, 'YYYY-MM-DD'),
+        'createdAt',            oc.created_at,
+        'items', COALESCE(items.items, '[]'::json),
+        'gatepass', COALESCE(gp.gatepass, '[]'::json)
+      ) ORDER BY oc.id DESC
+    ) AS collections
+  FROM order_collections oc
+  LEFT JOIN LATERAL (
+    SELECT json_agg(
+      json_build_object(
+        'id', oci.id,
+        'orderItemId', oci.order_item_id,
+        'itemRef', oci.item_ref,
+        'qtyDelivered', oci.qty_delivered
+      )
+    ) AS items
+    FROM order_collection_items oci
+    WHERE oci.collection_id = oc.id
+  ) items ON true
+  LEFT JOIN LATERAL (
+    SELECT json_agg(
+      json_build_object(
+        'id', ocg.id,
+        'url', ocg.url,
+        'originalname', ocg.originalname,
+        'mimetype', ocg.mimetype,
+        'size', ocg.size
+      )
+    ) AS gatepass
+    FROM order_collection_gatepass ocg
+    WHERE ocg.collection_id = oc.id
+  ) gp ON true
+  WHERE oc.order_id = $1
+  GROUP BY oc.receiver_id
+  `,
+      [numericId],
+    );
+
+    const collectionsMap = new Map(
+      collectionsResult.rows.map((r) => [r.receiver_id, r.collections || []]),
+    );
+
     receivers = receivers.map((r) => ({
       ...r,
       drop_off_details: dropOffMap.get(r.id) || [],
+      collections: collectionsMap.get(r.id) || [],
     }));
 
-    // Assignment history
     const historyResult = await client.query(
       `
       SELECT h.*, cm.container_number
@@ -1808,16 +1905,13 @@ export async function getOrderById(req, res) {
       [numericId],
     );
 
-    // Parse JSONB fields safely
     let parsedAttachments = [];
     try {
       parsedAttachments =
         typeof orderRow.attachments === "string"
           ? JSON.parse(orderRow.attachments)
           : orderRow.attachments || [];
-    } catch (e) {
-      // ignore malformed attachments
-    }
+    } catch (e) {}
 
     let parsedGatepass = [];
     try {
@@ -4984,8 +5078,8 @@ export async function getPdfData(req, res) {
         vessel: c.vessel_name || "",
         voyage: c.voyage || "",
         shipping_line_name: c.shipping_line_name || "",
-        seal_no: c.seal_no || "", // <-- added: was selected by SQL, never returned
-        customs_crn: c.customs_crn || "", // <-- added: was selected by SQL, never returned
+        seal_no: c.seal_no || "",
+        customs_crn: c.customs_crn || "",
         containers: (c.containers || []).map(
           (ct) => ct.containerNo || ct.container_number || "",
         ),
@@ -5056,3 +5150,174 @@ export const getOrderTracking = async (req, res) => {
     });
   }
 };
+
+export async function createOrderCollections(req, res) {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const { orderId } = req.params;
+    const files = req.files || [];
+    let collections = [];
+    try {
+      collections = JSON.parse(req.body.collections || "[]");
+    } catch {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Invalid collections payload" });
+    }
+
+    if (!collections.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "No collections provided" });
+    }
+
+    const orderRes = await client.query("SELECT id FROM orders WHERE id = $1", [
+      orderId,
+    ]);
+    if (orderRes.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const filesByReceiver = {};
+    for (const f of files) {
+      const match = f.fieldname.match(/^gatepass_(.+)$/);
+      if (!match) continue;
+      const rid = match[1];
+      (filesByReceiver[rid] = filesByReceiver[rid] || []).push(f);
+    }
+
+    const insertedCollections = [];
+
+    for (let i = 0; i < collections.length; i++) {
+      const c = collections[i];
+
+      if (!c.receiverId) {
+        await client.query("ROLLBACK");
+        return res
+          .status(400)
+          .json({ error: `Collection #${i + 1} is missing a receiver` });
+      }
+      if (!Array.isArray(c.items) || c.items.length === 0) {
+        await client.query("ROLLBACK");
+        return res
+          .status(400)
+          .json({ error: `Collection #${i + 1} has no items selected` });
+      }
+
+      for (const it of c.items) {
+        if (!it.orderItemId) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({
+            error: `Collection #${i + 1} has an item missing orderItemId (itemRef: ${it.itemRef})`,
+          });
+        }
+        if (!it.qtyDelivered || Number(it.qtyDelivered) <= 0) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({
+            error: `Collection #${i + 1} has item ${it.itemRef} with invalid qtyDelivered`,
+          });
+        }
+      }
+
+      const headerRes = await withUserAudit(
+        req,
+        `INSERT INTO order_collections (
+          order_id, receiver_id, collection_method, collection_scope,
+          client_receiver_id, client_receiver_mobile, plate_no, delivery_date
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING *`,
+        [
+          orderId,
+          c.receiverId,
+          c.collectionMethod || null,
+          c.collectionScope || null,
+          c.clientReceiverId || null,
+          c.clientReceiverMobile || null,
+          c.plateNo || null,
+          c.deliveryDate ? normalizeDate(c.deliveryDate) : null,
+        ],
+      );
+      const collectionId = headerRes.rows[0].id;
+
+      const itemValues = [];
+      const itemPlaceholders = c.items
+        .map((it, idx) => {
+          const base = idx * 4;
+          itemValues.push(
+            collectionId,
+            it.orderItemId,
+            it.itemRef,
+            parseInt(it.qtyDelivered),
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+        })
+        .join(", ");
+
+      await client.query(
+        `INSERT INTO order_collection_items (collection_id, order_item_id, item_ref, qty_delivered)
+         VALUES ${itemPlaceholders}`,
+        itemValues,
+      );
+
+      const gpFiles = filesByReceiver[String(c.receiverId)] || [];
+      if (gpFiles.length) {
+        const gpValues = [];
+        const gpPlaceholders = gpFiles
+          .map((f, idx) => {
+            const base = idx * 6;
+            gpValues.push(
+              collectionId,
+              f.path || f.secure_url || f.url,
+              f.filename || f.public_id,
+              f.originalname,
+              f.mimetype,
+              f.size,
+            );
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+          })
+          .join(", ");
+
+        await client.query(
+          `INSERT INTO order_collection_gatepass (collection_id, url, public_id, originalname, mimetype, size)
+           VALUES ${gpPlaceholders}`,
+          gpValues,
+        );
+      }
+
+      for (const it of c.items) {
+        const qty = parseInt(it.qtyDelivered);
+
+        const updateRes = await client.query(
+          `UPDATE order_items
+              SET delivered_qty = COALESCE(delivered_qty, 0) + $1,
+                  remaining_qty = GREATEST(0, COALESCE(remaining_qty, total_number, 0) - $1)
+            WHERE id = $2
+            RETURNING id, item_ref, delivered_qty, remaining_qty`,
+          [qty, it.orderItemId],
+        );
+
+        if (updateRes.rowCount === 0) {
+          await client.query("ROLLBACK");
+          return res.status(404).json({
+            error: `Order item not found: orderItemId=${it.orderItemId} (itemRef: ${it.itemRef})`,
+          });
+        }
+      }
+
+      insertedCollections.push({ id: collectionId, ...c });
+    }
+
+    await client.query("COMMIT");
+    res.status(201).json({ success: true, collections: insertedCollections });
+  } catch (error) {
+    console.error("Error creating order collections:", error);
+    if (client) await client.query("ROLLBACK");
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+}
