@@ -1,5 +1,5 @@
 import express from "express";
-import upload from "../../middleware/upload.js";
+import upload, { gatepassUpload } from "../../middleware/upload.js";
 import { requireAuth } from "../../modules/auth/auth.middleware.js";
 
 import {
@@ -22,6 +22,7 @@ import {
   getPdfData,
   getOrderTracking,
   notifySpecificItemsStatus,
+  createOrderCollections,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -241,6 +242,13 @@ router.post(
     { name: "gatepass", maxCount: 10 },
   ]),
   createOrder,
+);
+
+router.post(
+  "/:orderId/collections",
+  requireAuth,
+  gatepassUpload,
+  createOrderCollections,
 );
 
 /**

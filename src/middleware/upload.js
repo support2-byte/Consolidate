@@ -191,4 +191,41 @@ export const kycUpload = multer({
   { name: "signature", maxCount: 1 },
 ]);
 
+export const gatepassUpload = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: (req, file) => {
+      const formNo = (
+        req.body?.rgl_booking_number ||
+        req.params?.orderId ||
+        "UNKNOWN"
+      )
+        .toString()
+        .toUpperCase()
+        .replace(/\s+/g, "");
+
+      const match = file.fieldname.match(/^gatepass_(.+)$/);
+      const receiverId = match ? match[1] : "unknown";
+
+      const ext = EXT_BY_MIME[file.mimetype] || "bin";
+      const isImage = file.mimetype.startsWith("image/");
+      const basePublicId = `${formNo}_${receiverId}_${Date.now()}`;
+
+      return {
+        folder: "consolidate-app/orders/gatepass",
+        public_id: isImage ? basePublicId : `${basePublicId}.${ext}`,
+        allowed_formats: ["jpg", "jpeg", "png", "pdf"],
+        resource_type: isImage ? "image" : "raw",
+        type: isImage ? "upload" : "authenticated",
+      };
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 20 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["image/jpeg", "image/png", "application/pdf"];
+    if (allowedTypes.includes(file.mimetype)) cb(null, true);
+    else cb(new Error("Invalid file type. Allowed: JPG, PNG, PDF"));
+  },
+}).any();
+
 export default upload;
