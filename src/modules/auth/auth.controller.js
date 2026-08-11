@@ -4,6 +4,9 @@ import crypto from "crypto";
 import pool from "../../db/pool.js";
 import { getEffectivePermissions } from "../../services/getEffectivePermissions.js";
 import logger from "../../services/logger.js";
+import { transporter } from "../../middleware/nodeMailer.js";
+import { buildAdminResetRequestEmailHtml } from "../../services/passwordResetEmailHtml.js";
+import { buildPasswordUpdatedEmailHtml } from "../../services/updatePasswordEmail.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const ACCESS_TOKEN_TTL = "15m";
@@ -642,6 +645,19 @@ export async function deleteUser(req, res) {
   try {
     const { id } = req.params;
 
+    if (req.user.roleName !== "super admin") {
+      logger.warn("Non-super-admin attempted to delete user", {
+        actorId: req.user?.id,
+        actorRole: req.user?.roleName,
+        targetUserId: id,
+      });
+      return res.status(403).json({
+        success: false,
+        error: "FORBIDDEN",
+        message: "Only Super Admin can delete users",
+      });
+    }
+
     if (req.user.id === parseInt(id, 10)) {
       logger.warn("User attempted to delete own account", {
         userId: req.user.id,
@@ -693,6 +709,20 @@ export async function deleteUser(req, res) {
 export async function adminForceResetPassword(req, res) {
   try {
     const { id } = req.params;
+
+    if (req.user.roleName !== "super admin") {
+      logger.warn("Non-super-admin attempted password reset", {
+        actorId: req.user?.id,
+        actorRole: req.user?.roleName,
+        targetUserId: id,
+      });
+      return res.status(403).json({
+        success: false,
+        error: "FORBIDDEN",
+        message: "Only Super Admin can reset passwords",
+      });
+    }
+
     const { newPassword } = req.body;
 
     if (!newPassword || newPassword.length < 8) {
@@ -712,7 +742,7 @@ export async function adminForceResetPassword(req, res) {
     const result = await pool.query(
       `UPDATE users SET password_hash = $1, updated_at = now()
        WHERE id = $2
-       RETURNING id, email`,
+       RETURNING id, name, email`,
       [passwordHash, id],
     );
 
@@ -727,6 +757,8 @@ export async function adminForceResetPassword(req, res) {
       });
     }
 
+    const updatedUser = result.rows[0];
+
     await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [id]);
 
     logger.info("Password reset by admin, sessions revoked", {
@@ -734,9 +766,37 @@ export async function adminForceResetPassword(req, res) {
       targetUserId: id,
     });
 
+    try {
+      const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+      const loginUrl = `${CLIENT_URL}/login`;
+
+      const htmlContent = buildPasswordUpdatedEmailHtml({
+        recipientName: updatedUser.name,
+        newPassword,
+        loginUrl,
+      });
+
+      await transporter.sendMail({
+        from: `"RGSL Portal" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+        to: updatedUser.email,
+        subject: "Your RGSL Portal Password Has Been Reset",
+        html: htmlContent,
+      });
+
+      logger.info(
+        `Password update email sent successfully to ${updatedUser.email}`,
+      );
+    } catch (emailErr) {
+      logger.error("Failed to send password update email to user", {
+        targetUserId: id,
+        email: updatedUser.email,
+        error: emailErr.message,
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      message: "Password reset",
+      message: "Password reset and email notification sent.",
     });
   } catch (err) {
     logger.error("Admin password reset failed", {
@@ -782,3 +842,171 @@ export async function logoutAll(req, res) {
     });
   }
 }
+
+export const changePassword = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Current password and new password are required.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT password_hash
+      FROM users
+      WHERE id = $1
+        AND active = true
+      `,
+      [userId],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const isMatch = await bcrypt.compare(
+      currentPassword,
+      rows[0].password_hash,
+    );
+
+    if (!isMatch) {
+      return res.status(400).json({
+        success: false,
+        error: "INVALID_CURRENT_PASSWORD",
+        message: "Current password is incorrect.",
+      });
+    }
+
+    const samePassword = await bcrypt.compare(
+      newPassword,
+      rows[0].password_hash,
+    );
+
+    if (samePassword) {
+      return res.status(400).json({
+        success: false,
+        message: "New password cannot be the same as the current password.",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      `
+      UPDATE users
+      SET
+          password_hash = $1,
+          updated_at = NOW()
+      WHERE id = $2
+      `,
+      [passwordHash, userId],
+    );
+
+    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [userId]);
+
+    res.clearCookie("accessToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+    });
+
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+    });
+
+    logger.info("Password changed successfully, all sessions revoked", {
+      userId,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Password changed successfully. Please log in again.",
+    });
+  } catch (error) {
+    logger.error("Failed to change password", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+    });
+  }
+};
+
+export const requestResetPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email address is required.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      "SELECT id, name, email FROM users WHERE email = $1",
+      [email.trim().toLowerCase()],
+    );
+
+    if (rows.length === 0) {
+      logger.info("Password reset requested for non-existent account", {
+        email,
+      });
+      return res.status(404).json({
+        success: false,
+        message: "Account not found!",
+      });
+    }
+
+    const user = rows[0];
+
+    const ADMIN_EMAIL = process.env.GMAIL_USER;
+
+    const htmlContent = buildAdminResetRequestEmailHtml({
+      userName: user.name,
+      userEmail: user.email,
+      requestTime: new Date().toLocaleString("en-US", {
+        timeZone: "Asia/Dubai",
+      }),
+    });
+
+    await transporter.sendMail({
+      from: `"RGSL Portal Alert" <${process.env.GMAIL_USER}>`,
+      to: ADMIN_EMAIL,
+      subject: `[Reset Request] User: ${user.name} (${user.email})`,
+      html: htmlContent,
+    });
+
+    logger.info(
+      `Password reset request forwarded to Admin for user ${user.email}`,
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Your reset request has been submitted to the administrator.",
+    });
+  } catch (error) {
+    logger.error("Failed to process user password reset request", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong! Please try again later.",
+    });
+  }
+};

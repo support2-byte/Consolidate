@@ -26,7 +26,7 @@ async function withTransaction(operation) {
 
 function isValidDate(dateString) {
   if (!dateString) return false;
-  const normalized = dateString.toString().split("T")[0]; // Strip time if full ISO
+  const normalized = dateString.toString().split("T")[0];
   const date = new Date(normalized);
   return !isNaN(date.getTime()) && normalized.match(/^\d{4}-\d{2}-\d{2}$/);
 }

@@ -228,4 +228,42 @@ export const gatepassUpload = multer({
   },
 }).any();
 
+export const companyUpload = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: (req, file) => {
+      const companyKey = (req.body?.company || req.params?.id || "unknown")
+        .toString()
+        .toUpperCase()
+        .trim()
+        .replace(/[^A-Z0-9]+/g, "_") // strip anything Cloudinary public_id can't take (&, /, etc.)
+        .replace(/^_+|_+$/g, "");
+
+      const label = file.fieldname;
+      const timestamp = Date.now();
+
+      return {
+        folder: `consolidate-app/companies/${companyKey}`,
+        public_id: `${companyKey}_${label}_${timestamp}`,
+        allowed_formats: ["jpg", "jpeg", "png", "svg", "webp"],
+        resource_type: "image",
+      };
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 2 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+      "image/svg+xml",
+      "image/webp",
+    ];
+    if (allowedTypes.includes(file.mimetype)) cb(null, true);
+    else cb(new Error("Invalid file type. Allowed: JPG, PNG, SVG, WEBP"));
+  },
+}).fields([
+  { name: "logo", maxCount: 1 },
+  { name: "signature", maxCount: 1 },
+]);
+
 export default upload;
