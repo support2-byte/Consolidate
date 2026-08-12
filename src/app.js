@@ -16,6 +16,7 @@ import monitorRoutes from "./modules/monitoring/monitorRoutes.js";
 import internalRoutes from "./modules/intenral/internal.route.js";
 import notificationRoutes from "./modules/notifications/notification.route.js";
 import kycRoutes from "./modules/kyc/kyc.route.js";
+import appCustomerRoutes from "./modules/mobile-app/customers/auth.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
 import {
@@ -129,12 +130,12 @@ app.use("/api/internal", internalRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/kyc", kycRoutes);
 
-app.use(notFoundHandler);
-app.use(globalErrorHandler);
-
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
+
+app.use(notFoundHandler);
+app.use(globalErrorHandler);
 
 export default app;
