@@ -16,7 +16,6 @@ import monitorRoutes from "./modules/monitoring/monitorRoutes.js";
 import internalRoutes from "./modules/intenral/internal.route.js";
 import notificationRoutes from "./modules/notifications/notification.route.js";
 import kycRoutes from "./modules/kyc/kyc.route.js";
-import appCustomerRoutes from "./modules/mobile-app/customers/auth.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
 import {
