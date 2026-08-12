@@ -2033,7 +2033,6 @@ function getStatusMessage(status) {
     "shipment delivered": "Your shipment has been successfully delivered.",
   };
 
-  // Return the matching message or a safe generic fallback
   return (
     messages[normalized] ||
     "The status of your shipment has been updated. We’ll keep you informed as it progresses."
@@ -2068,10 +2067,8 @@ function safeParseJsonArray(val) {
   try {
     const parsed = JSON.parse(val);
     if (Array.isArray(parsed)) return parsed;
-    // If parsed value is a string, wrap in array
     if (typeof parsed === "string") return [parsed];
   } catch {
-    // Fallback: treat as comma-separated string or single value
     return val
       .toString()
       .split(",")
@@ -4889,12 +4886,27 @@ export const getAssignedOrderById = async (req, res) => {
 };
 
 function normalizeReceiver(row) {
+  const kycApproved = row.receiver_kyc_status === "approved";
+  const dropOff = (row.drop_off_details || [])[0] || {};
   return {
     id: row.id,
-    receiverName: row.receiver_name || "",
-    receiverContact: row.receiver_contact || "",
-    receiverAddress: row.receiver_address || "",
-    receiverEmail: row.receiver_email || "",
+    receiverName: kycApproved
+      ? row.receiver_kyc_name
+      : row.receiver_customer_name || row.receiver_name || "",
+    receiverContact: kycApproved
+      ? row.receiver_kyc_phone
+      : row.receiver_customer_phone || row.receiver_contact || "",
+    receiverAddress: kycApproved
+      ? row.receiver_kyc_address
+      : row.receiver_customer_address || row.receiver_address || "",
+    receiverEmail: kycApproved
+      ? row.receiver_kyc_email
+      : row.receiver_customer_email || row.receiver_email || "",
+    kycApproved,
+    emiratesId: row.receiver_emirates_id || "",
+    passportNumber: row.receiver_passport_number || "",
+    tradeLicense: row.receiver_trade_license || "",
+    signatureUrl: row.receiver_signature_url || "",
     containers: (() => {
       try {
         return typeof row.containers === "string"
@@ -4905,8 +4917,13 @@ function normalizeReceiver(row) {
       }
     })(),
     shippingdetails: row.shippingdetails || [],
-    shippingDetails: row.shippingdetails || [],
     drop_off_details: row.drop_off_details || [],
+    truck_number: dropOff.plate_no || "",
+    plate_no: dropOff.plate_no || "",
+    drop_method: dropOff.drop_method || "",
+    dropoff_name: dropOff.dropoff_name || "",
+    drop_off_mobile: dropOff.drop_off_mobile || "",
+    drop_date: dropOff.drop_date || "",
   };
 }
 
@@ -4918,12 +4935,51 @@ export async function getPdfData(req, res) {
       return res.status(400).json({ error: "Invalid order ID" });
     }
 
+    const KYC_LATERAL = (refColumn) => `
+      LEFT JOIN LATERAL (
+        SELECT
+          kf.id,
+          kf.status,
+          kf.name,
+          kf.email,
+          kf.phone,
+          kf.address,
+          kf.emirates_id,
+          kf.passport_number,
+          kf.trade_license,
+          kf.signature_url
+        FROM kyc_form kf
+        WHERE kf.customer_ref = ${refColumn}
+          AND kf.status = 'approved'
+        ORDER BY kf.created_at DESC
+        LIMIT 1
+      ) kyc ON TRUE
+    `;
+
+    const CUSTOMER_LATERAL = (refColumn) => `
+      LEFT JOIN customers cust ON cust.zoho_id = ${refColumn}
+    `;
+
     const RECEIVERS_QUERY = `
       SELECT
         r.id, r.order_id,
         r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
+        r.receiver_ref,
         r.containers,
-        sd_full.shippingdetails
+        sd_full.shippingdetails,
+        kyc.status           AS receiver_kyc_status,
+        kyc.name             AS receiver_kyc_name,
+        kyc.email            AS receiver_kyc_email,
+        kyc.phone            AS receiver_kyc_phone,
+        kyc.address          AS receiver_kyc_address,
+        kyc.emirates_id      AS receiver_emirates_id,
+        kyc.passport_number  AS receiver_passport_number,
+        kyc.trade_license    AS receiver_trade_license,
+        kyc.signature_url    AS receiver_signature_url,
+        cust.contact_name    AS receiver_customer_name,
+        cust.email           AS receiver_customer_email,
+        cust.phone_number    AS receiver_customer_phone,
+        cust.address         AS receiver_customer_address
       FROM receivers r
       LEFT JOIN LATERAL (
         SELECT json_agg(
@@ -4938,6 +4994,11 @@ export async function getPdfData(req, res) {
             'totalNumber', COALESCE(oi.total_number, 0)::int,
             'weight', COALESCE(oi.weight, 0)::numeric,
             'itemRef', COALESCE(oi.item_ref, ''),
+            -- status / consignmentStatus: order_items' own lifecycle fields.
+            -- Previously omitted from the API response entirely, so the
+            -- frontend/PDF never saw e.g. "Loaded into Container".
+            'status', COALESCE(oi.status, ''),
+            'consignmentStatus', COALESCE(oi.consignment_status, ''),
             'trackingEta', TO_CHAR(ot.eta, 'YYYY-MM-DD'),
             -- containerAssignments: real assignment records for this item,
             -- sourced from container_assignment_history by detail_id, NOT
@@ -4987,6 +5048,8 @@ export async function getPdfData(req, res) {
         ) cah_agg ON TRUE
         WHERE oi.receiver_id = r.id
       ) sd_full ON TRUE
+      ${KYC_LATERAL("r.receiver_ref")}
+      ${CUSTOMER_LATERAL("r.receiver_ref")}
       WHERE r.order_id = $1
       ORDER BY r.id
     `;
@@ -5030,18 +5093,30 @@ export async function getPdfData(req, res) {
 
     const orderResult = await client.query(
       `
-        SELECT
-          o.id, o.booking_ref, o.rgl_booking_number, o.status, o.transport_type,
-          o.place_of_loading, o.final_destination, o.place_of_delivery,
-          o.truck_number, o.created_at,
-          s.sender_name, s.sender_contact, s.sender_address, s.sender_email,
-          t.transport_type, t.truck_number, t.drop_method, t.dropoff_name,
-          t.drop_off_mobile, t.plate_no, TO_CHAR(t.drop_date,'YYYY-MM-DD') AS drop_date
-        FROM orders o
-        LEFT JOIN senders s ON o.id = s.order_id
-        LEFT JOIN transport_details t ON o.id = t.order_id
-        WHERE o.id = $1
-      `,
+    SELECT
+      o.id, o.booking_ref, o.rgl_booking_number, o.status, o.transport_type,
+      o.place_of_loading, o.final_destination, o.place_of_delivery,
+      o.truck_number, o.created_at,
+      s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref,
+      kyc.status           AS sender_kyc_status,
+      kyc.name             AS sender_kyc_name,
+      kyc.email            AS sender_kyc_email,
+      kyc.phone            AS sender_kyc_phone,
+      kyc.address          AS sender_kyc_address,
+      kyc.emirates_id      AS sender_emirates_id,
+      kyc.passport_number  AS sender_passport_number,
+      kyc.trade_license    AS sender_trade_license,
+      kyc.signature_url    AS sender_signature_url,
+      cust.contact_name    AS sender_customer_name,
+      cust.email           AS sender_customer_email,
+      cust.phone_number    AS sender_customer_phone,
+      cust.address         AS sender_customer_address
+    FROM orders o
+    LEFT JOIN senders s ON o.id = s.order_id
+    ${KYC_LATERAL("s.sender_ref")}
+    ${CUSTOMER_LATERAL("s.sender_ref")}
+    WHERE o.id = $1
+  `,
       [orderId],
     );
 
@@ -5096,8 +5171,48 @@ export async function getPdfData(req, res) {
       };
     }
 
+    const senderKycApproved = orderRow.sender_kyc_status === "approved";
+
+    const sender = {
+      name: senderKycApproved
+        ? orderRow.sender_kyc_name
+        : orderRow.sender_customer_name || orderRow.sender_name || "",
+      email: senderKycApproved
+        ? orderRow.sender_kyc_email
+        : orderRow.sender_customer_email || orderRow.sender_email || "",
+      contact: senderKycApproved
+        ? orderRow.sender_kyc_phone
+        : orderRow.sender_customer_phone || orderRow.sender_contact || "",
+      address: senderKycApproved
+        ? orderRow.sender_kyc_address
+        : orderRow.sender_customer_address || orderRow.sender_address || "",
+      ref: orderRow.sender_ref,
+      kycApproved: senderKycApproved,
+      emiratesId: orderRow.sender_emirates_id || "",
+      passportNumber: orderRow.sender_passport_number || "",
+      tradeLicense: orderRow.sender_trade_license || "",
+      signatureUrl: orderRow.sender_signature_url || "",
+    };
+
+    const topDropOff = receivers[0]?.drop_off_details?.[0] || {};
+
     res.json({
-      ...orderRow,
+      id: orderRow.id,
+      booking_ref: orderRow.booking_ref,
+      rgl_booking_number: orderRow.rgl_booking_number,
+      status: orderRow.status,
+      transport_type: orderRow.transport_type,
+      place_of_loading: orderRow.place_of_loading,
+      final_destination: orderRow.final_destination,
+      place_of_delivery: orderRow.place_of_delivery,
+      created_at: orderRow.created_at,
+      drop_method: topDropOff.drop_method || "",
+      dropoff_name: topDropOff.dropoff_name || "",
+      drop_off_mobile: topDropOff.drop_off_mobile || "",
+      truck_number: topDropOff.plate_no || "",
+      plate_no: topDropOff.plate_no || "",
+      drop_date: topDropOff.drop_date || "",
+      sender,
       receivers,
       consignment,
     });

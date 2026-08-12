@@ -12,6 +12,8 @@ import {
   deleteUser,
   adminForceResetPassword,
   logoutAll,
+  changePassword,
+  requestResetPassword,
 } from "../auth/auth.controller.js";
 
 import {
@@ -85,6 +87,8 @@ router.post("/register", register);
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/login", login);
+
+router.post("/request-reset", requestResetPassword);
 
 /**
  * @swagger
@@ -282,8 +286,8 @@ router.delete(
 
 /**
  * @swagger
- * /auth/admin/users/{id}/reset-password:
- *   post:
+ * /auth/reset-password/{id}:
+ *   put:
  *     summary: Admin force-reset a user's password
  *     tags: [Users]
  *     security:
@@ -301,8 +305,8 @@ router.delete(
  *       404:
  *         description: User not found
  */
-router.post(
-  "/admin/users/:id/reset-password",
+router.put(
+  "/reset-password/:id",
   requireAuth,
   requirePermission("users.edit"),
   adminForceResetPassword,
@@ -546,5 +550,7 @@ router.put(
  *         description: Not authenticated
  */
 router.post("/logout-all", requireAuth, logoutAll);
+
+router.post("/change-password", requireAuth, changePassword);
 
 export default router;

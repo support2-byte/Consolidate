@@ -15,8 +15,13 @@ import optionsRoutes from "./modules/options/options.routes.js";
 import monitorRoutes from "./modules/monitoring/monitorRoutes.js";
 import internalRoutes from "./modules/intenral/internal.route.js";
 import notificationRoutes from "./modules/notifications/notification.route.js";
+import kycRoutes from "./modules/kyc/kyc.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
+import {
+  globalErrorHandler,
+  notFoundHandler,
+} from "./middleware/errorHandler.js";
 
 dotenv.config();
 
@@ -42,7 +47,7 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
       "https://consolidatetracking.onrender.com",
       "https://imaginative-pothos-0a1193.netlify.app",
       "https://orders.royalgulfshipping.com",
-      "https://consolidatetracking-1.onrender.com",
+      "https://trackorder.royalgulfshipping.com",
     ];
 
 function isOriginAllowed(origin) {
@@ -122,6 +127,10 @@ app.use("/api/customerPanals", getCustomersPanel);
 app.use("/api/monitoring", monitorRoutes);
 app.use("/api/internal", internalRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/kyc", kycRoutes);
+
+app.use(notFoundHandler);
+app.use(globalErrorHandler);
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.get("/health", (_req, res) => {

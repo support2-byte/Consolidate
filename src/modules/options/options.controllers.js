@@ -1307,3 +1307,442 @@ export const getModules = async (req, res) => {
     });
   }
 };
+
+export const createCompany = async (req, res) => {
+  const {
+    company,
+    email,
+    phone,
+    address,
+    status = true,
+    primary_color,
+    secondary_color,
+  } = req.body;
+  const created_by = req.user.email;
+
+  try {
+    const signature_url = req.files?.signature?.[0]?.path;
+    const logo_url = req.files?.logo?.[0]?.path;
+
+    if (
+      !company ||
+      !email ||
+      !phone ||
+      !address ||
+      !created_by ||
+      !primary_color ||
+      !secondary_color ||
+      !signature_url
+    ) {
+      logger.warn("createCompany validation failed", { body: req.body });
+      return res.status(400).json({
+        success: false,
+        message:
+          "company, email, phone, address, created_by, primary_color, secondary_color and signature file are required",
+      });
+    }
+
+    const query = `
+      INSERT INTO public.companies
+        (company, email, phone, address, signature_url, logo_url, status, created_at, created_by, primary_color, secondary_color)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10)
+      RETURNING *;
+    `;
+    const values = [
+      company,
+      email,
+      phone,
+      address,
+      signature_url,
+      logo_url || null,
+      status,
+      created_by,
+      primary_color,
+      secondary_color,
+    ];
+
+    const { rows } = await pool.query(query, values);
+
+    logger.info("Company created", {
+      id: rows[0].id,
+      company: rows[0].company,
+    });
+    return res.status(201).json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.log(error);
+
+    logger.error("Error in createCompany", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to create company" });
+  }
+};
+
+export const getCompanies = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (id) {
+      const { rows } = await pool.query(
+        "SELECT * FROM public.companies WHERE id = $1",
+        [id],
+      );
+
+      if (rows.length === 0) {
+        logger.warn("getCompanies: company not found", { id });
+        return res
+          .status(404)
+          .json({ success: false, message: "Company not found" });
+      }
+
+      return res.status(200).json({ success: true, data: rows[0] });
+    }
+
+    const { status, page = 1, limit = 20 } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    const conditions = [];
+    const values = [];
+
+    if (status !== undefined) {
+      values.push(status === "true");
+      conditions.push(`status = $${values.length}`);
+    }
+
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+
+    values.push(Number(limit), offset);
+    const query = `
+      SELECT * FROM public.companies
+      ${whereClause}
+      ORDER BY id DESC
+      LIMIT $${values.length - 1} OFFSET $${values.length};
+    `;
+
+    const { rows } = await pool.query(query, values);
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM public.companies ${whereClause}`,
+      values.slice(0, conditions.length),
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      pagination: {
+        total: countResult.rows[0].total,
+        page: Number(page),
+        limit: Number(limit),
+      },
+    });
+  } catch (error) {
+    logger.error("Error in getCompanies", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch companies" });
+  }
+};
+
+export const updateCompany = async (req, res) => {
+  const { id } = req.params;
+  const allowedFields = [
+    "company",
+    "email",
+    "phone",
+    "address",
+    "status",
+    "primary_color",
+    "secondary_color",
+  ];
+
+  try {
+    const updates = [];
+    const values = [];
+
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        values.push(req.body[field]);
+        updates.push(`${field} = $${values.length}`);
+      }
+    });
+
+    const signature_url = req.files?.signature?.[0]?.path;
+    const logo_url = req.files?.logo?.[0]?.path;
+
+    if (signature_url) {
+      values.push(signature_url);
+      updates.push(`signature_url = $${values.length}`);
+    }
+    if (logo_url) {
+      values.push(logo_url);
+      updates.push(`logo_url = $${values.length}`);
+    }
+
+    if (updates.length === 0) {
+      logger.warn("updateCompany: no valid fields provided", {
+        id,
+        body: req.body,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "No valid fields provided to update",
+      });
+    }
+
+    values.push(id);
+    const query = `
+      UPDATE public.companies
+      SET ${updates.join(", ")}
+      WHERE id = $${values.length}
+      RETURNING *;
+    `;
+
+    const { rows } = await pool.query(query, values);
+
+    if (rows.length === 0) {
+      logger.warn("updateCompany: company not found", { id });
+      return res
+        .status(404)
+        .json({ success: false, message: "Company not found" });
+    }
+
+    logger.info("Company updated", {
+      id,
+      updatedFields: Object.keys(req.body),
+    });
+    return res.status(200).json({ success: true, data: rows[0] });
+  } catch (error) {
+    logger.error("Error in updateCompany", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to update company" });
+  }
+};
+
+export const createDocumentTemplate = async (req, res) => {
+  const { name, template, status = true, company_id } = req.body;
+  const created_by = req.user.email;
+
+  try {
+    if (!name || !template || !created_by || !company_id) {
+      logger.warn("createDocumentTemplate validation failed", {
+        body: req.body,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "name, template, created_by and company_id are required",
+      });
+    }
+
+    const company = await pool.query(
+      "SELECT id FROM public.companies WHERE id = $1",
+      [company_id],
+    );
+    if (company.rows.length === 0) {
+      logger.warn("createDocumentTemplate: company not found", { company_id });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid company_id" });
+    }
+
+    const query = `
+      INSERT INTO public.document_templates
+        (name, template, status, created_at, created_by, company_id)
+      VALUES
+        ($1, $2, $3, NOW(), $4, $5)
+      RETURNING *;
+    `;
+    const values = [name, template, status, created_by, company_id];
+
+    const { rows } = await pool.query(query, values);
+
+    logger.info("Document template created", {
+      id: rows[0].id,
+      name: rows[0].name,
+    });
+    return res.status(201).json({ success: true, data: rows[0] });
+  } catch (error) {
+    logger.error("Error in createDocumentTemplate", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to create document template" });
+  }
+};
+
+export const getDocumentTemplates = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (id) {
+      const query = `
+        SELECT
+          dt.*,
+          c.company AS company_name,
+          c.logo_url,
+          c.signature_url,
+          c.primary_color,
+          c.secondary_color
+        FROM public.document_templates dt
+        JOIN public.companies c ON c.id = dt.company_id
+        WHERE dt.id = $1;
+      `;
+      const { rows } = await pool.query(query, [id]);
+
+      if (rows.length === 0) {
+        logger.warn("getDocumentTemplates: template not found", { id });
+        return res
+          .status(404)
+          .json({ success: false, message: "Document template not found" });
+      }
+
+      return res.status(200).json({ success: true, data: rows[0] });
+    }
+
+    const { status, company_id, page = 1, limit = 20 } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    const conditions = [];
+    const values = [];
+
+    if (status !== undefined) {
+      values.push(status === "true");
+      conditions.push(`dt.status = $${values.length}`);
+    }
+    if (company_id !== undefined) {
+      values.push(company_id);
+      conditions.push(`dt.company_id = $${values.length}`);
+    }
+
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+
+    values.push(Number(limit), offset);
+    const query = `
+      SELECT
+        dt.*,
+        c.company AS company_name,
+        c.logo_url,
+        c.signature_url,
+        c.primary_color,
+        c.secondary_color
+      FROM public.document_templates dt
+      JOIN public.companies c ON c.id = dt.company_id
+      ${whereClause}
+      ORDER BY dt.id DESC
+      LIMIT $${values.length - 1} OFFSET $${values.length};
+    `;
+
+    const { rows } = await pool.query(query, values);
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM public.document_templates dt ${whereClause}`,
+      values.slice(0, conditions.length),
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      pagination: {
+        total: countResult.rows[0].total,
+        page: Number(page),
+        limit: Number(limit),
+      },
+    });
+  } catch (error) {
+    logger.error("Error in getDocumentTemplates", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch document templates" });
+  }
+};
+
+export const updateDocumentTemplate = async (req, res) => {
+  const { id } = req.params;
+  const allowedFields = ["name", "template", "status", "company_id"];
+
+  try {
+    if (req.body.company_id !== undefined) {
+      const company = await pool.query(
+        "SELECT id FROM public.companies WHERE id = $1",
+        [req.body.company_id],
+      );
+      if (company.rows.length === 0) {
+        logger.warn("updateDocumentTemplate: company not found", {
+          company_id: req.body.company_id,
+        });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid company_id" });
+      }
+    }
+
+    const updates = [];
+    const values = [];
+
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        values.push(req.body[field]);
+        updates.push(`${field} = $${values.length}`);
+      }
+    });
+
+    if (updates.length === 0) {
+      logger.warn("updateDocumentTemplate: no valid fields provided", {
+        id,
+        body: req.body,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "No valid fields provided to update",
+      });
+    }
+
+    values.push(id);
+    const query = `
+      UPDATE public.document_templates
+      SET ${updates.join(", ")}
+      WHERE id = $${values.length}
+      RETURNING *;
+    `;
+
+    const { rows } = await pool.query(query, values);
+
+    if (rows.length === 0) {
+      logger.warn("updateDocumentTemplate: template not found", { id });
+      return res
+        .status(404)
+        .json({ success: false, message: "Document template not found" });
+    }
+
+    logger.info("Document template updated", {
+      id,
+      updatedFields: Object.keys(req.body),
+    });
+    return res.status(200).json({ success: true, data: rows[0] });
+  } catch (error) {
+    logger.error("Error in updateDocumentTemplate", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to update document template" });
+  }
+};
