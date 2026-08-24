@@ -2,27 +2,13 @@ import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import { v2 as cloudinary } from "cloudinary";
+import { withTransaction } from "../../services/transaction.js";
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
-
-async function withTransaction(operation) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await operation(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-}
 
 function isValidDate(dateString) {
   if (!dateString) return false;
@@ -510,15 +496,8 @@ export async function updateContainer(req, res) {
       return res.status(404).json({ error: "Container not found" });
     }
 
-    if (
-      updates.owner_type &&
-      updates.owner_type !== current.rows[0].owner_type
-    ) {
-      await client.query("ROLLBACK");
-      return res
-        .status(400)
-        .json({ error: "Cannot change owner_type manually" });
-    }
+    const newOwnerType = updates.owner_type || current.rows[0].owner_type;
+    const ownerTypeChanged = newOwnerType !== current.rows[0].owner_type;
 
     await client.query(
       `UPDATE container_master
@@ -530,8 +509,9 @@ export async function updateContainer(req, res) {
          available_at        = $5,
          location            = $6,
          derived_status      = $7,
+         owner_type          = $8,
          updated_at          = NOW()
-       WHERE cid = $8`,
+       WHERE cid = $9`,
       [
         n(updates.container_number),
         n(updates.container_size),
@@ -540,9 +520,24 @@ export async function updateContainer(req, res) {
         n(updates.available_at),
         n(updates.location),
         n(updates.derived_status),
+        newOwnerType,
         cid,
       ],
     );
+
+    if (ownerTypeChanged) {
+      if (newOwnerType === "soc") {
+        await client.query(
+          `DELETE FROM container_hire_details WHERE cid = $1`,
+          [cid],
+        );
+      } else if (newOwnerType === "coc") {
+        await client.query(
+          `DELETE FROM container_purchase_details WHERE cid = $1`,
+          [cid],
+        );
+      }
+    }
 
     await client.query(
       "UPDATE container_status SET location = $1 WHERE cid = $2",
