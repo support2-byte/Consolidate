@@ -2,6 +2,7 @@ import pool from "../../db/pool.js";
 import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import logger from "../../services/logger.js";
+import { withTransaction } from "../../services/transaction.js";
 
 function safeParseJsonArray(val) {
   if (!val) return [];
@@ -10,10 +11,8 @@ function safeParseJsonArray(val) {
   try {
     const parsed = JSON.parse(val);
     if (Array.isArray(parsed)) return parsed;
-    // If parsed value is a string, wrap in array
     if (typeof parsed === "string") return [parsed];
   } catch {
-    // Fallback: treat as comma-separated string or single value
     return val
       .toString()
       .split(",")
@@ -823,21 +822,6 @@ async function logToTracking(
       );
     }
     return { success: false, error: error.message };
-  }
-}
-
-async function withTransaction(operation) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await operation(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
   }
 }
 
