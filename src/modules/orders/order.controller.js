@@ -140,7 +140,6 @@ export async function createOrder(req, res) {
       });
     }
 
-    // ── Load send_email gate per status from the statuses table ──
     const statusEmailRes = await client.query(
       `SELECT order_status, send_email FROM statuses`,
     );
@@ -193,7 +192,6 @@ export async function createOrder(req, res) {
     const trackingData = [];
     const trackingRows = [];
 
-    // ── Owner (sender) email gate: requested flag AND status send_email must both be true ──
     const ownerStatus = b.status || "Created";
     const ownerRequestedEmail =
       b.send_email_notification === true ||
@@ -270,8 +268,8 @@ export async function createOrder(req, res) {
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
           receiver_marks_and_number, eta, etd, shipping_line,
           consignment_vessel, consignment_number, consignment_marks, consignment_voyage,
-          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered, item_ref
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, $21)
+          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered, item_ref, receiver_ref
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
         RETURNING id`,
         [
           orderId,
@@ -295,12 +293,18 @@ export async function createOrder(req, res) {
           p.full_partial || "Full",
           p.qty_delivered ? parseInt(p.qty_delivered) : null,
           receiverItemRefs,
+          p[`${partyPrefix}_ref`] ||
+            p[`${partyPrefix}Ref`] ||
+            p.receiver_ref ||
+            p.receiverRef ||
+            p.sender_ref ||
+            p.senderRef ||
+            "",
         ],
       );
 
       const receiverId = recResult.rows[0].id;
 
-      // ── Party email gate: requested flag AND this party's status send_email must both be true ──
       const partyStatus = p.status || b.status || "Created";
       const partyRequestedEmail =
         p.send_email_notification === true ||
@@ -373,8 +377,8 @@ export async function createOrder(req, res) {
           req,
           `INSERT INTO order_items (
             order_id, receiver_id, item_ref, pickup_location, delivery_address,
-            category, subcategory, type, total_number, weight, container_details
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            category, subcategory, type, total_number, weight, container_details, status
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
           [
             orderId,
             receiverId,
@@ -389,6 +393,7 @@ export async function createOrder(req, res) {
             JSON.stringify(
               item.containerDetails || item.container_details || [],
             ),
+            item.status || "Created",
           ],
         );
 
@@ -1999,21 +2004,6 @@ export async function getOrderById(req, res) {
     });
   } finally {
     if (client) client.release();
-  }
-}
-
-async function withTransaction(operation) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await operation(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
   }
 }
 
