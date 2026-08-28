@@ -32,160 +32,113 @@ function buildErrorHtml({
   const date = new Date(timestamp).toLocaleString();
   const hasFile = Boolean(filename && fileUrl);
 
-  return `
-  <!DOCTYPE html>
-  <html>
-  <body style="margin:0;padding:0;font-family:Segoe UI, Arial, sans-serif;color:#334155;">
-    <table width="100%" cellpadding="0" cellspacing="0">
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Error Notification · RGSL</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f7fc; margin: 0; padding: 40px 20px; color: #1f2937; }
+  .card { max-width: 700px; margin: 0 auto; background: #ffffff; border-radius: 24px; overflow: hidden; box-shadow: 0 12px 40px rgba(9, 125, 118, 0.15), 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #eef2f6; }
+  .header { background: linear-gradient(135deg, #097D76 0%, #06655f 100%); color: white; padding: 32px; text-align: center; border-bottom: 4px solid #F38120; }
+  .logo-area { display: block; text-align: center; margin-bottom: 20px; }
+  .logo-plate { display: inline-block; background: #ffffff; border-radius: 12px; padding: 12px 20px; }
+  .logo-img { height: 48px; display: block; }
+  .header-title { font-size: 24px; font-weight: 700; margin: 0; }
+  .header-subtitle { font-size: 13px; margin: 8px 0 0; color: rgba(255,255,255,0.85); }
+  .content { padding: 36px 32px; line-height: 1.6; font-size: 15px; color: #334155; }
+  .body-text { margin-bottom: 24px; font-weight: 600; color: #475569; }
+  .detail-table { width: 100%; border-collapse: collapse; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+  .detail-table td { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; }
+  .detail-label { width: 140px; background: #f8fafc; font-weight: 600; color: #097D76; vertical-align: top; }
+  .error-value { color: #b91c1c; font-weight: 600; }
+  .pre-box { margin: 0; white-space: pre-wrap; word-break: break-word; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.5; color: #334155; max-height: 280px; overflow: auto; }
+  .info-box { background: #f8fafc; border: 1px solid #e2e8f0; border-left: 4px solid #F38120; border-radius: 12px; padding: 20px; margin-top: 28px; }
+  .info-title { font-size: 15px; font-weight: 600; color: #097D76; margin-bottom: 12px; }
+  .btn-wrapper { text-align: center; margin: 28px 0 0; }
+  .btn { display: inline-block; background: #F38120; color: #ffffff !important; text-decoration: none; padding: 12px 30px; border-radius: 40px; font-weight: 600; font-size: 14px; }
+  .footer { background: #0f172a; color: white; padding: 32px; text-align: center; border-top: 1px solid #e2e8f0; }
+  .footer-logo { height: 36px; margin-bottom: 16px; opacity: 0.8; }
+  .footer-text { font-size: 13px; color: #94a3b8; line-height: 1.5; margin-bottom: 16px; }
+  .footer-divider { height: 1px; background: #334155; margin: 20px 0; }
+  .footer-copyright { font-size: 12px; color: #64748b; }
+  @media (max-width: 640px) {
+    body { padding: 16px; }
+    .card { border-radius: 16px; }
+    .header { padding: 24px 20px; }
+    .content { padding: 24px 20px; }
+    .footer { padding: 24px 20px; }
+    .header-title { font-size: 20px; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <div class="logo-area">
+      <div class="logo-plate">
+        <img src="https://royalgulfshipping.com/wp-content/uploads/2023/08/RGSL-LOGO.png" alt="Royal Gulf Shipping & Logistics" class="logo-img">
+      </div>
+    </div>
+    <h2 class="header-title">Error Log Notification</h2>
+    <p class="header-subtitle">${safe(date)}</p>
+  </div>
+  <div class="content">
+    <p class="body-text">An error occurred and has been logged${hasFile ? " (log file attached below)" : ""}.</p>
+
+    <table class="detail-table" cellpadding="0" cellspacing="0">
       <tr>
-        <td align="center" style="padding:32px 16px;">
-          <table width="100%" cellpadding="0" cellspacing="0" style="
-            max-width:700px;
-            background:#ffffff;
-            border:1px solid #e2e8f0;
-            border-radius:10px;
-            overflow:hidden;
-          ">
-
-            <!-- Header -->
-            <tr>
-              <td style="background:#0f766e;padding:20px 24px;">
-                <table width="100%">
-                  <tr>
-                    <td>
-                      <h2 style="margin:0;color:#ffffff;font-size:20px;font-weight:600;">
-                        RGSL - Error Log Notification
-                      </h2>
-                    </td>
-                    <td align="right">
-                      <span style="color:rgba(255,255,255,0.85);font-size:12px;">
-                        ${safe(date)}
-                      </span>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
-
-            <!-- Body -->
-            <tr>
-              <td style="padding:28px 24px;">
-
-                <p style="margin:0 0 24px;color:#475569;line-height:1.6;font-weight:600;">
-                  An error occurred and has been logged${hasFile ? " (log file attached below)" : ""}.
-                </p>
-
-                <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #e2e8f0;">
-                  <tr>
-                    <td style="width:140px;padding:12px 16px;background:#f8fafc;font-weight:600;border-bottom:1px solid #e2e8f0;">
-                      API
-                    </td>
-                    <td style="padding:12px 16px;border-bottom:1px solid #e2e8f0;">
-                      ${safe(apiName)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td style="padding:12px 16px;background:#f8fafc;font-weight:600;vertical-align:top;border-bottom:1px solid #e2e8f0;">
-                      Error Message
-                    </td>
-                    <td style="padding:12px 16px;border-bottom:1px solid #e2e8f0;color:#b91c1c;font-weight:600;">
-                      ${safe(errorMessage)}
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td style="padding:12px 16px;background:#f8fafc;font-weight:600;vertical-align:top;border-bottom:1px solid #e2e8f0;">
-                      Stack Trace
-                    </td>
-                    <td style="padding:12px 16px;border-bottom:1px solid #e2e8f0;">
-                      <pre style="
-                        margin:0;
-                        white-space:pre-wrap;
-                        word-break:break-word;
-                        background:#f8fafc;
-                        border:1px solid #e2e8f0;
-                        border-radius:6px;
-                        padding:10px;
-                        font-size:12px;
-                        line-height:1.5;
-                        color:#334155;
-                        max-height:280px;
-                        overflow:auto;
-                      ">${safe(errorStack)}</pre>
-                    </td>
-                  </tr>
-
-                  <tr>
-                    <td style="padding:12px 16px;background:#f8fafc;font-weight:600;vertical-align:top;">
-                      Request Body
-                    </td>
-                    <td style="padding:12px 16px;">
-                      <pre style="
-                        margin:0;
-                        white-space:pre-wrap;
-                        word-break:break-word;
-                        background:#f8fafc;
-                        border:1px solid #e2e8f0;
-                        border-radius:6px;
-                        padding:10px;
-                        font-size:12px;
-                        line-height:1.5;
-                        color:#334155;
-                        max-height:200px;
-                        overflow:auto;
-                      ">${safe(requestBody)}</pre>
-                    </td>
-                  </tr>
-                </table>
-
-                ${
-                  hasFile
-                    ? `
-                <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;">
-                  <tr>
-                    <td>
-                      <p style="margin:0 0 8px;color:#475569;font-size:13px;">
-                        <strong>Log file:</strong> ${safe(filename)}
-                      </p>
-                      <a href="${fileUrl}"
-                         style="display:inline-block;margin:6px 0;padding:10px 18px;
-                                background-color:#f58220;color:#ffffff;text-decoration:none;
-                                border-radius:6px;font-weight:600;font-size:13px;">
-                        Download Log File
-                      </a>
-                    </td>
-                  </tr>
-                </table>`
-                    : `
-                <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;">
-                  <tr>
-                    <td style="font-size:13px;color:#64748b;">
-                      No log file was generated for this error.
-                    </td>
-                  </tr>
-                </table>`
-                }
-
-              </td>
-            </tr>
-
-            <!-- Footer -->
-            <tr>
-              <td style="background:#f58220;padding:14px 24px;">
-                <p style="margin:0;text-align:center;color:#ffffff;font-size:12px;">
-                  This is an automated notification from the application.
-                </p>
-              </td>
-            </tr>
-
-          </table>
-        </td>
+        <td class="detail-label">API</td>
+        <td>${safe(apiName)}</td>
+      </tr>
+      <tr>
+        <td class="detail-label">Error Message</td>
+        <td class="error-value">${safe(errorMessage)}</td>
+      </tr>
+      <tr>
+        <td class="detail-label">Stack Trace</td>
+        <td><pre class="pre-box">${safe(errorStack)}</pre></td>
+      </tr>
+      <tr>
+        <td class="detail-label" style="border-bottom:none;">Request Body</td>
+        <td style="border-bottom:none;"><pre class="pre-box" style="max-height:200px;">${safe(requestBody)}</pre></td>
       </tr>
     </table>
-  </body>
-  </html>
-  `;
+
+    ${
+      hasFile
+        ? `
+    <div class="info-box">
+      <div class="info-title">Log File</div>
+      <p style="margin:0 0 12px;color:#475569;font-size:14px;">${safe(filename)}</p>
+      <div class="btn-wrapper" style="margin-top:0;">
+        <a class="btn" href="${fileUrl}">Download Log File</a>
+      </div>
+    </div>`
+        : `
+    <div class="info-box">
+      <div class="info-title" style="margin-bottom:0;">No log file was generated for this error.</div>
+    </div>`
+    }
+  </div>
+  <div class="footer">
+    <img src="https://royalgulfshipping.com/wp-content/uploads/2023/08/RGSL-LOGO-white.png" alt="RGSL Logo" class="footer-logo">
+    <div class="footer-text">
+      Royal Gulf Shipping &amp; Logistics LLC
+      <br>
+      Automated system notification.
+    </div>
+    <div class="footer-divider"></div>
+    <div class="footer-copyright">
+      © ${new Date().getFullYear()} Royal Gulf Shipping LLC. All rights reserved.
+      <br>
+      <span style="color: #64748b; font-size: 11px; margin-top: 4px; display: block;">This is an automated notification. Please do not reply directly to this email.</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>`;
 }
 
 function buildErrorText({
@@ -235,43 +188,41 @@ const sendToMultipleRecipients = async (subject, html, text) => {
     return { success: false, error: "No recipients configured" };
   }
 
-  const emailPromises = recipients.map(async (recipient) => {
-    try {
-      const info = await transporter.sendMail({
-        to: recipient,
-        subject,
-        text,
-        html,
-        headers: {
-          "X-Priority": "1",
-          "X-MSMail-Priority": "High",
-        },
-      });
-      logger.info("Error notification email sent", {
-        recipient,
-        messageId: info.messageId,
-      });
-      return { success: true, recipient, messageId: info.messageId };
-    } catch (error) {
-      logger.error("Failed to send error notification email", {
-        recipient,
-        error: error.message,
-      });
-      return { success: false, recipient, error: error.message };
-    }
-  });
-
-  const results = await Promise.all(emailPromises);
-  const successful = results.filter((r) => r.success);
-  const failed = results.filter((r) => !r.success);
-
-  return {
-    total: recipients.length,
-    successful: successful.length,
-    failed: failed.length,
-    failedRecipients: failed.map((f) => f.recipient),
-    messageIds: successful.map((s) => s.messageId),
-  };
+  try {
+    const info = await transporter.sendMail({
+      to: recipients,
+      subject,
+      text,
+      html,
+      headers: {
+        "X-Priority": "1",
+        "X-MSMail-Priority": "High",
+      },
+    });
+    logger.info("Error notification email sent", {
+      recipients,
+      messageId: info.messageId,
+    });
+    return {
+      total: recipients.length,
+      successful: recipients.length,
+      failed: 0,
+      failedRecipients: [],
+      messageIds: [info.messageId],
+    };
+  } catch (error) {
+    logger.error("Failed to send error notification email", {
+      recipients,
+      error: error.message,
+    });
+    return {
+      total: recipients.length,
+      successful: 0,
+      failed: recipients.length,
+      failedRecipients: recipients,
+      messageIds: [],
+    };
+  }
 };
 
 const uploadLogToCloudinary = async (filePath, filename) => {

@@ -402,7 +402,7 @@ export async function createOrder(req, res) {
           senderId,
           owner.ref || null,
           receiverId,
-          item.status || "Order Created",
+          item.status || "Created",
           normEta,
           normEtd || normEta,
           req.user?.username || req.user?.email || req.user?.id || "system",
@@ -1179,7 +1179,7 @@ export const getOrders = async (req, res) => {
                       'weight', COALESCE(oi.weight,0),
                       'totalNumber', COALESCE(oi.total_number,0),
                       'itemRef', oi.item_ref,
-                      'status', oi.consignment_status,
+                      'status', oi.status,
 
                       'deliveredQty', COALESCE(oi.delivered_qty, 0)::int,
                       'remainingQty', COALESCE(oi.remaining_qty, oi.total_number, 0)::int,
@@ -1198,8 +1198,7 @@ export const getOrders = async (req, res) => {
                                 'container_number', cm.container_number
                               ),
 
-                              'status',
-                              COALESCE(cah.status, cm.status),
+                              'status', cah.status,
 
                               'assign_total_box',
                               COALESCE(oi.assigned_boxes::text, '0'),
@@ -1223,11 +1222,12 @@ export const getOrders = async (req, res) => {
                             ON cm.container_number = container_num
 
                           LEFT JOIN LATERAL (
-                            SELECT cah.status
+                          SELECT cah.status
                             FROM container_assignment_history cah
                             WHERE cah.order_id = o.id
                               AND cah.cid = cm.cid
-                            ORDER BY cah.id DESC
+                              AND cah.detail_id = oi.id
+                            ORDER BY cah.created_at DESC, cah.id DESC
                             LIMIT 1
                           ) cah ON true
 
@@ -1240,13 +1240,26 @@ export const getOrders = async (req, res) => {
                   )
                   FROM order_items oi
                   LEFT JOIN LATERAL (
-                    SELECT ot.eta, ot.status
-                    FROM order_tracking ot
-                    WHERE ot.receiver_id = r.id
-                      AND ot.item_ref = oi.item_ref
-                    ORDER BY ot.id DESC
-                    LIMIT 1
-                  ) ot ON true
+                  SELECT ot.eta, ot.status
+                  FROM (
+                    SELECT
+                      ot_inner.*,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY ot_inner.receiver_id, ot_inner.item_ref
+                        ORDER BY ot_inner.id DESC
+                      ) AS rn
+                    FROM order_tracking ot_inner
+                    WHERE ot_inner.receiver_id = r.id
+                      AND ot_inner.item_ref = oi.item_ref
+                  ) ot
+                  WHERE ot.rn = (
+                    SELECT COUNT(*)
+                    FROM order_items oi2
+                    WHERE oi2.receiver_id = oi.receiver_id
+                      AND oi2.item_ref = oi.item_ref
+                      AND oi2.id <= oi.id
+                  )
+                ) ot ON true
                   WHERE oi.receiver_id = r.id
                 ),
                 '[]'::jsonb
@@ -3589,6 +3602,49 @@ export async function updateSpecificItemsStatus(req, res) {
         await client.query(
           `UPDATE consignments SET status = 'Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IS DISTINCT FROM 'Delivered'`,
           [consId],
+        );
+      }
+    }
+
+    const containerLinkRes = await client.query(
+      `SELECT DISTINCT ON (detail_id) id, detail_id, cid
+        FROM container_assignment_history
+        WHERE detail_id = ANY($1::int[]) AND cid IS NOT NULL
+      ORDER BY detail_id, created_at DESC`,
+      [affectedItemIds],
+    );
+
+    const affectedCids = [...new Set(containerLinkRes.rows.map((r) => r.cid))];
+
+    for (const cid of affectedCids) {
+      const agg = await client.query(
+        `SELECT COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered
+       FROM order_items oi
+       JOIN (
+         SELECT DISTINCT ON (detail_id) detail_id, cid
+           FROM container_assignment_history
+          WHERE cid = $1
+          ORDER BY detail_id, created_at DESC
+       ) latest ON latest.detail_id = oi.id`,
+        [cid],
+      );
+
+      const { total, delivered } = agg.rows[0];
+
+      if (total > 0 && Number(delivered) === Number(total)) {
+        await client.query(
+          `UPDATE container_assignment_history cah
+          SET status = 'Shipment Delivered'
+         FROM (
+           SELECT DISTINCT ON (detail_id) id
+             FROM container_assignment_history
+            WHERE cid = $1
+            ORDER BY detail_id, created_at DESC
+         ) latest
+        WHERE cah.id = latest.id
+          AND cah.status IS DISTINCT FROM 'Shipment Delivered'`,
+          [cid],
         );
       }
     }
