@@ -1394,14 +1394,17 @@ export async function updateConsignment(req, res) {
       status: data.status,
       remarks: data.remarks,
       shipper: data.shipper,
+      shipper_id: data.shipper_id,
       shipper_address: data.shipper_address || data.shipperAddress,
       consignee: data.consignee,
+      consignee_id: data.consignee_id,
       consignee_address: data.consignee_address || data.consigneeAddress,
       origin: data.origin,
       destination: data.destination,
       eform: data.eform,
       eform_date: data.eform_date || data.eformDate,
       bank: data.bank,
+      bank_id: data.bank_id,
       consignment_value: data.consignment_value || data.consignmentValue,
       payment_type: data.paymentType || data.payment_type,
       vessel: data.vessel,
@@ -1484,14 +1487,17 @@ export async function updateConsignment(req, res) {
       status: input.status,
       remarks: input.remarks,
       shipper: input.shipper,
+      shipper_id: input.shipper_id,
       shipper_address: input.shipper_address,
       consignee: input.consignee,
+      consignee_id: input.consignee_id,
       consignee_address: input.consignee_address,
       origin: input.origin,
       destination: input.destination,
       eform: input.eform,
       eform_date: normalizeDate(input.eform_date),
       bank: input.bank,
+      bank_id: input.bank_id,
       consignment_value: input.consignment_value,
       payment_type: input.payment_type,
       vessel: input.vessel,
@@ -1702,14 +1708,6 @@ export async function updateConsignment(req, res) {
             eta: computedETA,
           });
         }
-      }
-
-      if (["In Transit", "Delivered"].includes(input.status)) {
-        await sendNotification(updatedConsignment, "updated");
-        logger.info(`[updateConsignment] Notification sent for status change`, {
-          consignment_id: id,
-          status: input.status,
-        });
       }
     });
 
@@ -2503,24 +2501,6 @@ export async function changeConsignmentStatus(req, res) {
         }
       }
     });
-
-    try {
-      const updated = await pool.query(
-        "SELECT * FROM consignments WHERE id = $1",
-        [numericId],
-      );
-
-      await sendNotification(
-        updated.rows[0],
-        `status_changed_to_${trimmedStatus}`,
-        {
-          reason: reason || "Manual change",
-          syncedOrders: syncOrderIds.length,
-          syncedStatus,
-          previousStatus: currentStatus,
-        },
-      );
-    } catch {}
 
     return res.json({
       success: true,
