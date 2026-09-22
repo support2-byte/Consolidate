@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { promisify } from "util";
+import { getEffectivePermissions } from "../../services/getEffectivePermissions.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -11,6 +12,32 @@ if (!JWT_SECRET) {
 const jwtVerify = promisify(jwt.verify);
 
 const ALLOWED_ALGORITHMS = ["HS256"];
+
+const permissionsCache = new Map();
+const PERMISSIONS_CACHE_TTL_MS = 60_000;
+
+async function getEffectivePermissionsCached(userId, roleId) {
+  const key = `${userId}:${roleId}`;
+  const cached = permissionsCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.permissions;
+  }
+
+  const permissions = await getEffectivePermissions(userId, roleId);
+  permissionsCache.set(key, {
+    permissions,
+    expiresAt: Date.now() + PERMISSIONS_CACHE_TTL_MS,
+  });
+  return permissions;
+}
+
+export function invalidatePermissionsCache(userId, roleId) {
+  if (userId && roleId) {
+    permissionsCache.delete(`${userId}:${roleId}`);
+    return;
+  }
+  permissionsCache.clear();
+}
 
 export async function requireAuth(req, res, next) {
   try {
@@ -28,12 +55,17 @@ export async function requireAuth(req, res, next) {
       algorithms: ALLOWED_ALGORITHMS,
     });
 
+    const permissions = await getEffectivePermissionsCached(
+      decoded.id,
+      decoded.roleId,
+    );
+
     req.user = {
       id: decoded.id,
       email: decoded.email,
       roleId: decoded.roleId,
       roleName: decoded.roleName,
-      permissions: decoded.permissions || [],
+      permissions,
     };
 
     next();
@@ -65,12 +97,17 @@ export async function optionalAuth(req, res, next) {
       algorithms: ALLOWED_ALGORITHMS,
     });
 
+    const permissions = await getEffectivePermissionsCached(
+      decoded.id,
+      decoded.roleId,
+    );
+
     req.user = {
       id: decoded.id,
       email: decoded.email,
       roleId: decoded.roleId,
       roleName: decoded.roleName,
-      permissions: decoded.permissions || [],
+      permissions,
     };
 
     next();

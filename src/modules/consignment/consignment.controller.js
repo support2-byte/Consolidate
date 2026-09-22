@@ -1183,7 +1183,7 @@ export async function createConsignment(req, res) {
     let ccNew = [];
 
     await withTransaction(async (client) => {
-      const result = await withUserAudit(req, insertQuery, values);
+      const result = await withUserAudit(req, client, insertQuery, values);
       newConsignment = result.rows[0];
 
       logger.info(`[createConsignment] Consignment row inserted`, {
@@ -1546,7 +1546,7 @@ export async function updateConsignment(req, res) {
         if (etaIndex !== -1) values[etaIndex + 1] = normalizeDate(computedETA);
       }
 
-      const updateResult = await withUserAudit(req, query, values);
+      const updateResult = await withUserAudit(req, client, query, values);
       if (updateResult.rowCount === 0) {
         logger.warn(`[updateConsignment] No consignment found for update`, {
           consignment_id: id,

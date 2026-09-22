@@ -7,6 +7,13 @@ import {
   sendShipmentEmail,
 } from "../../services/sendOrderEmail.js";
 import { sendKycFormEmail } from "../../services/sendKycEmail.js";
+import crypto from "crypto";
+import { withTransaction } from "../../services/transaction.js";
+import { generateOtp } from "../../services/generateOtp.js";
+
+const generateFormSeed = () => {
+  return crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+};
 
 const BATCH_SIZE = 20;
 const INTERNAL_SECRET = process.env.EMAIL_QUEUE_SECRET;
@@ -492,5 +499,295 @@ export const createKycForm = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Failed to save the form. Please try again." });
+  }
+};
+
+const REQUEST_TABLES = {
+  delivery: "delivery_requests",
+  storage: "storage_purchase",
+  dropoff: "drop_off_requests",
+};
+
+const INVOICE_TABLES = {
+  delivery: "delivery_invoices",
+  storage: "storage_invoices",
+  dropoff: "dropoff_invoices",
+};
+
+const REQUEST_ID_COLUMNS = {
+  delivery: "delivery_request_id",
+  storage: "storage_purchase_id",
+  dropoff: "drop_off_requests_id",
+};
+
+const STORAGE_TYPES = ["Dry Storage", "Cold Storage", "Hazardous"];
+
+const RECEIVER_SQL = `SELECT r.id, r.receiver_name AS name, r.receiver_email AS email
+                        FROM order_items oi
+                        JOIN receivers r ON r.id = oi.receiver_id
+                       WHERE oi.item_ref = $1`;
+
+const RECIPIENT_SQL = {
+  delivery: RECEIVER_SQL,
+  storage: RECEIVER_SQL,
+  dropoff: `SELECT s.id, s.sender_name AS name, s.sender_email AS email
+              FROM order_items oi
+              JOIN senders s ON s.id = oi.sender_id
+             WHERE oi.item_ref = $1`,
+};
+
+export const getRequests = async (req, res) => {
+  logger.info("Fetching pending customer requests");
+  try {
+    const requests = await pool.query(`
+        SELECT dr.id, dr.customer_ref AS customer_id, dr.shipment_ref AS shipment_id,
+              dr.delivery_amount AS amount, dr.status, dr.created_at,
+              'delivery' AS request_type,
+              NULL::varchar AS size, NULL::varchar AS storage_type,
+              oi.category, oi.subcategory, o.rgl_booking_number
+        FROM delivery_requests dr
+        LEFT JOIN order_items oi ON oi.item_ref = dr.shipment_ref
+        LEFT JOIN orders o ON o.id = oi.order_id
+
+        UNION ALL
+
+        SELECT sp.id, sp.customer_ref AS customer_id, sp.shipment_ref AS shipment_id,
+              sp.amount, sp.status, sp.created_at,
+              'storage' AS request_type,
+              CONCAT_WS(' ', sp.size_value, sp.size_unit) AS size, sp.type AS storage_type,
+              oi.category, oi.subcategory, o.rgl_booking_number
+        FROM storage_purchase sp
+        LEFT JOIN order_items oi ON oi.item_ref = sp.shipment_ref
+        LEFT JOIN orders o ON o.id = oi.order_id
+
+        UNION ALL
+
+        SELECT dor.id, dor.customer_ref AS customer_id, dor.shipment_ref AS shipment_id,
+              dor.pickup_amount AS amount, dor.status, dor.created_at,
+              'dropoff' AS request_type,
+              NULL::varchar AS size, NULL::varchar AS storage_type,
+              oi.category, oi.subcategory, o.rgl_booking_number
+        FROM drop_off_requests dor
+        LEFT JOIN order_items oi ON oi.item_ref = dor.shipment_ref
+        LEFT JOIN orders o ON o.id = oi.order_id
+
+        ORDER BY created_at DESC
+    `);
+
+    logger.info("Fetched pending customer requests", {
+      count: requests.rows.length,
+      delivery: requests.rows.filter((r) => r.request_type === "delivery")
+        .length,
+      storage: requests.rows.filter((r) => r.request_type === "storage").length,
+      dropoff: requests.rows.filter((r) => r.request_type === "dropoff").length,
+    });
+
+    return res.status(200).json({
+      success: true,
+      requests: requests.rows,
+    });
+  } catch (error) {
+    logger.error("Failed to get customer requests", {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const approveRequest = async (req, res) => {
+  const { type, id } = req.params;
+  const table = REQUEST_TABLES[type];
+  const invoiceTable = INVOICE_TABLES[type];
+
+  logger.info("Approve request initiated", { type, id });
+
+  if (!table || !invoiceTable) {
+    logger.warn("Approve request called with invalid type", { type, id });
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid request type" });
+  }
+
+  const storageType = req.body?.storage_type;
+  const storageAmount = Number(req.body?.amount);
+
+  if (
+    type === "storage" &&
+    (!STORAGE_TYPES.includes(storageType) || !(storageAmount > 0))
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Storage type and a valid amount are required",
+    });
+  }
+
+  try {
+    const result = await withTransaction(async (client) => {
+      const requestRow = await client.query(
+        `SELECT * FROM ${table} WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+        [id],
+      );
+
+      if (requestRow.rows.length === 0) {
+        logger.warn("Approve request found no pending row", { type, id });
+        return { conflict: true };
+      }
+
+      const row = requestRow.rows[0];
+      const customerId = row.customer_ref;
+      const shipmentId = row.shipment_ref;
+      const invoiceAmount =
+        type === "delivery"
+          ? row.delivery_amount
+          : type === "storage"
+            ? storageAmount
+            : row.pickup_amount;
+
+      if (invoiceAmount === undefined || invoiceAmount === null) {
+        logger.warn("Approve request has no resolvable amount", { type, id });
+        return { conflict: true, invalidAmount: true };
+      }
+
+      const recipientResult = await client.query(RECIPIENT_SQL[type], [
+        shipmentId,
+      ]);
+      const recipient = recipientResult.rows[0];
+
+      if (!recipient || !recipient.email) {
+        logger.warn("Approve request has no recipient email", { type, id });
+        return {
+          conflict: true,
+          message: "Recipient email not found for this shipment",
+        };
+      }
+
+      const invoiceId = `INV-${generateFormSeed()}`;
+
+      logger.info("Creating invoice for approved request", {
+        type,
+        id,
+        customerId,
+        shipmentId,
+        invoiceAmount,
+        invoiceId,
+        invoiceTable,
+      });
+
+      const invoice = await client.query(
+        `INSERT INTO ${invoiceTable}
+           (invoice_id, customer_ref, amount, shipment_ref, ${REQUEST_ID_COLUMNS[type]})
+          VALUES ($1, $2, $3, $4, $5) RETURNING id, invoice_id`,
+        [invoiceId, customerId, invoiceAmount, shipmentId, id],
+      );
+
+      await client.query(
+        `INSERT INTO invoice_email_queue
+           (recipient_id, recipient_name, recipient_email, email_type, item_ref, invoice_id, otp)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          recipient.id,
+          recipient.name || "Valued Customer",
+          recipient.email,
+          type,
+          shipmentId,
+          invoice.rows[0].id,
+          generateOtp(),
+        ],
+      );
+
+      if (type === "storage") {
+        await client.query(
+          `UPDATE storage_purchase
+              SET status = 'approved', type = $2, amount = $3
+            WHERE id = $1`,
+          [id, storageType, storageAmount],
+        );
+      } else {
+        await client.query(
+          `UPDATE ${table} SET status = 'approved' WHERE id = $1`,
+          [id],
+        );
+      }
+
+      logger.info("Request approved and invoice created", {
+        type,
+        id,
+        invoiceId: invoice.rows[0].invoice_id,
+      });
+
+      return { invoice: invoice.rows[0] };
+    });
+
+    if (result.conflict) {
+      return res.status(409).json({
+        success: false,
+        message:
+          result.message ||
+          (result.invalidAmount
+            ? "Request has no valid amount to invoice"
+            : "Request is no longer pending"),
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "Invoice created and request approved",
+      invoice: result.invoice,
+    });
+  } catch (error) {
+    logger.error("Failed to approve request", {
+      type,
+      id,
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const rejectRequest = async (req, res) => {
+  const { type, id } = req.params;
+  const { reason } = req.body;
+  const table = REQUEST_TABLES[type];
+
+  logger.info("Reject request initiated", { type, id, reason });
+
+  if (!table) {
+    logger.warn("Reject request called with invalid type", { type, id });
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid request type" });
+  }
+
+  try {
+    const updated = await pool.query(
+      `UPDATE ${table} SET status = 'rejected' WHERE id = $1 AND status = 'pending' RETURNING id`,
+      [id],
+    );
+
+    if (updated.rows.length === 0) {
+      logger.warn("Reject request found no pending row", { type, id });
+      return res
+        .status(409)
+        .json({ success: false, message: "Request is no longer pending" });
+    }
+
+    logger.info("Request rejected", { type, id });
+    return res.status(200).json({ success: true, message: "Request rejected" });
+  } catch (error) {
+    logger.error("Failed to reject request", {
+      type,
+      id,
+      error: error.message,
+      stack: error.stack,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
   }
 };

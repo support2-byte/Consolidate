@@ -47,6 +47,18 @@ import {
   createDocumentTemplate,
   getDocumentTemplates,
   updateDocumentTemplate,
+  createDriver,
+  getDrivers,
+  updateDriver,
+  deleteDriver,
+  getDriverTracks,
+  createDriverTrack,
+  updateDriverTrack,
+  deleteDriverTrack,
+  createSystemSetting,
+  deleteSystemSetting,
+  updateSystemSetting,
+  getSystemSettings,
 } from "./options.controllers.js";
 import { bugReportUpload, companyUpload } from "../../middleware/upload.js";
 import { requireAuth } from "../../modules/auth/auth.middleware.js";
@@ -126,5 +138,23 @@ router.post("/documents", requireAuth, createDocumentTemplate);
 router.get("/documents", requireAuth, getDocumentTemplates);
 router.get("/documents/:id", requireAuth, getDocumentTemplates);
 router.put("/documents/:id", requireAuth, updateDocumentTemplate);
+
+router.get("/drivers", requireAuth, getDrivers);
+router.post("/drivers", requireAuth, createDriver);
+router.put("/drivers/:id", requireAuth, updateDriver);
+router.delete("/drivers/:id", requireAuth, deleteDriver);
+
+router.get("/driver-tracks", requireAuth, getDriverTracks);
+router.post("/driver-tracks", requireAuth, createDriverTrack);
+router.put("/driver-tracks/:id", requireAuth, updateDriverTrack);
+router.delete("/driver-tracks/:id", requireAuth, deleteDriverTrack);
+
+router.get("/system-settings", getSystemSettings);
+
+router.put("/system-settings", requireAuth, updateSystemSetting);
+
+router.post("/system-settings", requireAuth, createSystemSetting);
+
+router.delete("/system-settings/:id", requireAuth, deleteSystemSetting);
 
 export default router;
