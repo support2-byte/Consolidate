@@ -3,6 +3,7 @@ import axios from "axios";
 import fs from "fs";
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
+import crypto from "crypto";
 import path from "path";
 import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
 import logger from "../../services/logger.js";
@@ -930,7 +931,7 @@ export async function updateCustomer(req, res) {
     });
   }
 }
-// Include createCustomer and getCustomerById from previous messages
+
 export async function createCustomer(req, res) {
   const {
     contact_name,
@@ -950,11 +951,10 @@ export async function createCustomer(req, res) {
     const token = await getZohoAccessToken();
     const uniqueSuffix = Date.now();
 
-    // Payload for Zoho API
     const payload = {
       contact_name: `${contact_name.trim()}`,
       company_name: contact_name.trim(),
-      contact_type: req.body.contact_type || "customer", // Zoho requires this
+      contact_type: req.body.contact_type || "customer",
       email: email
         ? `${email.split("@")[0]}.${uniqueSuffix}@${email.split("@")[1]}`
         : `test.${uniqueSuffix}@example.com`,
@@ -975,7 +975,6 @@ export async function createCustomer(req, res) {
 
     const zohoCustomer = zohoRes.data.contact;
 
-    // Insert into DB (12 columns now)
     const { rows } = await pool.query(
       `INSERT INTO customers 
         (zoho_id, contact_name, email, address, zoho_notes, associated_by, 
@@ -1003,8 +1002,8 @@ export async function createCustomer(req, res) {
         zohoCustomer.notes || zoho_notes || null,
         associated_by || null,
         system_notes || null,
-        type || null, // <-- from frontend
-        zohoCustomer.contact_type || "customer", // <-- from Zoho
+        type || null,
+        zohoCustomer.contact_type || "customer",
         zohoCustomer.status === "active",
         zohoCustomer.created_by_name || req.user?.name || "System",
         zohoCustomer.updated_by_name || null,
@@ -1155,5 +1154,200 @@ export async function getCustomerById(req, res) {
     res.status(err.response?.status || 500).json({
       error: err.response?.data?.message || "Failed to fetch customer",
     });
+  }
+}
+
+export const getAppCustomerStatusMap = async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, "fullName", email, status, account_type, customer_id, created_at
+       FROM app_customers`,
+    );
+
+    const statusMap = {};
+    for (const row of rows) {
+      if (!row.customer_id) continue;
+      statusMap[row.customer_id] = {
+        id: row.id,
+        fullName: row.fullName,
+        email: row.email,
+        authorized: row.status,
+        accountType: row.account_type,
+        createdAt: row.created_at,
+      };
+    }
+
+    return res.status(200).json({
+      success: true,
+      statusMap,
+    });
+  } catch (error) {
+    logger.error("Failed to fetch app customer status map", {
+      error: {
+        message: error.message,
+      },
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong.",
+    });
+  }
+};
+
+export const toggleAppCustomerAccess = async (req, res) => {
+  const { customers, authorize } = req.body;
+
+  if (!Array.isArray(customers) || !customers.length) {
+    return res.status(400).json({
+      success: false,
+      message: "customers must be a non-empty array.",
+    });
+  }
+
+  if (typeof authorize !== "boolean") {
+    return res.status(400).json({
+      success: false,
+      message: "authorize must be a boolean.",
+    });
+  }
+
+  const invalid = customers.find(
+    (c) => !c.customerId || !c.fullName || !c.email,
+  );
+  if (invalid) {
+    return res.status(400).json({
+      success: false,
+      message: "Each customer requires customerId, fullName, and email.",
+    });
+  }
+
+  const customerIds = customers.map((c) => String(c.customerId));
+  const fullNames = customers.map((c) => c.fullName);
+  const emails = customers.map((c) => c.email);
+  const accountTypes = customers.map((c) => c.accountType || "receiver");
+  const statuses = customers.map(() => authorize);
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO app_customers (customer_id, "fullName", email, account_type, status)
+       SELECT * FROM unnest(
+         $1::varchar[],
+         $2::varchar[],
+         $3::varchar[],
+         $4::varchar[],
+         $5::boolean[]
+       )
+       ON CONFLICT (customer_id)
+       DO UPDATE SET status = EXCLUDED.status
+       RETURNING id, customer_id, (xmax = 0) AS inserted`,
+      [customerIds, fullNames, emails, accountTypes, statuses],
+    );
+
+    const insertedIds = rows
+      .filter((r) => r.inserted)
+      .map((r) => r.customer_id);
+    const updatedIds = rows
+      .filter((r) => !r.inserted)
+      .map((r) => r.customer_id);
+
+    logger.info(
+      `${authorize ? "Authorized" : "Unauthorized"} ${rows.length} app customer(s)`,
+      { insertedIds, updatedIds },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `${rows.length} customer${rows.length > 1 ? "s" : ""} ${
+        authorize ? "authorized" : "unauthorized"
+      }.`,
+      insertedIds,
+      updatedIds,
+    });
+  } catch (error) {
+    logger.error("Failed to toggle app customer access", {
+      error: {
+        message: error.message,
+      },
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong.",
+    });
+  }
+};
+
+export async function bulkImportCustomersFromDocs(req, res) {
+  const { customers: incoming } = req.body ?? {};
+
+  if (!Array.isArray(incoming) || incoming.length === 0) {
+    return res.status(400).json({ error: "No customers provided" });
+  }
+
+  const results = [];
+
+  try {
+    for (const c of incoming) {
+      const name = (c.name || "").trim();
+      if (!name) continue;
+
+      const email = c.email || null;
+      const phone = c.phone || null;
+      const address = c.address || null;
+      const contactType = c.contact_type || c.type || "customer";
+
+      let existing = null;
+      if (email) {
+        const { rows } = await pool.query(
+          `SELECT zoho_id FROM customers WHERE email = $1 LIMIT 1`,
+          [email],
+        );
+        existing = rows[0] || null;
+      }
+
+      if (existing) {
+        const { rows } = await pool.query(
+          `UPDATE customers SET
+             contact_name = COALESCE(customers.contact_name, $2),
+             address = COALESCE(customers.address, $3),
+             phone_number = COALESCE(customers.phone_number, $4),
+             modified_by = $5
+           WHERE zoho_id = $1
+           RETURNING zoho_id, contact_name, email, address, phone_number, type, contact_type`,
+          [existing.zoho_id, name, address, phone, req.user?.name || "System"],
+        );
+        results.push({ ...rows[0], _action: "updated" });
+        continue;
+      }
+
+      const zohoId = `LOCAL-${crypto.randomUUID()}`;
+      const { rows } = await pool.query(
+        `INSERT INTO customers
+           (zoho_id, contact_name, email, address, phone_number, type,
+            contact_type, associated_by, status, created_by, modified_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $9)
+         RETURNING zoho_id, contact_name, email, address, phone_number, type, contact_type`,
+        [
+          zohoId,
+          name,
+          email,
+          address,
+          phone,
+          c.type || null,
+          contactType,
+          "Imported from Booking Form",
+          req.user?.name || "System",
+        ],
+      );
+      results.push({ ...rows[0], _action: "created" });
+    }
+
+    return res
+      .status(201)
+      .json({ imported: results.length, customers: results });
+  } catch (err) {
+    console.error("bulkImportCustomersFromDocs error:", err);
+    return res.status(500).json({ error: "Failed to import customers" });
   }
 }

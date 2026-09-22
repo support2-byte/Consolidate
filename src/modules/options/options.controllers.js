@@ -1746,3 +1746,418 @@ export const updateDocumentTemplate = async (req, res) => {
       .json({ success: false, message: "Failed to update document template" });
   }
 };
+
+export const getDrivers = async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, driver_id, name, phone_number, vehicle_plate, created_at, created_by
+      FROM drivers
+      ORDER BY created_at DESC
+    `);
+
+    if (rows.length === 0) {
+      logger.warn("No Drivers Found");
+      return res.status(404).json({
+        success: false,
+        message: "No drivers found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      rows,
+    });
+  } catch (error) {
+    logger.error("Failed to get drivers", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const createDriver = async (req, res) => {
+  try {
+    const { driver_id, name, phone_number, vehicle_plate } = req.body;
+    const userEmail = req?.user?.email;
+
+    if (!driver_id || !name || !phone_number || !vehicle_plate) {
+      return res.status(400).json({
+        success: false,
+        message: "driver_id, name, phone_number and vehicle_plate are required",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO drivers (driver_id, name, phone_number, vehicle_plate, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [driver_id, name, phone_number, vehicle_plate, userEmail],
+    );
+
+    return res.status(201).json({
+      success: true,
+      row: rows[0],
+    });
+  } catch (error) {
+    logger.error("Failed to create driver", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const updateDriver = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { driver_id, name, phone_number, vehicle_plate } = req.body;
+
+    const { rows } = await pool.query(
+      `UPDATE drivers
+       SET driver_id = $1, name = $2, phone_number = $3, vehicle_plate = $4
+       WHERE id = $5
+       RETURNING *`,
+      [driver_id, name, phone_number, vehicle_plate, id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      row: rows[0],
+    });
+  } catch (error) {
+    logger.error("Failed to update driver", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const deleteDriver = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await pool.query(
+      `DELETE FROM drivers WHERE id = $1 RETURNING id`,
+      [id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Driver deleted",
+    });
+  } catch (error) {
+    logger.error("Failed to delete driver", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const getDriverTracks = async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        dt.id,
+        dt.driver_id,
+        dt.total_deliveries,
+        dt.routes,
+        d.name AS driver_name,
+        d.driver_id AS driver_code
+      FROM driver_tracks dt
+      LEFT JOIN drivers d ON d.id = dt.driver_id
+      ORDER BY dt.id DESC
+    `);
+
+    if (rows.length === 0) {
+      logger.warn("No Driver Tracks Found");
+      return res.status(404).json({
+        success: false,
+        message: "No driver tracks found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      rows,
+    });
+  } catch (error) {
+    logger.error("Failed to get driver tracks", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const createDriverTrack = async (req, res) => {
+  try {
+    const { driver_id, routes } = req.body;
+    const userEmail = req?.user?.email;
+
+    if (!driver_id || total_deliveries == null || !routes) {
+      return res.status(400).json({
+        success: false,
+        message: "driver_id, total_deliveries and routes are required",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO driver_tracks (driver_id, total_deliveries, routes, created_at, created_by)
+       VALUES ($1, 0, $3, NOW(), $4)
+       RETURNING *`,
+      [driver_id, routes],
+    );
+
+    return res.status(201).json({
+      success: true,
+      row: rows[0],
+    });
+  } catch (error) {
+    logger.error("Failed to create driver track", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const updateDriverTrack = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { driver_id, routes } = req.body;
+
+    const { rows } = await pool.query(
+      `UPDATE driver_tracks
+       SET driver_id = $1, routes = $2
+       WHERE id = $3
+       RETURNING *`,
+      [driver_id, routes, id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver track not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      row: rows[0],
+    });
+  } catch (error) {
+    logger.error("Failed to update driver track", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const deleteDriverTrack = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await pool.query(
+      `DELETE FROM driver_tracks WHERE id = $1 RETURNING id`,
+      [id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver track not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Driver track deleted",
+    });
+  } catch (error) {
+    logger.error("Failed to delete driver track", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const getSystemSettings = async (req, res) => {
+  const { category } = req.query;
+  try {
+    const result = category
+      ? await pool.query(
+          "SELECT * FROM system_settings WHERE category = $1 ORDER BY sort_order, id",
+          [category],
+        )
+      : await pool.query(
+          "SELECT * FROM system_settings ORDER BY category, sort_order, id",
+        );
+
+    return res.status(200).json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    logger.error("Failed to fetch system settings", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const createSystemSetting = async (req, res) => {
+  const {
+    key,
+    label,
+    value = 0,
+    unit,
+    category = "rates",
+    description,
+    sort_order = 0,
+  } = req.body;
+
+  if (!key || !label) {
+    return res.status(400).json({
+      success: false,
+      message: "key and label are required",
+    });
+  }
+
+  if (isNaN(Number(value)) || Number(value) < 0) {
+    return res.status(400).json({
+      success: false,
+      message: "value must be a non-negative number",
+    });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO system_settings (key, label, value, unit, category, description, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [key, label, value, unit, category, description, sort_order],
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "System setting created",
+      data: rows[0],
+    });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "A setting with this key already exists",
+      });
+    }
+    logger.error("Failed to create system setting", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};
+
+export const updateSystemSetting = async (req, res) => {
+  const { settings } = req.body;
+  const userId = req.user?.id;
+
+  if (!Array.isArray(settings) || settings.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: "settings array is required",
+    });
+  }
+
+  for (const s of settings) {
+    if (s.id === undefined || isNaN(Number(s.value)) || Number(s.value) < 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid value for setting id ${s.id}`,
+      });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const updated = [];
+    for (const s of settings) {
+      const { rows } = await client.query(
+        `UPDATE system_settings
+         SET value = $1, updated_at = now(), updated_by = $2
+         WHERE id = $3
+         RETURNING *`,
+        [s.value, userId, s.id],
+      );
+      if (rows[0]) updated.push(rows[0]);
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      success: true,
+      message: "System settings updated",
+      data: updated,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    logger.error("Failed to update system settings", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  } finally {
+    client.release();
+  }
+};
+
+export const deleteSystemSetting = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await pool.query(
+      "DELETE FROM system_settings WHERE id = $1 RETURNING id",
+      [id],
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "System setting not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "System setting deleted",
+    });
+  } catch (error) {
+    logger.error("Failed to delete system setting", { error });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
+};

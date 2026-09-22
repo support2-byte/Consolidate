@@ -22,7 +22,7 @@ export const sendKycFormEmail = async ({
     }
 
     await transporter.sendMail({
-      from: '"Royal Gulf Shipping & Logistics" <compliance@consolidate.ae>',
+      from: "Royal Gulf Shipping & Logistics",
       to: recipientEmail,
       subject: "Action Required: Complete Your KYC Verification",
       html: emailTemplate,
