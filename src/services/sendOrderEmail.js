@@ -40,7 +40,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5174";
 const STATUS_ACTION_LINKS = {
   "Order Created": {
     recipientType: "sender",
-    heading: "Next step: schedule your drop-off",
+    heading: "Want to schedule your drop-off?",
     links: [
       {
         path: "drop-off-request",
@@ -79,14 +79,15 @@ function buildActionLinksHtml(statusLabel, itemRef, recipientType) {
     return "";
   }
 
-  const blocks = config.links
+  const width = Math.floor(100 / config.links.length);
+  const cells = config.links
     .map(
       (link) =>
-        `<div style="margin-top:14px"><p style="margin:0 0 6px;font-size:13px;color:#475569">${escapeHtml(link.description)}</p><a class="cta" style="margin:0" href="${FRONTEND_URL}/${link.path}/${encodeURIComponent(itemRef)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a></div>`,
+        `<td style="vertical-align:top;width:${width}%;padding:0 10px 0 0"><p style="margin:0 0 6px;font-size:13px;color:#475569">${escapeHtml(link.description)}</p><a class="cta" style="margin:0" href="${FRONTEND_URL}/${link.path}/${encodeURIComponent(itemRef)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a></td>`,
     )
     .join("");
 
-  return `<div style="margin-top:18px"><p style="margin:0;font-weight:700;color:#0f172a">${escapeHtml(config.heading)}</p>${blocks}</div>`;
+  return `<div style="margin-top:18px"><p style="margin:0;font-weight:700;color:#0f172a">${escapeHtml(config.heading)}</p><table role="presentation" style="width:100%;margin-top:14px;border-collapse:collapse"><tr>${cells}</tr></table></div>`;
 }
 
 function buildSubject(templateData) {

@@ -52,10 +52,10 @@ const REQUEST_DETAILS = {
     }),
   },
   dropoff: {
-    column: "drop_off_request_id",
+    column: "drop_off_requests_id",
     sql: `SELECT contact_number, pickup_address, zone,
-                 to_char(pickup_date, 'YYYY-MM-DD') AS pickup_date
-            FROM drop_off_request WHERE id = $1`,
+               to_char(pickup_date, 'YYYY-MM-DD') AS pickup_date
+          FROM drop_off_requests WHERE id = $1`,
     map: (r) => ({
       contactNumber: r.contact_number,
       pickupAddress: r.pickup_address,
@@ -257,7 +257,6 @@ export const getInvoicePayment = async (req, res) => {
           );
 
     const receiverRow = receiverResult.rows[0] || null;
-
     let details = null;
     const lookup = REQUEST_DETAILS[type];
     if (lookup && invoiceRow[lookup.column]) {
@@ -288,6 +287,8 @@ export const getInvoicePayment = async (req, res) => {
         discount: discountVal,
       };
     }
+
+    console.log({ details });
 
     return res.json({
       invoice: {
