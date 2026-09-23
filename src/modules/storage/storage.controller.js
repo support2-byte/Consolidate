@@ -63,12 +63,12 @@ export const createStoragePurchase = async (req, res) => {
       customerRef,
       shipmentRef,
       storage,
-      sizeValue,
-      sizeUnit,
+      sizeKey,
+      sizeLabel,
       category,
       subcategory,
       requiredFrom,
-      durationMonths,
+      durationDays,
       notes,
       amount,
     } = req.body;
@@ -78,14 +78,12 @@ export const createStoragePurchase = async (req, res) => {
       !shipmentRef ||
       storage === undefined ||
       storage === null ||
-      sizeValue === undefined ||
-      sizeValue === null ||
-      !sizeUnit ||
+      !sizeKey ||
       !category ||
       !subcategory ||
       !requiredFrom ||
-      durationMonths === undefined ||
-      durationMonths === null ||
+      durationDays === undefined ||
+      durationDays === null ||
       amount === undefined ||
       amount === null
     ) {
@@ -94,17 +92,14 @@ export const createStoragePurchase = async (req, res) => {
         .json({ success: false, message: "Missing required fields." });
     }
 
-    if (!Number.isInteger(durationMonths) || durationMonths <= 0) {
+    if (
+      !Number.isInteger(durationDays) ||
+      durationDays <= 0 ||
+      durationDays > 30
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Duration must be a positive whole number of months.",
-      });
-    }
-
-    if (typeof sizeValue !== "number" || !(sizeValue > 0)) {
-      return res.status(400).json({
-        success: false,
-        message: "Size must be a positive number.",
+        message: "Duration must be a whole number of days between 1 and 30.",
       });
     }
 
@@ -133,22 +128,25 @@ export const createStoragePurchase = async (req, res) => {
       });
     }
 
+    const sizeVale = sizeKey.split("_")[0];
+    const sizeUnit = sizeKey.split("_")[1];
+
     const { rows } = await pool.query(
       `INSERT INTO storage_purchase
          (customer_ref, shipment_ref, storage, size_value, size_unit, category,
-          subcategory, required_from, duration_months, notes, amount)
+          subcategory, required_from, duration_days, notes, amount)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, status, created_at`,
       [
         customerRef,
         shipmentRef,
         storage,
-        sizeValue,
-        sizeUnit,
+        sizeVale,
+        sizeUnit || null,
         category,
         subcategory,
         requiredFrom,
-        durationMonths,
+        durationDays,
         notes || null,
         amount,
       ],

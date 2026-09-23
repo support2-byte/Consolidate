@@ -2078,6 +2078,15 @@ export const createSystemSetting = async (req, res) => {
   }
 };
 
+const ALLOWED_FIELDS = [
+  "label",
+  "value",
+  "unit",
+  "category",
+  "description",
+  "sort_order",
+];
+
 export const updateSystemSetting = async (req, res) => {
   const { settings } = req.body;
   const userId = req.user?.id;
@@ -2090,10 +2099,31 @@ export const updateSystemSetting = async (req, res) => {
   }
 
   for (const s of settings) {
-    if (s.id === undefined || isNaN(Number(s.value)) || Number(s.value) < 0) {
+    if (s.id === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Each setting must include an id",
+      });
+    }
+    if (
+      s.value !== undefined &&
+      (isNaN(Number(s.value)) || Number(s.value) < 0)
+    ) {
       return res.status(400).json({
         success: false,
         message: `Invalid value for setting id ${s.id}`,
+      });
+    }
+    if (s.label !== undefined && !String(s.label).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: `Label cannot be empty for setting id ${s.id}`,
+      });
+    }
+    if (s.category !== undefined && !String(s.category).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: `Category cannot be empty for setting id ${s.id}`,
       });
     }
   }
@@ -2104,12 +2134,23 @@ export const updateSystemSetting = async (req, res) => {
 
     const updated = [];
     for (const s of settings) {
+      const fields = Object.keys(s).filter(
+        (k) => k !== "id" && ALLOWED_FIELDS.includes(k),
+      );
+
+      if (fields.length === 0) continue;
+
+      const setClause = fields
+        .map((field, idx) => `${field} = $${idx + 1}`)
+        .join(", ");
+      const values = fields.map((field) => s[field]);
+
       const { rows } = await client.query(
         `UPDATE system_settings
-         SET value = $1, updated_at = now(), updated_by = $2
-         WHERE id = $3
+         SET ${setClause}, updated_at = now(), updated_by = $${fields.length + 1}
+         WHERE id = $${fields.length + 2}
          RETURNING *`,
-        [s.value, userId, s.id],
+        [...values, userId, s.id],
       );
       if (rows[0]) updated.push(rows[0]);
     }
@@ -2123,6 +2164,12 @@ export const updateSystemSetting = async (req, res) => {
     });
   } catch (error) {
     await client.query("ROLLBACK");
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "A setting with this key already exists",
+      });
+    }
     logger.error("Failed to update system settings", { error });
     return res.status(500).json({
       success: false,

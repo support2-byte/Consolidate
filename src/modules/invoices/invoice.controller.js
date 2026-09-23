@@ -27,7 +27,7 @@ const ZONE_LABELS = {
 const REQUEST_DETAILS = {
   storage: {
     column: "storage_purchase_id",
-    sql: `SELECT storage, size_value, size_unit, type, notes, duration_months,
+    sql: `SELECT storage, size_value, size_unit, type, notes, duration_days,
                  to_char(required_from, 'YYYY-MM-DD') AS required_from
             FROM storage_purchase WHERE id = $1`,
     map: (r) => ({
@@ -35,7 +35,7 @@ const REQUEST_DETAILS = {
       size: [r.size_value, r.size_unit].filter(Boolean).join(" "),
       quantity: r.storage,
       requiredFrom: r.required_from,
-      durationMonths: r.duration_months,
+      durationDays: r.duration_days,
       notes: r.notes,
     }),
   },
@@ -103,6 +103,7 @@ export async function createOverstayedInvoice(req, res) {
       taxPercent,
       subtotal,
       total,
+      discount,
     } = req.body;
 
     if (!receiverId || !itemRef) {
@@ -151,8 +152,8 @@ export async function createOverstayedInvoice(req, res) {
     const invoiceRes = await client.query(
       `INSERT INTO overstay_invoices
         (invoice_id, amount, status, shipment_ref, customer_ref,
-         overstay_days, tax_percent, subtotal)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         overstay_days, tax_percent, subtotal, discount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         invoiceId,
@@ -163,6 +164,7 @@ export async function createOverstayedInvoice(req, res) {
         Number.isFinite(Number(overstayDays)) ? Number(overstayDays) : null,
         Number.isFinite(Number(taxPercent)) ? Number(taxPercent) : null,
         finalSubtotal,
+        discount,
       ],
     );
     const invoice = invoiceRes.rows[0];
@@ -270,6 +272,8 @@ export const getInvoicePayment = async (req, res) => {
       const overstayDays = invoiceRow.overstay_days;
       const subtotalVal =
         invoiceRow.subtotal !== null ? Number(invoiceRow.subtotal) : null;
+      const discountVal =
+        invoiceRow.discount !== null ? Number(invoiceRow.discount) : null;
       overstayFields = {
         overstayDays,
         baseRate:
@@ -281,6 +285,7 @@ export const getInvoicePayment = async (req, res) => {
             ? Number(invoiceRow.tax_percent)
             : null,
         subtotal: subtotalVal,
+        discount: discountVal,
       };
     }
 

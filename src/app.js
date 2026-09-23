@@ -21,6 +21,7 @@ import invoiceRoutes from "./modules/invoices/invoice.route.js";
 import deliveryRoutes from "./modules/deliveries/delivery.route.js";
 import storageRoutes from "./modules/storage/storage.route.js";
 import dropOffRoutes from "./modules/drop-offs/drop-off.route.js";
+import addressRoutes from "./modules/address/address.route.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
 import {
@@ -144,6 +145,7 @@ app.use("/api/invoices", invoiceRoutes);
 app.use("/api/deliveries", deliveryRoutes);
 app.use("/api/storage", storageRoutes);
 app.use("/api/drop-off", dropOffRoutes);
+app.use("/api/address", addressRoutes);
 
 app.use("/api/mobile-app/auth", appAuthRoutes);
 app.use("/api/mobile-app/dashboard", appDashboardRoutes);

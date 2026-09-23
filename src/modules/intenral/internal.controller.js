@@ -520,8 +520,6 @@ const REQUEST_ID_COLUMNS = {
   dropoff: "drop_off_requests_id",
 };
 
-const STORAGE_TYPES = ["Dry Storage", "Cold Storage", "Hazardous"];
-
 const RECEIVER_SQL = `SELECT r.id, r.receiver_name AS name, r.receiver_email AS email
                         FROM order_items oi
                         JOIN receivers r ON r.id = oi.receiver_id
@@ -614,14 +612,24 @@ export const approveRequest = async (req, res) => {
   const storageType = req.body?.storage_type;
   const storageAmount = Number(req.body?.amount);
 
-  if (
-    type === "storage" &&
-    (!STORAGE_TYPES.includes(storageType) || !(storageAmount > 0))
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: "Storage type and a valid amount are required",
-    });
+  if (type === "storage") {
+    if (!storageType || !(storageAmount > 0)) {
+      return res.status(400).json({
+        success: false,
+        message: "Storage type and a valid amount are required",
+      });
+    }
+
+    const { rows: validTypes } = await pool.query(
+      `SELECT 1 FROM system_settings WHERE category = 'Storage Type' AND key = $1`,
+      [storageType],
+    );
+    if (validTypes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid storage type",
+      });
+    }
   }
 
   try {
@@ -701,8 +709,8 @@ export const approveRequest = async (req, res) => {
       if (type === "storage") {
         await client.query(
           `UPDATE storage_purchase
-              SET status = 'approved', type = $2, amount = $3
-            WHERE id = $1`,
+        SET status = 'approved', type = $2, amount = $3
+      WHERE id = $1`,
           [id, storageType, storageAmount],
         );
       } else {
