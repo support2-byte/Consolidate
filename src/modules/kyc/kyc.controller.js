@@ -3,8 +3,7 @@ import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import { sendKycFormEmail } from "../../services/sendKycEmail.js";
 
-const KYC_FORM_BASE_URL =
-  process.env.KYC_FORM_BASE_URL || "https://form.royalgulfshipping.com";
+const KYC_FORM_BASE_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
 
 const generateFormSeed = () => {
   return crypto.randomInt(0, 1_000_000_000_000).toString().padStart(12, "0");
@@ -395,6 +394,7 @@ export const resendKycEmail = async (req, res) => {
       recipientEmail: row.customer_email,
       recipientName: row.customer_name,
       formUrl,
+      company: row.company,
     });
 
     if (!result.success) {

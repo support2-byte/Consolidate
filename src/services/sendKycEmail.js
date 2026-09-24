@@ -13,9 +13,9 @@ export const sendKycFormEmail = async ({
   try {
     let emailTemplate;
 
-    if (company === "messiah-freight") {
+    if (company === "MF") {
       emailTemplate = buildKycEmailHtmlMf({ recipientName, formUrl });
-    } else if (company === "cas") {
+    } else if (company === "CAS") {
       emailTemplate = buildKycEmailHtmlCas({ recipientName, formUrl });
     } else {
       emailTemplate = buildKycEmailHtml({ recipientName, formUrl });

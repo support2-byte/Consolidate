@@ -288,8 +288,6 @@ export const getInvoicePayment = async (req, res) => {
       };
     }
 
-    console.log({ details });
-
     return res.json({
       invoice: {
         invoiceId: invoiceRow.invoice_id,
