@@ -3846,11 +3846,6 @@ export async function removeReceiver(req, res) {
 
     const { orderId, receiverId } = req.params;
 
-    console.log(
-      `[removeReceiver] Removing receiver ${receiverId} from order ${orderId}`,
-    );
-
-    // ── 1. Verify receiver belongs to this order ──────────────────────────
     const receiverCheck = await client.query(
       `SELECT id FROM receivers WHERE id = $1 AND order_id = $2`,
       [receiverId, orderId],
@@ -3863,35 +3858,24 @@ export async function removeReceiver(req, res) {
         .json({ error: "Receiver not found for this order" });
     }
 
-    // ── 2. Delete child records first (FK constraints) ────────────────────
     const deletedItems = await client.query(
       `DELETE FROM order_items WHERE receiver_id = $1 RETURNING id`,
       [receiverId],
-    );
-    console.log(
-      `[removeReceiver] Deleted ${deletedItems.rowCount} order_items`,
     );
 
     const deletedDropOffs = await client.query(
       `DELETE FROM drop_off_details WHERE receiver_id = $1 RETURNING id`,
       [receiverId],
     );
-    console.log(
-      `[removeReceiver] Deleted ${deletedDropOffs.rowCount} drop_off_details`,
-    );
 
-    // ── 3. Delete the receiver ────────────────────────────────────────────
     await client.query(`DELETE FROM receivers WHERE id = $1`, [receiverId]);
-    console.log(`[removeReceiver] Receiver ${receiverId} deleted`);
 
-    // ── 4. Update order updated_at ────────────────────────────────────────
     await client.query(`UPDATE orders SET updated_at = NOW() WHERE id = $1`, [
       orderId,
     ]);
 
     await client.query("COMMIT");
 
-    // ── 5. Return updated receivers list ──────────────────────────────────
     const updatedReceivers = await client.query(
       `SELECT *, receiver_marks_and_number AS "marksAndNumber"
        FROM receivers WHERE order_id = $1 ORDER BY id`,

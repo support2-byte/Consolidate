@@ -86,9 +86,6 @@ export async function getOrderStatus(orderReferenceId) {
     },
   );
 
-  console.log("getOrderStatus raw response:", JSON.stringify(data, null, 2));
-
   const state = data._embedded?.payment?.[0]?.state;
-  console.log("getOrderStatus resolved state:", state);
   return { state, raw: data };
 }

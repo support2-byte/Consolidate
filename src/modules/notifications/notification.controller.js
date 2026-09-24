@@ -9,14 +9,17 @@ import {
 import { sendInvoiceEmail } from "../../services/sendInvoiceEmail.js";
 import { generateOtp } from "../../services/generateOtp.js";
 
+const FORM_BASE_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
+
 export const getAllNotifications = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.item_ref, eq.recipient_type,
+      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.item_ref, oi.status AS item_status, eq.recipient_type,
               eq.recipient_email, eq.recipient_name, eq.email_type, eq.status,
               eq.attempts, eq.last_error, eq.created_at, eq.sent_at
          FROM email_queue eq
          JOIN orders o ON o.id = eq.order_id
+         LEFT JOIN order_items oi ON TRIM(oi.item_ref) ILIKE TRIM(eq.item_ref)
         ORDER BY eq.created_at DESC, eq.id DESC`,
     );
     if (rows.length === 0) {
@@ -297,7 +300,7 @@ export const resendConfirmationEmail = async (req, res) => {
 
     const viewLink =
       entry.form_id && entry.party_uuid
-        ? `http://localhost:5174/booking-confirmation/${entry.party_uuid}/${entry.party_type}`
+        ? `${FORM_BASE_URL}/booking-confirmation/${entry.party_uuid}/${entry.party_type}`
         : "#";
 
     const result = await sendConfirmationEmail({
@@ -465,7 +468,7 @@ export const resendInvoiceNotification = async (req, res) => {
       invoiceId: notif.invoice_id,
       amount: notif.amount,
       otp,
-      invoiceLink: `http://localhost:5174/invoice-payment/${encodeURIComponent(notif.invoice_id)}`,
+      invoiceLink: `${FORM_BASE_URL}/invoice-payment/${encodeURIComponent(notif.invoice_id)}`,
     });
 
     if (!result.success) {

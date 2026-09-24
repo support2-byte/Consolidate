@@ -17,8 +17,7 @@ const generateFormSeed = () => {
 
 const BATCH_SIZE = 20;
 const INTERNAL_SECRET = process.env.EMAIL_QUEUE_SECRET;
-const KYC_FORM_BASE_URL =
-  process.env.KYC_FORM_BASE_URL || "https://form.royalgulfshipping.com";
+const KYC_FORM_BASE_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
 
 export const processEmailQueue = async (req, res) => {
   const provided = req.headers["x-internal-secret"];

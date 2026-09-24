@@ -35,7 +35,7 @@ function formatDateTime(date) {
   );
 }
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5174";
+const FRONTEND_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
 
 const STATUS_ACTION_LINKS = {
   "Order Created": {
