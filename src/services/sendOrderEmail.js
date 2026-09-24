@@ -162,7 +162,9 @@ function buildShipmentUpdateHtml(templateData) {
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
     actionLinks: buildActionLinksHtml(
-      templateData.statusLabel || "Shipment Updated",
+      templateData.statusLabel === "Order Created"
+        ? ""
+        : templateData.statusLabel || "Shipment Updated",
       templateData.refId,
       templateData.recipientType,
     ),
