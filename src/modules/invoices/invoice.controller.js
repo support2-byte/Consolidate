@@ -8,7 +8,10 @@ import {
   zohoParams,
 } from "../zoho-invoices/zoho-bill.controller.js";
 import { getZohoDueContext } from "../zoho-invoices/zoho-invoice.service.js";
-import { getBooksBaseUrl } from "../zoho-invoices/zoho-invoice.controller.js";
+import {
+  getBooksBaseUrl,
+  UPSERT_SQL,
+} from "../zoho-invoices/zoho-invoice.controller.js";
 
 const INVOICE_TABLES = {
   overstayed: "overstay_invoices",
@@ -728,6 +731,21 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
         .json({ success: false, message: "Customer not found in Zoho." });
     }
 
+    const consRes = await pool.query(
+      `SELECT c.consignment_number
+         FROM order_items oi
+         JOIN container_assignment_history h ON h.detail_id = oi.id
+         JOIN consignments c ON c.id = h.consignment_id
+        WHERE oi.item_ref = $1
+        ORDER BY h.id DESC
+        LIMIT 1`,
+      [invoice.shipment_ref],
+    );
+    const consignmentNumber =
+      consRes.rows[0]?.consignment_number?.trim() ||
+      ctx.consignmentNumber ||
+      null;
+
     const { rows: paidLocal } = await pool.query(
       `SELECT invoice_number FROM zoho_invoices
         WHERE btrim(order_number) = $1
@@ -737,7 +755,7 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
                OR consignment_number IS NULL
                OR btrim(consignment_number) = $3)
         LIMIT 1`,
-      [ctx.orderNumber, invoice.invoice_id, ctx.consignmentNumber],
+      [ctx.orderNumber, invoice.invoice_id, consignmentNumber],
     );
     if (paidLocal.length) {
       return res.status(409).json({
@@ -808,16 +826,12 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       reference_number: ctx.orderNumber,
       date: new Date(invoice.created_at).toISOString().slice(0, 10),
       line_items: [lineItem, ...dueLines],
-      ...(ctx.consignmentNumber && process.env.ZOHO_CONSIGNMENT_FIELD
-        ? {
-            custom_fields: [
-              {
-                api_name: process.env.ZOHO_CONSIGNMENT_FIELD,
-                value: ctx.consignmentNumber,
-              },
-            ],
-          }
-        : {}),
+      custom_field_hash: {
+        cf_order_number: ctx.orderNumber,
+        ...(consignmentNumber
+          ? { cf_consignment_number: consignmentNumber }
+          : {}),
+      },
     };
 
     const created = await axios.post(`${getBooksBaseUrl()}/invoices`, body, {
@@ -828,12 +842,41 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       throw new Error(created.data.message || "Zoho error");
     }
 
-    const zohoInvoiceId = created.data.invoice.invoice_id;
+    const zi = created.data.invoice;
+    const zohoInvoiceId = zi.invoice_id;
+    logger.info("Zoho invoice created", {
+      invoiceNumber: zi.invoice_number,
+      customFields: zi.custom_fields,
+    });
     await pool.query(
       `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
         WHERE id = $2`,
       [zohoInvoiceId, invoice.id],
     );
+
+    try {
+      await pool.query(UPSERT_SQL, [
+        zohoInvoiceId,
+        zi.invoice_number,
+        zi.customer_id,
+        zi.customer_name,
+        zi.reference_number,
+        zi.status,
+        zi.date,
+        zi.due_date || null,
+        zi.currency_code,
+        zi.total ?? 0,
+        zi.balance ?? zi.total ?? 0,
+        ctx.orderNumber,
+        consignmentNumber,
+        zi.last_modified_time || null,
+      ]);
+    } catch (insertErr) {
+      logger.warn("Zoho invoice created but local insert failed", {
+        zohoInvoiceId,
+        err: insertErr.message,
+      });
+    }
 
     return res.json({ success: true, zohoInvoiceId });
   } catch (error) {

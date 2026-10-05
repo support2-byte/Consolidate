@@ -443,16 +443,10 @@ export const uploadConsignmentInvoicesToZoho = async ({
                 quantity: 1,
               },
             ],
-            custom_fields: [
-              {
-                customfield_id: process.env.ZOHO_ORDER_NUMBER_FIELD_ID,
-                value: o.order_number,
-              },
-              {
-                customfield_id: process.env.ZOHO_CONSIGNMENT_FIELD_ID,
-                value: consNo,
-              },
-            ].filter((f) => f.customfield_id && f.value),
+            custom_field_hash: {
+              cf_order_number: o.order_number,
+              cf_consignment_number: consNo,
+            },
           };
 
           const created = await axios.post(
