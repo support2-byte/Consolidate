@@ -10,6 +10,7 @@ import { sendKycFormEmail } from "../../services/sendKycEmail.js";
 import crypto from "crypto";
 import { withTransaction } from "../../services/transaction.js";
 import { generateOtp } from "../../services/generateOtp.js";
+import { getZohoDueContext } from "../zoho-invoices/zoho-invoice.service.js";
 
 const generateFormSeed = () => {
   return crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
@@ -632,6 +633,16 @@ export const approveRequest = async (req, res) => {
   }
 
   try {
+    const requestRes = await pool.query(
+      `SELECT shipment_ref, customer_ref FROM ${table} WHERE id = $1`,
+      [id],
+    );
+    const zohoContext = await getZohoDueContext({
+      type,
+      itemRef: requestRes.rows[0]?.shipment_ref,
+      customerRef: requestRes.rows[0]?.customer_ref,
+    });
+
     const result = await withTransaction(async (client) => {
       const requestRow = await client.query(
         `SELECT * FROM ${table} WHERE id = $1 AND status = 'pending' FOR UPDATE`,
@@ -683,11 +694,22 @@ export const approveRequest = async (req, res) => {
         invoiceTable,
       });
 
+      const dueAmount = zohoContext.dueAmount;
+      const totalAmount = Number(invoiceAmount) + dueAmount;
+
       const invoice = await client.query(
         `INSERT INTO ${invoiceTable}
-           (invoice_id, customer_ref, amount, shipment_ref, ${REQUEST_ID_COLUMNS[type]})
-          VALUES ($1, $2, $3, $4, $5) RETURNING id, invoice_id`,
-        [invoiceId, customerId, invoiceAmount, shipmentId, id],
+           (invoice_id, customer_ref, amount, shipment_ref, ${REQUEST_ID_COLUMNS[type]}, due_amount, due_details)
+          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, invoice_id`,
+        [
+          invoiceId,
+          customerId,
+          totalAmount,
+          shipmentId,
+          id,
+          dueAmount,
+          JSON.stringify(zohoContext.dueInvoices),
+        ],
       );
 
       await client.query(
@@ -796,5 +818,45 @@ export const rejectRequest = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const getRequestDuePreview = async (req, res) => {
+  const { type, id } = req.params;
+  const table = REQUEST_TABLES[type];
+
+  if (!table) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid request type" });
+  }
+
+  try {
+    const row = await pool.query(
+      `SELECT shipment_ref, customer_ref FROM ${table} WHERE id = $1`,
+      [id],
+    );
+    if (row.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Request not found" });
+    }
+
+    const due = await getZohoDueContext({
+      type,
+      itemRef: row.rows[0].shipment_ref,
+      customerRef: row.rows[0].customer_ref,
+    });
+
+    return res.json({ success: true, due });
+  } catch (error) {
+    logger.error("Failed to load due preview", {
+      type,
+      id,
+      error: error.message,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Unable to load due preview." });
   }
 };

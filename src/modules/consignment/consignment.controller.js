@@ -3,6 +3,7 @@ import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import logger from "../../services/logger.js";
 import { withTransaction } from "../../services/transaction.js";
+import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
 
 function safeParseJsonArray(val) {
   if (!val) return [];
@@ -102,12 +103,11 @@ async function updateLinkedContainersStatus(
 
 function isValidDate(dateString) {
   if (!dateString) return false;
-  const normalized = dateString.toString().split("T")[0]; // Strip time if full ISO
+  const normalized = dateString.toString().split("T")[0];
   const date = new Date(normalized);
   return !isNaN(date.getTime()) && normalized.match(/^\d{4}-\d{2}-\d{2}$/);
 }
 
-// Validate core consignment fields (required checks with error messages)
 function validateConsignmentFields({
   consignment_number,
   status,
@@ -165,7 +165,6 @@ function validateConsignmentFields({
   return errors;
 }
 
-// Validate containers array items
 function validateContainers(containers) {
   return containers
     .map((container, index) => {
@@ -181,9 +180,7 @@ function validateContainers(containers) {
     .filter((item) => item.errors.length > 0);
 }
 
-// Validate orders array items (fixed: assume orders are objects with quantity)
 function validateOrders(orders) {
-  console.log("Validating orders:", orders);
   return orders
     .map((order, index) => {
       const errors = [];
@@ -196,7 +193,6 @@ function validateOrders(orders) {
       ) {
         errors.push(`orders[${index}].quantity (must be positive integer)`);
       }
-      // Add more order-specific validations if needed (e.g., order.id, order.status)
       return { index, errors };
     })
     .filter((item) => item.errors.length > 0);
@@ -523,224 +519,6 @@ export async function getConsignmentById(req, res) {
   }
 }
 
-// export async function getConsignmentById(req, res) {
-//   try {
-//     const { id } = req.params;
-//     const { autoSync = "false" } = req.query;
-//     const enableAutoSync = autoSync === "true";
-//     let orderIds = [];
-//     const numericId = parseInt(id, 10);
-
-//     if (isNaN(numericId) || numericId <= 0) {
-//       return res.status(400).json({ error: "Invalid consignment ID." });
-//     }
-
-//     const client = await pool.connect();
-//     let consignment = null;
-//     let containers = [];
-
-//     try {
-//       await client.query("BEGIN");
-
-//       const consRes = await client.query(
-//         "SELECT * FROM consignments WHERE id = $1",
-//         [numericId],
-//       );
-
-//       if (consRes.rowCount === 0) {
-//         await client.query("ROLLBACK");
-//         return res.status(404).json({ error: "Consignment not found" });
-//       }
-
-//       consignment = consRes.rows[0];
-
-//       if (consignment.orders) {
-//         let rawOrders =
-//           typeof consignment.orders === "string"
-//             ? JSON.parse(consignment.orders)
-//             : consignment.orders;
-//         orderIds = Array.isArray(rawOrders)
-//           ? rawOrders
-//               .map((o) => parseInt(o, 10))
-//               .filter((o) => !isNaN(o) && o > 0)
-//           : [];
-//       }
-
-//       const statusRes = await client.query(
-//         "SELECT order_status, sorting_number FROM statuses WHERE order_status IS NOT NULL",
-//       );
-
-//       const statusPriority = statusRes.rows.reduce((acc, row) => {
-//         if (row.order_status) {
-//           acc[row.order_status] = row.sorting_number || 0;
-//         }
-//         return acc;
-//       }, {});
-
-//       let linkedOrders = [];
-//       let minReceiverEta = null;
-//       let mostAdvancedReceiverStatus = null;
-
-//       if (orderIds.length > 0) {
-//         const orderRes = await client.query(
-//           `SELECT
-//             id,
-//             sender_name AS shipper,
-//             receiver_name AS consignee,
-//             eta AS order_eta,
-//             etd,
-//             qty_delivered AS delivered,
-//             total_assigned_qty,
-//             status AS order_status
-//           FROM orders
-//           WHERE id = ANY($1::int[])`,
-//           [orderIds],
-//         );
-//         linkedOrders = orderRes.rows;
-
-//         const receiverRes = await client.query(
-//           `SELECT status, eta FROM receivers WHERE order_id = ANY($1::int[])`,
-//           [orderIds],
-//         );
-
-//         const receivers = receiverRes.rows;
-
-//         const validEtas = receivers
-//           .filter((r) => r.eta)
-//           .map((r) => new Date(r.eta));
-//         if (validEtas.length > 0) {
-//           minReceiverEta = new Date(Math.min(...validEtas));
-//         }
-
-//         mostAdvancedReceiverStatus = receivers.reduce((best, curr) => {
-//           const p = statusPriority[curr.status] || 0;
-//           const bp = statusPriority[best?.status] || 0;
-//           return p > bp ? curr : best;
-//         }, null)?.status;
-//       }
-
-//       consignment.statusColor = getStatusColor(consignment.status);
-
-//       if (linkedOrders.length > 0) {
-//         const first = linkedOrders[0];
-//         consignment.shipper = first.shipper || consignment.shipper;
-//         consignment.consignee = first.consignee || consignment.consignee;
-//         consignment.etd = first.etd ? normalizeDate(first.etd) : null;
-
-//         const totalAssigned = linkedOrders.reduce(
-//           (sum, o) => sum + (o.total_assigned_qty || 0),
-//           0,
-//         );
-//         const totalDelivered = linkedOrders.reduce(
-//           (sum, o) => sum + (o.delivered || 0),
-//           0,
-//         );
-//         consignment.delivered = totalDelivered;
-//         consignment.pending = Math.max(0, totalAssigned - totalDelivered);
-//         consignment.orders = linkedOrders;
-//       }
-
-//       if (minReceiverEta) {
-//         consignment.eta = minReceiverEta.toISOString().split("T")[0];
-//       }
-
-//       const today = new Date();
-//       today.setHours(0, 0, 0, 0);
-//       if (consignment.eta) {
-//         const etaDate = new Date(consignment.eta);
-//         etaDate.setHours(0, 0, 0, 0);
-//         consignment.days_until_eta = Math.max(
-//           0,
-//           Math.ceil((etaDate - today) / 86400000),
-//         );
-//       }
-
-//       if (
-//         typeof consignment.shipping_line === "number" &&
-//         consignment.shipping_line > 0
-//       ) {
-//         const { rows: slRows } = await client.query(
-//           "SELECT name FROM shipping_lines WHERE id = $1",
-//           [consignment.shipping_line],
-//         );
-//         consignment.shipping_line =
-//           slRows[0]?.name || consignment.shipping_line;
-//       }
-
-//       if (mostAdvancedReceiverStatus && enableAutoSync) {
-//         const suggested = Object.entries(CONSIGNMENT_TO_STATUS_MAP || {}).find(
-//           ([_, v]) => v.shipment === mostAdvancedReceiverStatus,
-//         )?.[0];
-
-//         if (suggested && suggested !== consignment.status) {
-//           consignment.suggested_status = suggested;
-//           consignment.suggested_status_reason = `Based on receiver status: ${mostAdvancedReceiverStatus}`;
-//         }
-//       }
-
-//       await client.query("COMMIT");
-//     } catch (innerErr) {
-//       await client.query("ROLLBACK");
-//       throw innerErr;
-//     } finally {
-//       client.release();
-//     }
-
-//     if (orderIds.length > 0) {
-//       const containerClient = await pool.connect();
-//       try {
-//         const containerRes = await containerClient.query(
-//           `SELECT
-//             cm.cid                            AS id,
-//             cm.container_size                 AS size,
-//             cm.container_number               AS "containerNo",
-//             cm.container_type                 AS "containerType",
-//             cm.owner_type                     AS ownership,
-//             COALESCE(cm.status, 'Available')  AS status,
-//             COALESCE(
-//               (SELECT cs.location
-//               FROM container_status cs
-//               WHERE cs.cid = cm.cid
-//                 AND cs.location IS NOT NULL
-//                 AND cs.location != ''
-//               ORDER BY cs.created_time DESC
-//               LIMIT 1),
-//               'N/A'
-//             ) AS location
-//           FROM container_master cm
-//           WHERE cm.cid IN (
-//             SELECT DISTINCT cch.container_id
-//             FROM container_consignment_history cch
-//             WHERE cch.consignment_id = $1
-//               AND cch.container_id IS NOT NULL
-//           )`,
-//           [numericId],
-//         );
-
-//         containers = containerRes.rows.map((row) => ({
-//           id: row.id,
-//           size: row.size,
-//           containerNo: row.containerNo,
-//           containerType: row.containerType,
-//           ownership: row.ownership,
-//           location: row.location,
-//           status: row.status,
-//           statusColor: getStatusColor(row.status),
-//         }));
-//       } catch (containerErr) {
-//         containers = [];
-//       } finally {
-//         containerClient.release();
-//       }
-//     }
-
-//     consignment.containers = containers;
-//     res.json({ data: consignment });
-//   } catch (err) {
-//     res.status(500).json({ error: "Failed to fetch consignment" });
-//   }
-// }
-
 async function logToTracking(
   client,
   consignmentId,
@@ -827,15 +605,6 @@ async function logToTracking(
 
 export async function getStatuses(req, res) {
   try {
-    // Extend getStatusColor with missing entries (add to your existing function if needed)
-    // In getStatusColor (earlier in file):
-    // 'Customs Cleared': '#9C27B0',  // Purple, e.g., post-submission
-    // 'Submitted': '#FFEB3B',  // Yellow, initial submit
-    // 'Under Shipment Processing': '#9C27B0',  // Purple
-    // 'In Transit': '#4CAF50',  // Green (alias for 'In Transit On Vessel')
-    // 'Arrived at Facility': '#795548',  // Brown
-
-    // Full list of valid statuses aligned with the consignment status workflow table
     const fullStatuses = [
       { value: "HOLD", label: "HOLD", color: getStatusColor("HOLD") },
       {
@@ -895,7 +664,6 @@ export async function getStatuses(req, res) {
       },
     ];
 
-    // Optional: Query DB for existing statuses to add usage count (non-blocking)
     let dbStatuses = [];
     try {
       const query = `
@@ -911,17 +679,15 @@ export async function getStatuses(req, res) {
       dbStatuses = result.rows.map((row) => ({
         ...row,
         label: row.value,
-        color: getStatusColor(row.value) || "#000000", // Fallback if unknown
+        color: getStatusColor(row.value) || "#000000",
       }));
     } catch (dbErr) {
       console.warn(
         "Failed to fetch DB statuses (non-critical); using full list:",
         dbErr,
       );
-      // Continue without DB data—full list still returned
     }
 
-    // Merge: Enhance full list with usage_count from DB
     const statuses = fullStatuses.map((full) => {
       const dbMatch = dbStatuses.find((db) => db.value === full.value);
       return {
@@ -930,17 +696,9 @@ export async function getStatuses(req, res) {
       };
     });
 
-    // Optional: Filter to used-only (uncomment if you want dynamic list)
-    // const statuses = fullStatuses.filter(full => {
-    //   const dbMatch = dbStatuses.find(db => db.value === full.value);
-    //   return dbMatch && dbMatch.usage_count > 0;
-    // }).map(full => ({ ...full, usage_count: dbMatch.usage_count }));
-
-    // Match frontend expectation: { statusOptions: [...] }
     res.json({ statusOptions: statuses });
   } catch (err) {
     console.error("Error fetching statuses:", err);
-    // Graceful fallback: Minimal options to prevent frontend crash
     res.status(500).json({
       statusOptions: [
         {
@@ -1056,13 +814,12 @@ export async function getConsignments(req, res) {
 
     const { rows } = await pool.query(fullQuery, queryParams);
 
-    // Count for pagination (reuse where clause params, no JOIN needed for count)
     const countQuery = `
       SELECT COUNT(*) as total
       FROM consignments cons
       ${whereClause}
     `;
-    const countResult = await pool.query(countQuery, queryParams.slice(0, -2)); // Exclude limit/offset
+    const countResult = await pool.query(countQuery, queryParams.slice(0, -2));
     const total = parseInt(countResult.rows[0].total);
 
     res.json({ data: rows, total });
@@ -1346,9 +1103,24 @@ export async function createConsignment(req, res) {
       consignment_number: newConsignment.consignment_number,
     });
 
+    let zoho = { created: [], skipped: [], failed: [] };
+    try {
+      zoho = await uploadConsignmentInvoicesToZoho({
+        consignmentNumber: newConsignment.consignment_number,
+        orderIds: input.orders,
+        consignmentValue: newConsignment.consignment_value,
+      });
+    } catch (zohoErr) {
+      logger.error(`[createConsignment] Zoho invoice upload failed`, {
+        consignment_id: newConsignment.id,
+        message: zohoErr.message,
+      });
+    }
+
     res.status(201).json({
       message: "Consignment created successfully",
       data: newConsignment,
+      zoho,
     });
   } catch (err) {
     logger.error(`[createConsignment] Error creating consignment`, {

@@ -8,6 +8,7 @@ import {
   getInvoicePayment,
   getOverstayInvoices,
   getStorageInvoices,
+  uploadInvoiceToZohoManual,
   verifyInvoiceOtp,
 } from "./invoice.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
@@ -23,5 +24,6 @@ router.get("/overstayed/list", requireAuth, getOverstayInvoices);
 router.get("/storage/list", requireAuth, getStorageInvoices);
 router.get("/delivery/list", requireAuth, getDeliveryInvoices);
 router.get("/dropoff/list", requireAuth, getDropoffInvoices);
+router.post("/zoho/:invoiceId", uploadInvoiceToZohoManual);
 
 export default router;
