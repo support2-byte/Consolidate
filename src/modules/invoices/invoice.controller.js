@@ -352,7 +352,7 @@ export const createWebNgeniusOrder = async (req, res) => {
         .json({ success: false, message: "Invoice not found." });
     }
 
-    const { type, table, invoice } = found;
+    const { table, invoice } = found;
 
     if (invoice.status?.toLowerCase().includes("paid")) {
       return res
@@ -411,7 +411,7 @@ export const confirmNgeniusPayment = async (req, res) => {
         .json({ success: false, message: "Invoice not found." });
     }
 
-    const { table, invoice } = found;
+    const { type, table, invoice } = found;
 
     logger.info("confirmNgeniusPayment: invoice loaded", {
       invoiceId,
