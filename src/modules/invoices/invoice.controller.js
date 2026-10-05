@@ -87,17 +87,6 @@ async function findInvoice(invoiceId) {
   return null;
 }
 
-async function isOtpValid(type, invoiceRowId, otp) {
-  if (!otp) return false;
-  const { rows } = await pool.query(
-    `SELECT 1 FROM invoice_email_queue
-      WHERE email_type = $1 AND invoice_id = $2 AND otp = $3
-      LIMIT 1`,
-    [type, invoiceRowId, String(otp)],
-  );
-  return rows.length > 0;
-}
-
 export async function createOverstayedInvoice(req, res) {
   let client;
   try {
@@ -351,38 +340,8 @@ export const getInvoicePayment = async (req, res) => {
   }
 };
 
-export const verifyInvoiceOtp = async (req, res) => {
-  const { invoiceId } = req.params;
-  const { otp } = req.body;
-
-  try {
-    const found = await findInvoice(invoiceId);
-
-    if (!found) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Invoice not found." });
-    }
-
-    if (!(await isOtpValid(found.type, found.invoice.id, otp))) {
-      return res.status(400).json({ success: false, message: "Invalid OTP." });
-    }
-
-    return res.json({ success: true });
-  } catch (error) {
-    logger.error("Failed to verify invoice OTP", {
-      invoiceId,
-      error: error.message,
-    });
-    return res
-      .status(500)
-      .json({ success: false, message: "Unable to verify OTP." });
-  }
-};
-
 export const createWebNgeniusOrder = async (req, res) => {
   const { invoiceId } = req.params;
-  const { otp } = req.body;
 
   try {
     const found = await findInvoice(invoiceId);
@@ -399,12 +358,6 @@ export const createWebNgeniusOrder = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "Invoice already paid." });
-    }
-
-    if (!(await isOtpValid(type, invoice.id, otp))) {
-      return res
-        .status(403)
-        .json({ success: false, message: "OTP verification required." });
     }
 
     const { paymentUrl, orderReferenceId } = await createOrder({
@@ -706,7 +659,7 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Invoice not found." });
     }
-    const { type, table, invoice } = found;
+    const { table, invoice } = found;
 
     if (invoice.zoho_invoice_id) {
       return res.status(409).json({
