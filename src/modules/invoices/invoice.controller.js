@@ -411,7 +411,7 @@ export const confirmNgeniusPayment = async (req, res) => {
         .json({ success: false, message: "Invoice not found." });
     }
 
-    const { type, table, invoice } = found;
+    const { table, invoice } = found;
 
     logger.info("confirmNgeniusPayment: invoice loaded", {
       invoiceId,
@@ -659,7 +659,7 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Invoice not found." });
     }
-    const { table, invoice } = found;
+    const { type, table, invoice } = found;
 
     if (invoice.zoho_invoice_id) {
       return res.status(409).json({
