@@ -1,6 +1,14 @@
 import pool from "../../db/pool.js";
+import axios from "axios";
+import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
 import logger from "../../services/logger.js";
 import { createOrder, getOrderStatus } from "../../services/ngeniusService.js";
+import {
+  zohoHeaders,
+  zohoParams,
+} from "../zoho-invoices/zoho-bill.controller.js";
+import { getZohoDueContext } from "../zoho-invoices/zoho-invoice.service.js";
+import { getBooksBaseUrl } from "../zoho-invoices/zoho-invoice.controller.js";
 
 const INVOICE_TABLES = {
   overstayed: "overstay_invoices",
@@ -144,6 +152,12 @@ export async function createOverstayedInvoice(req, res) {
       });
     }
 
+    const zohoContext = await getZohoDueContext({
+      type: "overstayed",
+      itemRef,
+      customerRef: receiver.receiver_ref,
+    });
+
     const finalAmount = Number.isFinite(Number(total)) ? Number(total) : 0;
     const finalSubtotal = Number.isFinite(Number(subtotal))
       ? Number(subtotal)
@@ -152,12 +166,12 @@ export async function createOverstayedInvoice(req, res) {
     const invoiceRes = await client.query(
       `INSERT INTO overstay_invoices
         (invoice_id, amount, status, shipment_ref, customer_ref,
-         overstay_days, tax_percent, subtotal, discount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         overstay_days, tax_percent, subtotal, discount, due_amount, due_details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
       [
         invoiceId,
-        finalAmount,
+        finalAmount + zohoContext.dueAmount,
         "pending",
         itemRef,
         receiver.receiver_ref,
@@ -165,6 +179,8 @@ export async function createOverstayedInvoice(req, res) {
         Number.isFinite(Number(taxPercent)) ? Number(taxPercent) : null,
         finalSubtotal,
         discount,
+        zohoContext.dueAmount,
+        JSON.stringify(zohoContext.dueInvoices),
       ],
     );
     const invoice = invoiceRes.rows[0];
@@ -186,9 +202,17 @@ export async function createOverstayedInvoice(req, res) {
     );
 
     await client.query("COMMIT");
-    return res
-      .status(201)
-      .json({ success: true, message: "Invoice Created Successfully" });
+
+    return res.status(201).json({
+      success: true,
+      message: "Invoice Created Successfully",
+      invoice: {
+        invoiceId: invoice.invoice_id,
+        createdAt: invoice.created_at,
+        dueAmount: zohoContext.dueAmount,
+        dueInvoices: zohoContext.dueInvoices,
+      },
+    });
   } catch (error) {
     console.error("Error creating overstayed invoice:", error);
     if (client) await client.query("ROLLBACK");
@@ -293,6 +317,8 @@ export const getInvoicePayment = async (req, res) => {
         invoiceId: invoiceRow.invoice_id,
         invoiceType: type,
         amount: Number(invoiceRow.amount),
+        dueAmount: Number(invoiceRow.due_amount || 0),
+        dueInvoices: invoiceRow.due_details || [],
         status: invoiceRow.status,
         createdAt: invoiceRow.created_at,
         shipmentId: invoiceRow.shipment_ref,
@@ -509,6 +535,9 @@ export const getOverstayInvoices = async (req, res) => {
          oi.overstay_days,
          oi.tax_percent,
          oi.subtotal,
+         oi.due_amount,
+         oi.due_details,
+         oi.zoho_invoice_id,
          r.receiver_name,
          r.receiver_contact,
          r.receiver_email,
@@ -535,6 +564,9 @@ export const getOverstayInvoices = async (req, res) => {
       overstayDays: row.overstay_days,
       taxPercent: row.tax_percent !== null ? Number(row.tax_percent) : null,
       subtotal: row.subtotal !== null ? Number(row.subtotal) : null,
+      dueAmount: Number(row.due_amount || 0),
+      dueInvoices: row.due_details || [],
+      zohoInvoiceId: row.zoho_invoice_id,
       baseRate:
         row.subtotal !== null && row.overstay_days
           ? Number((Number(row.subtotal) / row.overstay_days).toFixed(2))
@@ -579,7 +611,8 @@ async function listInvoices(
   const { rows } = await pool.query(
     `SELECT
        inv.id, inv.invoice_id, inv.amount, inv.status, inv.created_at,
-       inv.shipment_ref, inv.customer_ref,
+       inv.shipment_ref, inv.customer_ref, inv.due_amount, inv.due_details,
+       inv.zoho_invoice_id,
        ${storageSelect}
        oi.category, oi.subcategory, oi.order_id,
        o.booking_ref, o.rgl_booking_number,
@@ -599,6 +632,9 @@ async function listInvoices(
     status: row.status,
     createdAt: row.created_at,
     shipmentId: row.shipment_ref,
+    dueAmount: Number(row.due_amount || 0),
+    dueInvoices: row.due_details || [],
+    zohoInvoiceId: row.zoho_invoice_id,
     category: row.category,
     subcategory: row.subcategory,
     ...(withStorageDetails
@@ -649,5 +685,167 @@ export const getDropoffInvoices = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Unable to load invoices." });
+  }
+};
+
+const ZOHO_LINE_NAMES = {
+  overstayed: "Overstay Charges",
+  storage: "Storage Charges",
+  delivery: "Delivery Charges",
+  dropoff: "Drop-off Charges",
+};
+
+export const uploadInvoiceToZohoManual = async (req, res) => {
+  try {
+    const found = await findInvoice(req.params.invoiceId);
+    if (!found) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Invoice not found." });
+    }
+    const { type, table, invoice } = found;
+
+    if (invoice.zoho_invoice_id) {
+      return res.status(409).json({
+        success: false,
+        message: "Invoice already uploaded to Zoho.",
+      });
+    }
+
+    const ctx = await getZohoDueContext({
+      type,
+      itemRef: invoice.shipment_ref,
+      customerRef: invoice.customer_ref,
+    });
+    if (!ctx.orderNumber) {
+      return res
+        .status(422)
+        .json({ success: false, message: "Order number not found." });
+    }
+    if (!ctx.customerId) {
+      return res
+        .status(422)
+        .json({ success: false, message: "Customer not found in Zoho." });
+    }
+
+    const { rows: paidLocal } = await pool.query(
+      `SELECT invoice_number FROM zoho_invoices
+        WHERE btrim(order_number) = $1
+          AND btrim(invoice_number) = $2
+          AND status = 'paid'
+          AND ($3::text IS NULL
+               OR consignment_number IS NULL
+               OR btrim(consignment_number) = $3)
+        LIMIT 1`,
+      [ctx.orderNumber, invoice.invoice_id, ctx.consignmentNumber],
+    );
+    if (paidLocal.length) {
+      return res.status(409).json({
+        success: false,
+        message: "Invoice is already paid in Zoho.",
+      });
+    }
+
+    const token = await getZohoAccessToken();
+    const headers = zohoHeaders(token);
+
+    const existing = await axios.get(`${getBooksBaseUrl()}/invoices`, {
+      headers,
+      params: { ...zohoParams(), invoice_number: invoice.invoice_id },
+    });
+    const hit = (existing.data.invoices || []).find(
+      (z) => z.invoice_number === invoice.invoice_id,
+    );
+    if (hit) {
+      await pool.query(
+        `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
+          WHERE id = $2 AND zoho_invoice_id IS NULL`,
+        [hit.invoice_id, invoice.id],
+      );
+      return res.status(409).json({
+        success: false,
+        message:
+          hit.status === "paid"
+            ? "Invoice is already paid in Zoho."
+            : "Invoice number already exists in Zoho.",
+      });
+    }
+
+    const dueAmount = Number(invoice.due_amount || 0);
+    const taxPercent = Number(invoice.tax_percent || 0);
+    const taxId = process.env.ZOHO_TAX_ID;
+
+    const lineItem =
+      type === "overstayed"
+        ? {
+            name: ZOHO_LINE_NAMES[type],
+            description: `Shipment ${invoice.shipment_ref}`,
+            rate: Number(
+              (Number(invoice.subtotal) / invoice.overstay_days).toFixed(2),
+            ),
+            quantity: invoice.overstay_days,
+            ...(taxPercent > 0 && taxId ? { tax_id: taxId } : {}),
+          }
+        : {
+            name: ZOHO_LINE_NAMES[type],
+            description: `Shipment ${invoice.shipment_ref}`,
+            rate: Number((Number(invoice.amount) - dueAmount).toFixed(2)),
+            quantity: 1,
+          };
+
+    const dueLines = (
+      Array.isArray(invoice.due_details) ? invoice.due_details : []
+    ).map((d) => ({
+      name: `Previous Balance - ${d.invoiceNumber}`,
+      description: d.dueDate ? `Due ${d.dueDate}` : undefined,
+      rate: Number(d.balance),
+      quantity: 1,
+    }));
+
+    const body = {
+      customer_id: ctx.customerId,
+      invoice_number: invoice.invoice_id,
+      reference_number: ctx.orderNumber,
+      date: new Date(invoice.created_at).toISOString().slice(0, 10),
+      line_items: [lineItem, ...dueLines],
+      ...(ctx.consignmentNumber && process.env.ZOHO_CONSIGNMENT_FIELD
+        ? {
+            custom_fields: [
+              {
+                api_name: process.env.ZOHO_CONSIGNMENT_FIELD,
+                value: ctx.consignmentNumber,
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const created = await axios.post(`${getBooksBaseUrl()}/invoices`, body, {
+      headers,
+      params: { ...zohoParams(), ignore_auto_number_generation: true },
+    });
+    if (created.data.code !== 0) {
+      throw new Error(created.data.message || "Zoho error");
+    }
+
+    const zohoInvoiceId = created.data.invoice.invoice_id;
+    await pool.query(
+      `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
+        WHERE id = $2`,
+      [zohoInvoiceId, invoice.id],
+    );
+
+    return res.json({ success: true, zohoInvoiceId });
+  } catch (error) {
+    logger.error("uploadInvoiceToZoho error", {
+      err: error.response?.data || error.message,
+    });
+    return res.status(500).json({
+      success: false,
+      message:
+        error.response?.data?.message ||
+        error.message ||
+        "Unable to upload invoice to Zoho.",
+    });
   }
 };
