@@ -11,7 +11,6 @@ export const sendInvoiceEmail = async ({
   amount,
   invoiceLink,
   dueDate,
-  otp,
 }) => {
   try {
     const html = buildInvoiceEmailHtml({
@@ -21,7 +20,6 @@ export const sendInvoiceEmail = async ({
       amount,
       invoiceLink,
       dueDate,
-      otp,
     });
 
     await transporter.sendMail({

@@ -414,7 +414,7 @@ export const getAllInvoiceEmails = async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
          q.id, q.recipient_id, q.recipient_name, q.recipient_email, q.email_type,
-         q.status, q.item_ref, q.attempts, q.created_at, q.sent_at, q.otp,
+         q.status, q.item_ref, q.attempts, q.created_at, q.sent_at,
          i.invoice_id, i.amount, i.status AS invoice_status,
          i.ngenius_order_ref,
          oi.category, oi.subcategory
@@ -458,8 +458,6 @@ export const resendInvoiceNotification = async (req, res) => {
 
     const notif = rows[0];
 
-    const otp = generateOtp();
-
     const result = await sendInvoiceEmail({
       email: notif.recipient_email,
       recipientId: notif.recipient_id,
@@ -467,7 +465,6 @@ export const resendInvoiceNotification = async (req, res) => {
       receiverName: notif.recipient_name || "Valued Customer",
       invoiceId: notif.invoice_id,
       amount: notif.amount,
-      otp,
       invoiceLink: `${FORM_BASE_URL}/invoice-payment/${encodeURIComponent(notif.invoice_id)}`,
     });
 
@@ -485,9 +482,9 @@ export const resendInvoiceNotification = async (req, res) => {
 
     await pool.query(
       `UPDATE invoice_email_queue
-          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), otp = $2
-        WHERE id = $1`,
-      [id, otp],
+        SET status = 'sent', attempts = attempts + 1, sent_at = NOW()
+      WHERE id = $1`,
+      [id],
     );
 
     return res.status(200).json({ success: true, message: "Email sent" });
