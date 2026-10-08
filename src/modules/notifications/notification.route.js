@@ -10,6 +10,9 @@ import {
   getAllInvoiceEmails,
   resendInvoiceNotification,
   deleteInvoiceEmailQueue,
+  getZohoInvoiceEmails,
+  resendZohoInvoiceEmail,
+  deleteZohoInvoiceEmail,
 } from "./notification.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
 
@@ -113,8 +116,28 @@ router.delete(
   deleteConfirmationEmail,
 );
 
-router.get("/invoice-emails", getAllInvoiceEmails);
-router.post("/invoice-emails/:id/resend", resendInvoiceNotification);
-router.delete("/invoice-emails/:id/delete", deleteInvoiceEmailQueue);
+router.get("/invoice-emails", requireAuth, getAllInvoiceEmails);
+router.post(
+  "/invoice-emails/:id/resend",
+  requireAuth,
+  resendInvoiceNotification,
+);
+router.delete(
+  "/invoice-emails/:id/delete",
+  requireAuth,
+  deleteInvoiceEmailQueue,
+);
+
+router.get("/zoho-invoice-emails", requireAuth, getZohoInvoiceEmails);
+router.post(
+  "/zoho-invoice-emails/:id/resend",
+  requireAuth,
+  resendZohoInvoiceEmail,
+);
+router.delete(
+  "/zoho-invoice-emails/:id/delete",
+  requireAuth,
+  deleteZohoInvoiceEmail,
+);
 
 export default router;

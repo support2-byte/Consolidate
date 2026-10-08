@@ -84,7 +84,71 @@ async function findInvoice(invoiceId) {
     );
     if (rows.length) return { type, table, invoice: rows[0] };
   }
+
+  const { rows: zohoRows } = await pool.query(
+    `SELECT id, zoho_invoice_id, invoice_number AS invoice_id,
+            balance::float8 AS amount, status, customer_id, customer_name,
+            currency_code, order_number, consignment_number,
+            ngenius_order_ref, invoice_date AS created_at
+       FROM zoho_invoices
+      WHERE invoice_number = $1
+      LIMIT 1`,
+    [invoiceId],
+  );
+  if (zohoRows.length) {
+    return { type: "zoho", table: "zoho_invoices", invoice: zohoRows[0] };
+  }
   return null;
+}
+
+async function refreshZohoInvoice(invoice) {
+  try {
+    const token = await getZohoAccessToken();
+    const { data } = await axios.get(
+      `${getBooksBaseUrl()}/invoices/${invoice.zoho_invoice_id}`,
+      { headers: zohoHeaders(token), params: zohoParams() },
+    );
+    if (data.code !== 0) throw new Error(data.message || "Zoho error");
+
+    const z = data.invoice;
+    await pool.query(
+      `UPDATE zoho_invoices SET status = $1, balance = $2, synced_at = NOW()
+        WHERE zoho_invoice_id = $3`,
+      [z.status, z.balance ?? 0, invoice.zoho_invoice_id],
+    );
+    return { ...invoice, status: z.status, amount: Number(z.balance ?? 0) };
+  } catch (error) {
+    logger.warn("refreshZohoInvoice failed, using local data", {
+      zohoInvoiceId: invoice.zoho_invoice_id,
+      err: error.response?.data || error.message,
+    });
+    return invoice;
+  }
+}
+
+async function recordZohoPayment(invoice) {
+  const token = await getZohoAccessToken();
+  const amount = Number(invoice.amount);
+  const payment = await axios.post(
+    `${getBooksBaseUrl()}/customerpayments`,
+    {
+      customer_id: invoice.customer_id,
+      payment_mode: "Online Payment",
+      amount,
+      date: new Date().toISOString().slice(0, 10),
+      reference_number: invoice.ngenius_order_ref,
+      invoices: [
+        { invoice_id: invoice.zoho_invoice_id, amount_applied: amount },
+      ],
+      ...(process.env.ZOHO_DEPOSIT_ACCOUNT_ID && {
+        account_id: process.env.ZOHO_DEPOSIT_ACCOUNT_ID,
+      }),
+    },
+    { headers: zohoHeaders(token), params: zohoParams() },
+  );
+  if (payment.data.code !== 0) {
+    throw new Error(payment.data.message || "Zoho payment error");
+  }
 }
 
 export async function createOverstayedInvoice(req, res) {
@@ -228,6 +292,34 @@ export const getInvoicePayment = async (req, res) => {
 
     const { type, invoice: invoiceRow } = found;
 
+    if (type === "zoho") {
+      const z = await refreshZohoInvoice(invoiceRow);
+      return res.json({
+        invoice: {
+          invoiceId: z.invoice_id,
+          invoiceType: "zoho",
+          amount: Number(z.amount),
+          dueAmount: 0,
+          dueInvoices: [],
+          status: z.status,
+          createdAt: z.created_at,
+          shipmentId: z.consignment_number || z.order_number,
+          category: "Freight Charges",
+          subcategory: null,
+          details: null,
+        },
+        order: z.order_number
+          ? { bookingRef: null, formNumber: z.order_number }
+          : null,
+        receiver: {
+          receiverName: z.customer_name,
+          receiverContact: null,
+          receiverEmail: null,
+        },
+        company: null,
+      });
+    }
+
     const orderItemResult = await pool.query(
       `SELECT order_id, category, subcategory
        FROM order_items
@@ -352,9 +444,26 @@ export const createWebNgeniusOrder = async (req, res) => {
         .json({ success: false, message: "Invoice not found." });
     }
 
-    const { table, invoice } = found;
+    const { type, table } = found;
+    let invoice = found.invoice;
 
-    if (invoice.status?.toLowerCase().includes("paid")) {
+    if (type === "zoho") {
+      invoice = await refreshZohoInvoice(invoice);
+      if (invoice.status === "paid") {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invoice already paid." });
+      }
+      if (
+        ["void", "draft"].includes(invoice.status) ||
+        Number(invoice.amount) <= 0 ||
+        invoice.currency_code !== "AED"
+      ) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invoice is not payable online." });
+      }
+    } else if (invoice.status?.toLowerCase().includes("paid")) {
       return res
         .status(400)
         .json({ success: false, message: "Invoice already paid." });
@@ -411,7 +520,7 @@ export const confirmNgeniusPayment = async (req, res) => {
         .json({ success: false, message: "Invoice not found." });
     }
 
-    const { table, invoice } = found;
+    const { type, table, invoice } = found;
 
     logger.info("confirmNgeniusPayment: invoice loaded", {
       invoiceId,
@@ -446,10 +555,31 @@ export const confirmNgeniusPayment = async (req, res) => {
     const { state } = orderStatus;
 
     if (state === "CAPTURED" || state === "PURCHASED") {
-      const updateResult = await pool.query(
-        `UPDATE ${table} SET status = 'paid' WHERE id = $1 RETURNING id, status`,
-        [invoice.id],
-      );
+      let zohoRecorded = true;
+      if (type === "zoho") {
+        try {
+          await recordZohoPayment(invoice);
+        } catch (zohoErr) {
+          zohoRecorded = false;
+          logger.error(
+            "confirmNgeniusPayment: paid in N-Genius but Zoho payment failed",
+            {
+              invoiceId,
+              ngenius_order_ref: invoice.ngenius_order_ref,
+              err: zohoErr.response?.data || zohoErr.message,
+            },
+          );
+        }
+      }
+
+      const updateResult = zohoRecorded
+        ? await pool.query(
+            `UPDATE ${table}
+                SET status = 'paid', payment_mode = 'Online Payment'${type === "zoho" ? ", balance = 0" : ""}
+              WHERE id = $1 RETURNING id, status`,
+            [invoice.id],
+          )
+        : { rows: [] };
       logger.info("confirmNgeniusPayment: status updated to paid", {
         invoiceId,
         updateResult: updateResult.rows,
@@ -494,6 +624,7 @@ export const getOverstayInvoices = async (req, res) => {
          oi.due_amount,
          oi.due_details,
          oi.zoho_invoice_id,
+         oi.payment_mode,
          r.receiver_name,
          r.receiver_contact,
          r.receiver_email,
@@ -523,6 +654,7 @@ export const getOverstayInvoices = async (req, res) => {
       dueAmount: Number(row.due_amount || 0),
       dueInvoices: row.due_details || [],
       zohoInvoiceId: row.zoho_invoice_id,
+      paymentMode: row.payment_mode,
       baseRate:
         row.subtotal !== null && row.overstay_days
           ? Number((Number(row.subtotal) / row.overstay_days).toFixed(2))
@@ -569,6 +701,7 @@ async function listInvoices(
        inv.id, inv.invoice_id, inv.amount, inv.status, inv.created_at,
        inv.shipment_ref, inv.customer_ref, inv.due_amount, inv.due_details,
        inv.zoho_invoice_id,
+       inv.payment_mode,
        ${storageSelect}
        oi.category, oi.subcategory, oi.order_id,
        o.booking_ref, o.rgl_booking_number,
@@ -591,6 +724,7 @@ async function listInvoices(
     dueAmount: Number(row.due_amount || 0),
     dueInvoices: row.due_details || [],
     zohoInvoiceId: row.zoho_invoice_id,
+    paymentMode: row.payment_mode,
     category: row.category,
     subcategory: row.subcategory,
     ...(withStorageDetails
@@ -807,6 +941,56 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       [zohoInvoiceId, invoice.id],
     );
 
+    const isPaidLocally = invoice.status?.toLowerCase() === "paid";
+    let zohoStatus = zi.status;
+    let zohoBalance = zi.balance ?? zi.total ?? 0;
+    let syncWarning = null;
+
+    try {
+      await axios.post(
+        `${getBooksBaseUrl()}/invoices/${zohoInvoiceId}/status/sent`,
+        null,
+        { headers, params: zohoParams() },
+      );
+      zohoStatus = "sent";
+
+      if (isPaidLocally) {
+        const payment = await axios.post(
+          `${getBooksBaseUrl()}/customerpayments`,
+          {
+            customer_id: ctx.customerId,
+            payment_mode: "Online Payment",
+            amount: Number(zi.total ?? invoice.amount),
+            date: new Date().toISOString().slice(0, 10),
+            reference_number: invoice.ngenius_order_ref || invoice.invoice_id,
+            invoices: [
+              {
+                invoice_id: zohoInvoiceId,
+                amount_applied: Number(zi.total ?? invoice.amount),
+              },
+            ],
+            ...(process.env.ZOHO_DEPOSIT_ACCOUNT_ID && {
+              account_id: process.env.ZOHO_DEPOSIT_ACCOUNT_ID,
+            }),
+          },
+          { headers, params: zohoParams() },
+        );
+        if (payment.data.code !== 0) {
+          throw new Error(payment.data.message || "Zoho payment error");
+        }
+        zohoStatus = "paid";
+        zohoBalance = 0;
+      }
+    } catch (statusErr) {
+      syncWarning = isPaidLocally
+        ? "Invoice uploaded to Zoho but could not be marked as paid."
+        : "Invoice uploaded to Zoho but could not be marked as sent.";
+      logger.error("Zoho invoice status/payment sync failed", {
+        zohoInvoiceId,
+        err: statusErr.response?.data || statusErr.message,
+      });
+    }
+
     try {
       await pool.query(UPSERT_SQL, [
         zohoInvoiceId,
@@ -814,12 +998,12 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
         zi.customer_id,
         zi.customer_name,
         zi.reference_number,
-        zi.status,
+        zohoStatus,
         zi.date,
         zi.due_date || null,
         zi.currency_code,
         zi.total ?? 0,
-        zi.balance ?? zi.total ?? 0,
+        zohoBalance,
         ctx.orderNumber,
         consignmentNumber,
         zi.last_modified_time || null,
@@ -831,7 +1015,12 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       });
     }
 
-    return res.json({ success: true, zohoInvoiceId });
+    return res.json({
+      success: true,
+      zohoInvoiceId,
+      zohoStatus,
+      ...(syncWarning && { warning: syncWarning }),
+    });
   } catch (error) {
     logger.error("uploadInvoiceToZoho error", {
       err: error.response?.data || error.message,

@@ -51,10 +51,10 @@ import {
   getDrivers,
   updateDriver,
   deleteDriver,
-  getDriverTracks,
-  createDriverTrack,
-  updateDriverTrack,
-  deleteDriverTrack,
+  getDriverTrucks,
+  createDriverTruck,
+  updateDriverTruck,
+  deleteDriverTruck,
   createSystemSetting,
   deleteSystemSetting,
   updateSystemSetting,
@@ -144,10 +144,10 @@ router.post("/drivers", requireAuth, createDriver);
 router.put("/drivers/:id", requireAuth, updateDriver);
 router.delete("/drivers/:id", requireAuth, deleteDriver);
 
-router.get("/driver-tracks", requireAuth, getDriverTracks);
-router.post("/driver-tracks", requireAuth, createDriverTrack);
-router.put("/driver-tracks/:id", requireAuth, updateDriverTrack);
-router.delete("/driver-tracks/:id", requireAuth, deleteDriverTrack);
+router.get("/driver-trucks", requireAuth, getDriverTrucks);
+router.post("/driver-trucks", requireAuth, createDriverTruck);
+router.put("/driver-trucks/:id", requireAuth, updateDriverTruck);
+router.delete("/driver-trucks/:id", requireAuth, deleteDriverTruck);
 
 router.get("/system-settings", getSystemSettings);
 
