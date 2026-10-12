@@ -92,6 +92,7 @@ export const getZohoInvoices = async (req, res) => {
         balance::float8 AS balance,
         order_number,
         consignment_number,
+        payment_mode,
         (status = 'paid') AS is_paid
       FROM zoho_invoices
       ORDER BY invoice_date DESC NULLS LAST, id DESC
@@ -228,6 +229,7 @@ export const runZohoSync = async () => {
   await mapWithLimit(changed, 4, async (i) => {
     let orderNumber = null;
     let consignmentNumber = null;
+    let paymentMode = null;
     let lastModified = i.last_modified_time || null;
     try {
       const detail = await getInvoiceDetailCached(i.invoice_id, token);
@@ -239,6 +241,23 @@ export const runZohoSync = async () => {
         detail.custom_fields,
         CUSTOM_FIELD_LABELS.consignmentNumber,
       );
+
+      let payments = detail.payments;
+      if (!payments?.length && ["paid", "partially_paid"].includes(i.status)) {
+        const pr = await withRetry(() =>
+          axios.get(`${getBooksBaseUrl()}/invoices/${i.invoice_id}/payments`, {
+            headers: { Authorization: `Zoho-oauthtoken ${token}` },
+            params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
+          }),
+        );
+        payments = pr.data.payments;
+      }
+      paymentMode =
+        [
+          ...new Set(
+            (payments || []).map((p) => p.payment_mode).filter(Boolean),
+          ),
+        ].join(", ") || null;
     } catch (err) {
       lastModified = null;
       logger.error("Failed to fetch Zoho invoice detail", {
@@ -262,6 +281,12 @@ export const runZohoSync = async () => {
       consignmentNumber,
       lastModified,
     ]);
+    if (paymentMode) {
+      await pool.query(
+        `UPDATE zoho_invoices SET payment_mode = $1 WHERE zoho_invoice_id = $2`,
+        [paymentMode, i.invoice_id],
+      );
+    }
   });
 
   if (list.length > 0) {

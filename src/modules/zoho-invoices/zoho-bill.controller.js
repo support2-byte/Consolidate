@@ -188,6 +188,120 @@ const counted = (docs) =>
 
 const sum = (docs) => Number(docs.reduce((s, d) => s + d.total, 0).toFixed(2));
 
+const strip = ({ order_number, ...rest }) => rest;
+
+const paymentStatusOf = (activeInvoices) => {
+  if (!activeInvoices.length) return "no_invoice";
+  if (activeInvoices.every((d) => d.balance <= 0)) return "paid";
+  return activeInvoices.some((d) => d.balance < d.total)
+    ? "partially_paid"
+    : "unpaid";
+};
+
+const normalizeName = (v) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(mr|mrs|ms|miss|dr|eng|sir|madam)\b\s*/, "")
+    .trim();
+
+const computeReceiverPayments = (receivers, invoices) => {
+  const byCustomer = {};
+  for (const inv of counted(invoices)) {
+    const k = normalizeName(inv.customer);
+    (byCustomer[k] = byCustomer[k] || []).push(inv);
+  }
+  return Object.fromEntries(
+    receivers.map((r) => [
+      r.id,
+      paymentStatusOf(byCustomer[normalizeName(r.receiver_name)] || []),
+    ]),
+  );
+};
+
+export const getReceiverPayments = async (orderId) => {
+  const orderRes = await pool.query(
+    "SELECT rgl_booking_number FROM orders WHERE id = $1",
+    [orderId],
+  );
+  if (!orderRes.rows[0]) return null;
+  const orderKey = key(orderRes.rows[0].rgl_booking_number);
+
+  const [recRes, invRes] = await Promise.all([
+    pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
+      orderId,
+    ]),
+    orderKey
+      ? pool.query(
+          `SELECT customer_name AS customer, status,
+                  total::float8 AS total, balance::float8 AS balance
+             FROM zoho_invoices
+            WHERE lower(btrim(order_number)) = $1`,
+          [orderKey],
+        )
+      : { rows: [] },
+  ]);
+  return computeReceiverPayments(recRes.rows, invRes.rows);
+};
+
+export const getOrderPaymentStatus = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+  try {
+    const receiverPayments = await getReceiverPayments(orderId);
+    if (!receiverPayments) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+    return res.json({ success: true, receiverPayments });
+  } catch (err) {
+    logger.error("Failed to build order payment status", {
+      err: err.response?.data || err.message,
+      orderId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to load payment status" });
+  }
+};
+
+const buildBillingRow = (order, invoices, vendorBills) => {
+  const activeInv = counted(invoices);
+  const activeBills = counted(vendorBills);
+  const currencies = new Set(
+    [...activeInv, ...activeBills].map((d) => d.currency),
+  );
+  const mixedCurrency = currencies.size > 1;
+  const invoiceTotal = sum(activeInv);
+  const vendorTotal = sum(activeBills);
+  return {
+    orderId: order.id,
+    bookingRef: order.booking_ref,
+    formNo: order.rgl_booking_number,
+    invoices: invoices.map(strip),
+    vendorBills: vendorBills.map(strip),
+    invoiceTotal,
+    vendorTotal,
+    currency:
+      [...currencies][0] ||
+      invoices[0]?.currency ||
+      vendorBills[0]?.currency ||
+      null,
+    mixedCurrency,
+    gross: mixedCurrency
+      ? null
+      : Number((invoiceTotal - vendorTotal).toFixed(2)),
+    paymentStatus: paymentStatusOf(activeInv),
+  };
+};
+
 export const getConsignmentBilling = async (req, res) => {
   const consignmentId = parseInt(req.params.consignmentId, 10);
   if (isNaN(consignmentId) || consignmentId <= 0) {
@@ -266,7 +380,6 @@ export const getConsignmentBilling = async (req, res) => {
 
     const invByOrder = groupByOrder(invRes.rows);
     const billByOrder = groupByOrder(billRes.rows);
-    const strip = ({ order_number, ...rest }) => rest;
 
     const rows = orders
       .filter((o) => {
@@ -275,34 +388,7 @@ export const getConsignmentBilling = async (req, res) => {
       })
       .map((o) => {
         const k = key(o.rgl_booking_number);
-        const invoices = invByOrder[k] || [];
-        const vendorBills = billByOrder[k] || [];
-        const activeInv = counted(invoices);
-        const activeBills = counted(vendorBills);
-        const currencies = new Set(
-          [...activeInv, ...activeBills].map((d) => d.currency),
-        );
-        const mixedCurrency = currencies.size > 1;
-        const invoiceTotal = sum(activeInv);
-        const vendorTotal = sum(activeBills);
-        return {
-          orderId: o.id,
-          bookingRef: o.booking_ref,
-          formNo: o.rgl_booking_number,
-          invoices: invoices.map(strip),
-          vendorBills: vendorBills.map(strip),
-          invoiceTotal,
-          vendorTotal,
-          currency:
-            [...currencies][0] ||
-            invoices[0]?.currency ||
-            vendorBills[0]?.currency ||
-            null,
-          mixedCurrency,
-          gross: mixedCurrency
-            ? null
-            : Number((invoiceTotal - vendorTotal).toFixed(2)),
-        };
+        return buildBillingRow(o, invByOrder[k] || [], billByOrder[k] || []);
       });
 
     return res.json({ success: true, consignmentNumber, rows });
@@ -310,6 +396,75 @@ export const getConsignmentBilling = async (req, res) => {
     logger.error("Failed to build consignment billing", {
       err: err.response?.data || err.message,
       consignmentId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to load billing data" });
+  }
+};
+
+export const getOrderBilling = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+
+  try {
+    const orderRes = await pool.query(
+      "SELECT id, booking_ref, rgl_booking_number FROM orders WHERE id = $1",
+      [orderId],
+    );
+    const order = orderRes.rows[0];
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const orderKey = key(order.rgl_booking_number);
+    if (!orderKey) return res.json({ success: true, row: null });
+
+    const [invRes, billRes, recRes] = await Promise.all([
+      pool.query(
+        `SELECT zoho_invoice_id AS id, invoice_number AS number,
+                customer_name AS customer, status, currency_code AS currency,
+                total::float8 AS total, balance::float8 AS balance,
+                order_number, consignment_number AS "consignmentNumber",
+                to_char(invoice_date, 'YYYY-MM-DD') AS date,
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+           FROM zoho_invoices
+          WHERE lower(btrim(order_number)) = $1
+          ORDER BY invoice_date, id`,
+        [orderKey],
+      ),
+      pool.query(
+        `SELECT zoho_bill_id AS id, bill_number AS number,
+                vendor_name AS vendor, status, currency_code AS currency,
+                total::float8 AS total, balance::float8 AS balance,
+                order_number, consignment_number AS "consignmentNumber",
+                to_char(bill_date, 'YYYY-MM-DD') AS date,
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+           FROM zoho_bills
+          WHERE lower(btrim(order_number)) = $1
+          ORDER BY bill_date, id`,
+        [orderKey],
+      ),
+      pool.query(
+        "SELECT id, receiver_name FROM receivers WHERE order_id = $1",
+        [orderId],
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
+    });
+  } catch (err) {
+    logger.error("Failed to build order billing", {
+      err: err.response?.data || err.message,
+      orderId,
     });
     return res
       .status(500)

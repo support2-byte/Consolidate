@@ -1750,7 +1750,7 @@ export const updateDocumentTemplate = async (req, res) => {
 export const getDrivers = async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT id, driver_id, name, phone_number, vehicle_plate, created_at, created_by
+      SELECT id, driver_id, name, phone_number, created_at, created_by
       FROM drivers
       ORDER BY created_at DESC
     `);
@@ -1778,21 +1778,21 @@ export const getDrivers = async (req, res) => {
 
 export const createDriver = async (req, res) => {
   try {
-    const { driver_id, name, phone_number, vehicle_plate } = req.body;
+    const { driver_id, name, phone_number } = req.body;
     const userEmail = req?.user?.email;
 
-    if (!driver_id || !name || !phone_number || !vehicle_plate) {
+    if (!driver_id || !name || !phone_number) {
       return res.status(400).json({
         success: false,
-        message: "driver_id, name, phone_number and vehicle_plate are required",
+        message: "driver_id, name and phone_number are required",
       });
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO drivers (driver_id, name, phone_number, vehicle_plate, created_by)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO drivers (driver_id, name, phone_number, created_by)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [driver_id, name, phone_number, vehicle_plate, userEmail],
+      [driver_id, name, phone_number, userEmail],
     );
 
     return res.status(201).json({
@@ -1811,14 +1811,14 @@ export const createDriver = async (req, res) => {
 export const updateDriver = async (req, res) => {
   try {
     const { id } = req.params;
-    const { driver_id, name, phone_number, vehicle_plate } = req.body;
+    const { driver_id, name, phone_number } = req.body;
 
     const { rows } = await pool.query(
       `UPDATE drivers
-       SET driver_id = $1, name = $2, phone_number = $3, vehicle_plate = $4
-       WHERE id = $5
+       SET driver_id = $1, name = $2, phone_number = $3
+       WHERE id = $4
        RETURNING *`,
-      [driver_id, name, phone_number, vehicle_plate, id],
+      [driver_id, name, phone_number, id],
     );
 
     if (rows.length === 0) {
@@ -1870,26 +1870,26 @@ export const deleteDriver = async (req, res) => {
   }
 };
 
-export const getDriverTracks = async (req, res) => {
+export const getDriverTrucks = async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT
         dt.id,
         dt.driver_id,
+        dt.plate_no,
         dt.total_deliveries,
-        dt.routes,
         d.name AS driver_name,
         d.driver_id AS driver_code
-      FROM driver_tracks dt
+      FROM driver_trucks dt
       LEFT JOIN drivers d ON d.id = dt.driver_id
       ORDER BY dt.id DESC
     `);
 
     if (rows.length === 0) {
-      logger.warn("No Driver Tracks Found");
+      logger.warn("No Driver Trucks Found");
       return res.status(404).json({
         success: false,
-        message: "No driver tracks found",
+        message: "No driver trucks found",
       });
     }
 
@@ -1898,7 +1898,7 @@ export const getDriverTracks = async (req, res) => {
       rows,
     });
   } catch (error) {
-    logger.error("Failed to get driver tracks", { error });
+    logger.error("Failed to get driver trucks", { error });
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -1906,23 +1906,23 @@ export const getDriverTracks = async (req, res) => {
   }
 };
 
-export const createDriverTrack = async (req, res) => {
+export const createDriverTruck = async (req, res) => {
   try {
-    const { driver_id, routes } = req.body;
+    const { driver_id, plate_no, total_deliveries } = req.body;
     const userEmail = req?.user?.email;
 
-    if (!driver_id || total_deliveries == null || !routes) {
+    if (!driver_id || !plate_no) {
       return res.status(400).json({
         success: false,
-        message: "driver_id, total_deliveries and routes are required",
+        message: "driver_id and plate_no are required",
       });
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO driver_tracks (driver_id, total_deliveries, routes, created_at, created_by)
-       VALUES ($1, 0, $3, NOW(), $4)
+      `INSERT INTO driver_trucks (driver_id, plate_no, total_deliveries, created_by)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [driver_id, routes],
+      [driver_id, plate_no, Number(total_deliveries) || 0, userEmail],
     );
 
     return res.status(201).json({
@@ -1930,7 +1930,7 @@ export const createDriverTrack = async (req, res) => {
       row: rows[0],
     });
   } catch (error) {
-    logger.error("Failed to create driver track", { error });
+    logger.error("Failed to create driver truck", { error });
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -1938,23 +1938,23 @@ export const createDriverTrack = async (req, res) => {
   }
 };
 
-export const updateDriverTrack = async (req, res) => {
+export const updateDriverTruck = async (req, res) => {
   try {
     const { id } = req.params;
-    const { driver_id, routes } = req.body;
+    const { driver_id, plate_no, total_deliveries } = req.body;
 
     const { rows } = await pool.query(
-      `UPDATE driver_tracks
-       SET driver_id = $1, routes = $2
-       WHERE id = $3
+      `UPDATE driver_trucks
+       SET driver_id = $1, plate_no = $2, total_deliveries = $3
+       WHERE id = $4
        RETURNING *`,
-      [driver_id, routes, id],
+      [driver_id, plate_no, Number(total_deliveries) || 0, id],
     );
 
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Driver track not found",
+        message: "Driver truck not found",
       });
     }
 
@@ -1963,7 +1963,7 @@ export const updateDriverTrack = async (req, res) => {
       row: rows[0],
     });
   } catch (error) {
-    logger.error("Failed to update driver track", { error });
+    logger.error("Failed to update driver truck", { error });
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -1971,28 +1971,28 @@ export const updateDriverTrack = async (req, res) => {
   }
 };
 
-export const deleteDriverTrack = async (req, res) => {
+export const deleteDriverTruck = async (req, res) => {
   try {
     const { id } = req.params;
 
     const { rows } = await pool.query(
-      `DELETE FROM driver_tracks WHERE id = $1 RETURNING id`,
+      `DELETE FROM driver_trucks WHERE id = $1 RETURNING id`,
       [id],
     );
 
     if (rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Driver track not found",
+        message: "Driver truck not found",
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Driver track deleted",
+      message: "Driver truck deleted",
     });
   } catch (error) {
-    logger.error("Failed to delete driver track", { error });
+    logger.error("Failed to delete driver truck", { error });
     return res.status(500).json({
       success: false,
       message: "Something went wrong",

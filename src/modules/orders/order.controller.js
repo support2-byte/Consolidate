@@ -8,6 +8,7 @@ import {
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
 import { withTransaction } from "../../services/transaction.js";
+import { getReceiverPayments } from "../zoho-invoices/zoho-bill.controller.js";
 
 function normalizeDate(dateStr) {
   if (!dateStr) return null;
@@ -5341,6 +5342,17 @@ export async function createOrderCollections(req, res) {
     if (orderRes.rowCount === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Order not found" });
+    }
+
+    const payments = await getReceiverPayments(orderId);
+    const unpaid = collections.filter(
+      (c) => payments?.[c.receiverId] !== "paid",
+    );
+    if (unpaid.length) {
+      await client.query("ROLLBACK");
+      return res
+        .status(403)
+        .json({ error: "Payment is not completed for the selected receiver" });
     }
 
     const filesByReceiver = {};

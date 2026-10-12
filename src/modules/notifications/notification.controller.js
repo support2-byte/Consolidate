@@ -527,3 +527,135 @@ export const deleteInvoiceEmailQueue = async (req, res) => {
       .json({ success: false, message: "Something went wrong!" });
   }
 };
+
+export const getZohoInvoiceEmails = async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT q.id, q.recipient_id, q.recipient_type, q.recipient_name,
+              q.recipient_email, q.status, q.attempts, q.last_error,
+              q.created_at, q.sent_at,
+              z.invoice_number AS invoice_id,
+              z.order_number AS item_ref,
+              z.balance::float8 AS amount,
+              z.status AS invoice_status
+         FROM zoho_invoice_email_queue q
+         JOIN zoho_invoices z ON z.id = q.zoho_invoice_id
+        ORDER BY q.created_at DESC, q.id DESC`,
+    );
+    if (rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "No Zoho Invoice Emails found!" });
+    }
+    return res.status(200).json({ success: true, notifications: rows });
+  } catch (error) {
+    logger.error("Failed to fetch Zoho Invoice Emails", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const resendZohoInvoiceEmail = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT q.*, z.invoice_number, z.order_number,
+              z.balance::float8 AS balance, z.status AS invoice_status
+         FROM zoho_invoice_email_queue q
+         JOIN zoho_invoices z ON z.id = q.zoho_invoice_id
+        WHERE q.id = $1`,
+      [id],
+    );
+    if (!rows.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Zoho invoice email not found" });
+    }
+    const notif = rows[0];
+
+    if (["paid", "void"].includes(notif.invoice_status)) {
+      return res.status(200).json({
+        success: false,
+        message: "Invoice is already paid in Zoho.",
+      });
+    }
+
+    const result = await sendInvoiceEmail({
+      email: notif.recipient_email,
+      recipientId: notif.recipient_id,
+      itemRef: notif.order_number,
+      receiverName: notif.recipient_name || "Valued Customer",
+      invoiceId: notif.invoice_number,
+      amount: notif.balance,
+      invoiceLink: `${FORM_BASE_URL}/invoice-payment/${encodeURIComponent(notif.invoice_number)}`,
+    });
+
+    if (!result.success) {
+      const errMsg = result.error || result.message || "Unknown error";
+      await pool.query(
+        `UPDATE zoho_invoice_email_queue
+            SET status = 'failed', attempts = attempts + 1, last_error = $2
+          WHERE id = $1`,
+        [id, errMsg],
+      );
+      logger.error("Resend Zoho invoice email failed", { id, error: errMsg });
+      return res.status(500).json({ success: false, message: errMsg });
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE zoho_invoice_email_queue
+          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
+        WHERE id = $1
+      RETURNING status, attempts, last_error, sent_at`,
+      [id],
+    );
+
+    return res.status(200).json({ success: true, row: updated[0] });
+  } catch (error) {
+    logger.error("Failed to resend Zoho invoice email", {
+      id,
+      error: error.message,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+};
+
+export const deleteZohoInvoiceEmail = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT status FROM zoho_invoice_email_queue WHERE id = $1`,
+      [id],
+    );
+    if (!rows.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Queue entry not found" });
+    }
+    if (String(rows[0].status).toLowerCase() === "sent") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Sent emails cannot be deleted." });
+    }
+
+    await pool.query(`DELETE FROM zoho_invoice_email_queue WHERE id = $1`, [
+      id,
+    ]);
+    return res
+      .status(200)
+      .json({ success: true, message: "Queue entry deleted" });
+  } catch (error) {
+    logger.error("Failed to delete Zoho invoice email", {
+      id,
+      error: error.message,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to delete queue entry" });
+  }
+};

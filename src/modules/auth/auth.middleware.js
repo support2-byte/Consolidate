@@ -145,6 +145,29 @@ export const requirePermission = (...permissions) => {
   };
 };
 
+export const requireRole = (...roles) => {
+  const allowedRoles = roles.map((role) => role.toLowerCase());
+
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: "UNAUTHENTICATED",
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.roleName?.toLowerCase())) {
+      return res.status(403).json({
+        success: false,
+        error: "FORBIDDEN",
+        message: "Insufficient permissions",
+      });
+    }
+
+    next();
+  };
+};
+
 export const requireSelfOrPermission = (paramName, ...permissions) => {
   return (req, res, next) => {
     if (!req.user) {
