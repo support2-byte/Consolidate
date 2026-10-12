@@ -8,7 +8,7 @@ import {
   extractCustomField,
   mapWithLimit,
   withRetry,
-  runZohoSync,
+  syncInvoicesForConsignment,
 } from "./zoho-invoice.controller.js";
 
 const EXCLUDED_STATUSES = ["void", "draft"];
@@ -48,7 +48,7 @@ const BILL_UPSERT_SQL = `
     synced_at = NOW()
 `;
 
-const fetchAllZohoBillList = async (token) => {
+const fetchAllZohoBillList = async (token, filters = {}) => {
   const all = [];
   let page = 1;
   while (true) {
@@ -62,6 +62,7 @@ const fetchAllZohoBillList = async (token) => {
             per_page: 200,
             sort_column: "created_time",
             sort_order: "D",
+            ...filters,
           },
         }),
       6,
@@ -76,12 +77,12 @@ const fetchAllZohoBillList = async (token) => {
   return all;
 };
 
-export const runZohoBillSync = async () => {
-  const token = await getZohoAccessToken();
-  const list = await fetchAllZohoBillList(token);
+const syncBillRows = async (list, token) => {
+  if (!list.length) return 0;
 
   const existing = await pool.query(
-    "SELECT zoho_bill_id, last_modified_time FROM zoho_bills",
+    "SELECT zoho_bill_id, last_modified_time FROM zoho_bills WHERE zoho_bill_id = ANY($1::text[])",
+    [list.map((b) => b.bill_id)],
   );
   const known = new Map(
     existing.rows.map((r) => [r.zoho_bill_id, r.last_modified_time]),
@@ -140,6 +141,15 @@ export const runZohoBillSync = async () => {
     ]);
   });
 
+  return changed.length;
+};
+
+// Full sync: keep OFF the request path (cron / background only)
+export const runZohoBillSync = async () => {
+  const token = await getZohoAccessToken();
+  const list = await fetchAllZohoBillList(token);
+  const synced = await syncBillRows(list, token);
+
   if (list.length > 0) {
     await pool.query(
       "DELETE FROM zoho_bills WHERE zoho_bill_id <> ALL($1::text[])",
@@ -147,7 +157,69 @@ export const runZohoBillSync = async () => {
     );
   }
 
-  return { synced: changed.length, total: list.length };
+  return { synced, total: list.length };
+};
+
+const syncBillsForConsignment = async (consignmentNumber, token) => {
+  const list = await fetchAllZohoBillList(token, {
+    cf_consignment_number: consignmentNumber,
+  });
+  if (list.length > 200) {
+    throw new Error(
+      "Zoho consignment filter returned too many bills, check custom field API name",
+    );
+  }
+  return syncBillRows(list, token);
+};
+
+const CONSIGNMENT_SYNC_TTL_MS = 60_000;
+const lastConsignmentSync = new Map();
+
+// Returns [invoiceError, billError]; never throws
+const syncConsignmentFromZoho = async (
+  consignmentNumber,
+  { force = false } = {},
+) => {
+  const k = key(consignmentNumber);
+  if (
+    !force &&
+    Date.now() - (lastConsignmentSync.get(k) || 0) < CONSIGNMENT_SYNC_TTL_MS
+  ) {
+    return [null, null];
+  }
+  lastConsignmentSync.set(k, Date.now());
+
+  let token;
+  try {
+    token = await getZohoAccessToken();
+  } catch (err) {
+    logger.error("Failed to get Zoho token for consignment sync", {
+      err: err.response?.data || err.message,
+    });
+    return [err, err];
+  }
+
+  const run = async (label, fn) => {
+    try {
+      await fn(consignmentNumber, token);
+      return null;
+    } catch (err) {
+      logger.error("Failed to sync consignment billing", {
+        label,
+        err: err.response?.data || err.message,
+        status: err.response?.status,
+        consignmentNumber,
+      });
+      return err;
+    }
+  };
+
+  const results = await Promise.all([
+    run("invoices", syncInvoicesForConsignment),
+    run("bills", syncBillsForConsignment),
+  ]);
+  if (results.every(Boolean)) lastConsignmentSync.delete(k);
+  return results;
 };
 
 export const getZohoBillPdf = async (req, res) => {
@@ -322,19 +394,7 @@ export const getConsignmentBilling = async (req, res) => {
         .json({ success: false, message: "Consignment not found" });
     }
 
-    const billCount = await pool.query(
-      "SELECT COUNT(*)::int AS n FROM zoho_bills",
-    );
-
-    if (billCount.rows[0].n === 0) {
-      try {
-        await runZohoBillSync();
-      } catch (err) {
-        logger.warn("Initial Zoho bill sync failed", {
-          err: err.response?.data || err.message,
-        });
-      }
-    }
+    await syncConsignmentFromZoho(consignmentNumber);
 
     const ordersRes = await pool.query(
       `SELECT DISTINCT o.id, o.booking_ref, o.rgl_booking_number
@@ -473,29 +533,47 @@ export const getOrderBilling = async (req, res) => {
 };
 
 export const syncConsignmentBilling = async (req, res) => {
-  const attempt = async (fn) => {
-    try {
-      await fn();
-      return null;
-    } catch (err) {
-      logger.error("Failed to sync billing", {
-        err: err.response?.data || err.message,
-      });
-      return err;
-    }
-  };
-
-  const errors = [await attempt(runZohoSync), await attempt(runZohoBillSync)];
-
-  if (errors.every(Boolean)) {
-    const rateLimited = errors.some((e) => e.response?.status === 429);
-    return res.status(rateLimited ? 429 : 502).json({
-      success: false,
-      message: rateLimited
-        ? "Zoho rate limit reached, please try again shortly"
-        : "Could not reach Zoho. Check your network connection and try again.",
-    });
+  const consignmentId = parseInt(req.params.consignmentId, 10);
+  if (isNaN(consignmentId) || consignmentId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid consignment ID" });
   }
 
-  return getConsignmentBilling(req, res);
+  try {
+    const cons = await pool.query(
+      "SELECT consignment_number FROM consignments WHERE id = $1",
+      [consignmentId],
+    );
+    const consignmentNumber = cons.rows[0]?.consignment_number;
+    if (!consignmentNumber) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Consignment not found" });
+    }
+
+    const errors = await syncConsignmentFromZoho(consignmentNumber, {
+      force: true,
+    });
+
+    if (errors.every(Boolean)) {
+      const rateLimited = errors.some((e) => e.response?.status === 429);
+      return res.status(rateLimited ? 429 : 502).json({
+        success: false,
+        message: rateLimited
+          ? "Zoho rate limit reached, please try again shortly"
+          : "Could not reach Zoho. Check your network connection and try again.",
+      });
+    }
+
+    return getConsignmentBilling(req, res);
+  } catch (err) {
+    logger.error("Failed to sync consignment billing", {
+      err: err.response?.data || err.message,
+      consignmentId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to sync billing data" });
+  }
 };
