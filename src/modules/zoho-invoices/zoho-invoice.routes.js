@@ -8,6 +8,7 @@ import {
   getConsignmentBilling,
   getZohoBillPdf,
   syncConsignmentBilling,
+  getOrderPaymentStatus,
   getOrderBilling,
 } from "./zoho-bill.controller.js";
 import { requireAuth, requireRole } from "../auth/auth.middleware.js";
@@ -34,6 +35,11 @@ router.get(
   requireAuth,
   jobDetailsAccess,
   getOrderBilling,
+);
+router.get(
+  "/order/:orderId/payment-status",
+  requireAuth,
+  getOrderPaymentStatus,
 );
 router.get("/bill/:id/pdf", requireAuth, jobDetailsAccess, getZohoBillPdf);
 router.get("/:id/pdf", requireAuth, getZohoInvoicePdf);

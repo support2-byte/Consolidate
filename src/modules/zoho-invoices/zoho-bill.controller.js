@@ -198,6 +198,80 @@ const paymentStatusOf = (activeInvoices) => {
     : "unpaid";
 };
 
+const normalizeName = (v) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(mr|mrs|ms|miss|dr|eng|sir|madam)\b\s*/, "")
+    .trim();
+
+const computeReceiverPayments = (receivers, invoices) => {
+  const byCustomer = {};
+  for (const inv of counted(invoices)) {
+    const k = normalizeName(inv.customer);
+    (byCustomer[k] = byCustomer[k] || []).push(inv);
+  }
+  return Object.fromEntries(
+    receivers.map((r) => [
+      r.id,
+      paymentStatusOf(byCustomer[normalizeName(r.receiver_name)] || []),
+    ]),
+  );
+};
+
+export const getReceiverPayments = async (orderId) => {
+  const orderRes = await pool.query(
+    "SELECT rgl_booking_number FROM orders WHERE id = $1",
+    [orderId],
+  );
+  if (!orderRes.rows[0]) return null;
+  const orderKey = key(orderRes.rows[0].rgl_booking_number);
+
+  const [recRes, invRes] = await Promise.all([
+    pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
+      orderId,
+    ]),
+    orderKey
+      ? pool.query(
+          `SELECT customer_name AS customer, status,
+                  total::float8 AS total, balance::float8 AS balance
+             FROM zoho_invoices
+            WHERE lower(btrim(order_number)) = $1`,
+          [orderKey],
+        )
+      : { rows: [] },
+  ]);
+  return computeReceiverPayments(recRes.rows, invRes.rows);
+};
+
+export const getOrderPaymentStatus = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+  try {
+    const receiverPayments = await getReceiverPayments(orderId);
+    if (!receiverPayments) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+    return res.json({ success: true, receiverPayments });
+  } catch (err) {
+    logger.error("Failed to build order payment status", {
+      err: err.response?.data || err.message,
+      orderId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to load payment status" });
+  }
+};
+
 const buildBillingRow = (order, invoices, vendorBills) => {
   const activeInv = counted(invoices);
   const activeBills = counted(vendorBills);
@@ -352,7 +426,7 @@ export const getOrderBilling = async (req, res) => {
     const orderKey = key(order.rgl_booking_number);
     if (!orderKey) return res.json({ success: true, row: null });
 
-    const [invRes, billRes] = await Promise.all([
+    const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
         `SELECT zoho_invoice_id AS id, invoice_number AS number,
                 customer_name AS customer, status, currency_code AS currency,
@@ -377,11 +451,15 @@ export const getOrderBilling = async (req, res) => {
           ORDER BY bill_date, id`,
         [orderKey],
       ),
+      pool.query(
+        "SELECT id, receiver_name FROM receivers WHERE order_id = $1",
+        [orderId],
+      ),
     ]);
 
     return res.json({
       success: true,
-      row: buildBillingRow(order, invRes.rows, billRes.rows),
+      receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
     });
   } catch (err) {
     logger.error("Failed to build order billing", {
