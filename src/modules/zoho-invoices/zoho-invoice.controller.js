@@ -75,7 +75,13 @@ export const getZohoInvoices = async (req, res) => {
     const count = await pool.query(
       "SELECT COUNT(*)::int AS n FROM zoho_invoices",
     );
-    if (count.rows[0].n === 0) await runZohoSync();
+    if (count.rows[0].n === 0) {
+      runZohoSyncOnce().catch((err) =>
+        logger.error("Background Zoho sync failed", {
+          err: err.response?.data || err.message,
+        }),
+      );
+    }
 
     const { rows } = await pool.query(`
       SELECT
@@ -107,6 +113,14 @@ export const getZohoInvoices = async (req, res) => {
       message: err.message || "Failed to fetch invoices",
     });
   }
+};
+
+let fullSyncPromise = null;
+const runZohoSyncOnce = () => {
+  fullSyncPromise ??= runZohoSync().finally(() => {
+    fullSyncPromise = null;
+  });
+  return fullSyncPromise;
 };
 
 export const getZohoInvoicePdf = async (req, res) => {
@@ -158,7 +172,7 @@ export const withRetry = async (fn, attempts = 6) => {
   }
 };
 
-const fetchAllZohoInvoiceList = async (token) => {
+const fetchAllZohoInvoiceList = async (token, filters = {}) => {
   const all = [];
   let page = 1;
   while (true) {
@@ -171,6 +185,7 @@ const fetchAllZohoInvoiceList = async (token) => {
           per_page: 200,
           sort_column: "created_time",
           sort_order: "D",
+          ...filters,
         },
       }),
     );
@@ -212,12 +227,12 @@ export const UPSERT_SQL = `
     synced_at = NOW()
 `;
 
-export const runZohoSync = async () => {
-  const token = await getZohoAccessToken();
-  const list = await fetchAllZohoInvoiceList(token);
+const syncInvoiceRows = async (list, token) => {
+  if (!list.length) return 0;
 
   const existing = await pool.query(
-    "SELECT zoho_invoice_id, last_modified_time FROM zoho_invoices",
+    "SELECT zoho_invoice_id, last_modified_time FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
+    [list.map((i) => i.invoice_id)],
   );
   const known = new Map(
     existing.rows.map((r) => [r.zoho_invoice_id, r.last_modified_time]),
@@ -289,6 +304,14 @@ export const runZohoSync = async () => {
     }
   });
 
+  return changed.length;
+};
+
+export const runZohoSync = async () => {
+  const token = await getZohoAccessToken();
+  const list = await fetchAllZohoInvoiceList(token);
+  const synced = await syncInvoiceRows(list, token);
+
   if (list.length > 0) {
     await pool.query(
       "DELETE FROM zoho_invoices WHERE zoho_invoice_id <> ALL($1::text[])",
@@ -296,7 +319,19 @@ export const runZohoSync = async () => {
     );
   }
 
-  return { synced: changed.length, total: list.length };
+  return { synced, total: list.length };
+};
+
+export const syncInvoicesForConsignment = async (consignmentNumber, token) => {
+  const list = await fetchAllZohoInvoiceList(token, {
+    cf_consignment_number: consignmentNumber,
+  });
+  if (list.length > 200) {
+    throw new Error(
+      "Zoho consignment filter returned too many invoices, check custom field API name",
+    );
+  }
+  return syncInvoiceRows(list, token);
 };
 
 export const syncZohoInvoices = async (req, res) => {
