@@ -4,8 +4,7 @@ import logger from "../../services/logger.js";
 import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
 import {
   getBooksBaseUrl,
-  CUSTOM_FIELD_LABELS,
-  extractCustomField,
+  getConsignmentFormNumbers,
   mapWithLimit,
   withRetry,
   syncInvoicesForConsignment,
@@ -48,7 +47,11 @@ const BILL_UPSERT_SQL = `
     synced_at = NOW()
 `;
 
-const fetchAllZohoBillList = async (token, filters = {}) => {
+const fetchAllZohoBillList = async (
+  token,
+  filters = {},
+  maxPages = Infinity,
+) => {
   const all = [];
   let page = 1;
   while (true) {
@@ -72,6 +75,11 @@ const fetchAllZohoBillList = async (token, filters = {}) => {
     }
     all.push(...(zohoRes.data.bills || []));
     if (!zohoRes.data.page_context?.has_more_page) break;
+    if (page >= maxPages) {
+      throw new Error(
+        "Zoho filter returned too many bills. Check the custom field API name (ZOHO_BILL_CONSIGNMENT_FILTER)",
+      );
+    }
     page++;
   }
   return all;
@@ -92,37 +100,6 @@ const syncBillRows = async (list, token) => {
   );
 
   await mapWithLimit(changed, 4, async (b) => {
-    let orderNumber = null;
-    let consignmentNumber = null;
-    let lastModified = b.last_modified_time || null;
-    try {
-      const res = await withRetry(
-        () =>
-          axios.get(`${getBooksBaseUrl()}/bills/${b.bill_id}`, {
-            headers: zohoHeaders(token),
-            params: zohoParams(),
-          }),
-        6,
-      );
-      if (res.data.code !== 0) {
-        throw new Error(res.data.message || "Zoho error");
-      }
-      const customFields = res.data.bill.custom_fields;
-      orderNumber = extractCustomField(
-        customFields,
-        CUSTOM_FIELD_LABELS.orderNumber,
-      );
-      consignmentNumber = extractCustomField(
-        customFields,
-        CUSTOM_FIELD_LABELS.consignmentNumber,
-      );
-    } catch (err) {
-      lastModified = null;
-      logger.error("Failed to fetch Zoho bill detail", {
-        err: err.response?.data || err.message,
-        billId: b.bill_id,
-      });
-    }
     await pool.query(BILL_UPSERT_SQL, [
       b.bill_id,
       b.bill_number,
@@ -135,16 +112,15 @@ const syncBillRows = async (list, token) => {
       b.currency_code,
       b.total ?? 0,
       b.balance ?? 0,
-      orderNumber,
-      consignmentNumber,
-      lastModified,
+      b.bill_number,
+      null,
+      b.last_modified_time || null,
     ]);
   });
 
   return changed.length;
 };
 
-// Full sync: keep OFF the request path (cron / background only)
 export const runZohoBillSync = async () => {
   const token = await getZohoAccessToken();
   const list = await fetchAllZohoBillList(token);
@@ -161,22 +137,22 @@ export const runZohoBillSync = async () => {
 };
 
 const syncBillsForConsignment = async (consignmentNumber, token) => {
-  const list = await fetchAllZohoBillList(token, {
-    cf_consignment_number: consignmentNumber,
+  const forms = await getConsignmentFormNumbers(consignmentNumber);
+  const counts = await mapWithLimit(forms, 2, async (formNo) => {
+    const list = await fetchAllZohoBillList(token, { bill_number: formNo }, 1);
+    return syncBillRows(list, token);
   });
-  if (list.length > 200) {
-    throw new Error(
-      "Zoho consignment filter returned too many bills, check custom field API name",
-    );
-  }
-  return syncBillRows(list, token);
+  logger.info("Zoho bills fetched for consignment", {
+    consignmentNumber,
+    forms: forms.length,
+  });
+  return counts.reduce((s, n) => s + n, 0);
 };
 
 const CONSIGNMENT_SYNC_TTL_MS = 60_000;
 const lastConsignmentSync = new Map();
 
-// Returns [invoiceError, billError]; never throws
-const syncConsignmentFromZoho = async (
+const runConsignmentSync = async (
   consignmentNumber,
   { force = false } = {},
 ) => {
@@ -220,6 +196,20 @@ const syncConsignmentFromZoho = async (
   ]);
   if (results.every(Boolean)) lastConsignmentSync.delete(k);
   return results;
+};
+
+const inflightSyncs = new Map();
+const syncConsignmentFromZoho = (consignmentNumber, opts) => {
+  const k = key(consignmentNumber);
+  if (!inflightSyncs.has(k)) {
+    inflightSyncs.set(
+      k,
+      runConsignmentSync(consignmentNumber, opts).finally(() =>
+        inflightSyncs.delete(k),
+      ),
+    );
+  }
+  return inflightSyncs.get(k);
 };
 
 export const getZohoBillPdf = async (req, res) => {
@@ -394,8 +384,6 @@ export const getConsignmentBilling = async (req, res) => {
         .json({ success: false, message: "Consignment not found" });
     }
 
-    await syncConsignmentFromZoho(consignmentNumber);
-
     const ordersRes = await pool.query(
       `SELECT DISTINCT o.id, o.booking_ref, o.rgl_booking_number
          FROM container_assignment_history h
@@ -427,14 +415,13 @@ export const getConsignmentBilling = async (req, res) => {
         `SELECT zoho_bill_id AS id, bill_number AS number,
                 vendor_name AS vendor, status, currency_code AS currency,
                 total::float8 AS total, balance::float8 AS balance,
-                order_number,
+                bill_number AS order_number,
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
            FROM zoho_bills
-          WHERE lower(btrim(consignment_number)) = $1
-            AND lower(btrim(order_number)) = ANY($2::text[])
+          WHERE lower(btrim(bill_number)) = ANY($1::text[])
           ORDER BY bill_date, id`,
-        [consKey, orderKeys],
+        [orderKeys],
       ),
     ]);
 
