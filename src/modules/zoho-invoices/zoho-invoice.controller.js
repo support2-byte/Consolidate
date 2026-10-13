@@ -188,6 +188,13 @@ const fetchAllZohoInvoiceList = async (
 
     all.push(...(zohoRes.data.invoices || []));
 
+    logger.info("[ZOHO-INV] page fetched", {
+      filters,
+      page,
+      count: (zohoRes.data.invoices || []).length,
+      hasMore: !!zohoRes.data.page_context?.has_more_page,
+    });
+
     if (!zohoRes.data.page_context?.has_more_page) break;
     if (page >= maxPages) {
       throw new Error(
@@ -228,15 +235,18 @@ const syncInvoiceRows = async (list, token) => {
   if (!list.length) return 0;
 
   const existing = await pool.query(
-    "SELECT zoho_invoice_id, last_modified_time FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
+    "SELECT zoho_invoice_id, last_modified_time, exchange_rate FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
     [list.map((i) => i.invoice_id)],
   );
-  const known = new Map(
-    existing.rows.map((r) => [r.zoho_invoice_id, r.last_modified_time]),
-  );
-  const changed = list.filter(
-    (i) => known.get(i.invoice_id) !== i.last_modified_time,
-  );
+  const known = new Map(existing.rows.map((r) => [r.zoho_invoice_id, r]));
+  const changed = list.filter((i) => {
+    const k = known.get(i.invoice_id);
+    return (
+      !k ||
+      k.last_modified_time !== i.last_modified_time ||
+      k.exchange_rate == null
+    );
+  });
 
   let rateLimited = false;
   await mapWithLimit(changed, 2, async (i) => {
@@ -244,9 +254,18 @@ const syncInvoiceRows = async (list, token) => {
     let orderNumber = null;
     let consignmentNumber = null;
     let paymentMode = null;
+    let exchangeRate = null;
     let lastModified = i.last_modified_time || null;
     try {
       const detail = await getInvoiceDetailCached(i.invoice_id, token);
+      exchangeRate =
+        Number(detail.exchange_rate ?? i.exchange_rate) ||
+        (i.currency_code === "AED" ? 1 : null);
+      logger.info("[INV] rate", {
+        invoice: i.invoice_number,
+        currency: i.currency_code,
+        exchangeRate,
+      });
       orderNumber = extractCustomField(
         detail.custom_fields,
         CUSTOM_FIELD_LABELS.orderNumber,
@@ -305,6 +324,12 @@ const syncInvoiceRows = async (list, token) => {
         [paymentMode, i.invoice_id],
       );
     }
+    if (exchangeRate) {
+      await pool.query(
+        `UPDATE zoho_invoices SET exchange_rate = $1 WHERE zoho_invoice_id = $2`,
+        [exchangeRate, i.invoice_id],
+      );
+    }
   });
 
   return changed.length;
@@ -338,75 +363,82 @@ export const getConsignmentFormNumbers = async (consignmentNumber) => {
   return rows.map((r) => r.form_no);
 };
 
-const upsertListedInvoices = async (list, orderNumber, consignmentNumber) => {
-  if (!list.length) return 0;
-  const existing = await pool.query(
-    "SELECT zoho_invoice_id, last_modified_time FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
-    [list.map((i) => i.invoice_id)],
-  );
-  const known = new Map(
-    existing.rows.map((r) => [r.zoho_invoice_id, r.last_modified_time]),
-  );
-  const changed = list.filter(
-    (i) => known.get(i.invoice_id) !== i.last_modified_time,
-  );
-  for (const i of changed) {
-    await pool.query(UPSERT_SQL, [
-      i.invoice_id,
-      i.invoice_number,
-      i.customer_id,
-      i.customer_name,
-      i.reference_number,
-      i.status,
-      i.date || null,
-      i.due_date || null,
-      i.currency_code,
-      i.total ?? 0,
-      i.balance ?? 0,
-      orderNumber,
-      consignmentNumber,
-      i.last_modified_time || null,
-    ]);
-  }
-  return changed.length;
-};
-
 export const syncInvoicesForConsignment = async (consignmentNumber, token) => {
   const orderFilter =
     process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
   const wanted = stripConsignmentPrefix(consignmentNumber).toLowerCase();
   const forms = await getConsignmentFormNumbers(consignmentNumber);
-  const readConsignment = (inv) => {
-    const key = Object.keys(inv).find(
-      (k) =>
-        k.startsWith("cf_") &&
-        k.includes("consign") &&
-        !k.endsWith("_formatted") &&
-        !k.endsWith("_unformatted"),
-    );
-    return key ? stripConsignmentPrefix(inv[key]).toLowerCase() : null;
-  };
+
+  logger.info("[INV] start", {
+    consignmentNumber,
+    zohoConsignment: toZohoConsignment(consignmentNumber),
+    forms,
+    orderFilter,
+  });
+  if (!forms.length) {
+    logger.warn("[INV] no form numbers found in DB for this consignment");
+    return 0;
+  }
 
   const counts = await mapWithLimit(forms, 2, async (formNo) => {
-    const list = await fetchAllZohoInvoiceList(
-      token,
-      { [orderFilter]: formNo },
-      5,
+    const wantedForm = formNo.trim().toLowerCase();
+
+    const attempt = async (label, filters) => {
+      try {
+        const list = await fetchAllZohoInvoiceList(token, filters, 1);
+        const exact = list.filter(
+          (i) =>
+            String(i[orderFilter] ?? "")
+              .trim()
+              .toLowerCase() === wantedForm,
+        );
+        logger.info("[INV] lookup", {
+          formNo,
+          label,
+          filters,
+          listed: list.length,
+          exact: exact.length,
+          sampleOrderValues: list
+            .slice(0, 5)
+            .map((i) => i[orderFilter] ?? null),
+        });
+        return exact;
+      } catch (err) {
+        logger.error("[INV] lookup failed", {
+          formNo,
+          label,
+          filters,
+          status: err.response?.status,
+          err: err.response?.data || err.message,
+        });
+        return [];
+      }
+    };
+
+    let exact = await attempt("equals", { [orderFilter]: formNo });
+    if (!exact.length) {
+      exact = await attempt("contains", {
+        [`${orderFilter}_contains`]: formNo,
+      });
+    }
+    if (!exact.length) return 0;
+
+    const synced = await syncInvoiceRows(exact, token);
+
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM zoho_invoices
+        WHERE lower(btrim(order_number)) = $1
+          AND lower(btrim(consignment_number)) = $2`,
+      [wantedForm, wanted],
     );
-
-    const matched = list.filter((i) => readConsignment(i) === wanted);
-
-    return upsertListedInvoices(
-      matched,
+    logger.info("[INV] saved", {
       formNo,
-      stripConsignmentPrefix(consignmentNumber),
-    );
+      changedRows: synced,
+      inDbForThisConsignment: rows[0].n,
+    });
+    return synced;
   });
 
-  logger.info("Zoho invoices fetched for consignment", {
-    consignmentNumber,
-    forms: forms.length,
-  });
   return counts.reduce((s, n) => s + n, 0);
 };
 
