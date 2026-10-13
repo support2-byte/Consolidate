@@ -567,13 +567,14 @@ export const getOrderBilling = async (req, res) => {
     }
 
     const orderKey = key(order.rgl_booking_number);
-    if (!orderKey) return res.json({ success: true, row: null });
+    if (!orderKey)
+      return res.json({ success: true, row: null, receiverPayments: {} });
 
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
         `SELECT zoho_invoice_id AS id, invoice_number AS number,
                 customer_name AS customer, status, currency_code AS currency,
-                total::float8 AS total, balance::float8 AS balance,
+                total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
@@ -585,12 +586,12 @@ export const getOrderBilling = async (req, res) => {
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
                 vendor_name AS vendor, status, currency_code AS currency,
-                total::float8 AS total, balance::float8 AS balance,
+                total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
            FROM zoho_bills
-          WHERE lower(btrim(order_number)) = $1
+          WHERE lower(btrim(bill_number)) = $1
           ORDER BY bill_date, id`,
         [orderKey],
       ),
@@ -602,6 +603,7 @@ export const getOrderBilling = async (req, res) => {
 
     return res.json({
       success: true,
+      row: buildBillingRow(order, invRes.rows, billRes.rows),
       receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
     });
   } catch (err) {
@@ -612,6 +614,59 @@ export const getOrderBilling = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Failed to load billing data" });
+  }
+};
+
+export const syncOrderBilling = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+
+  try {
+    const consRes = await pool.query(
+      `SELECT DISTINCT c.consignment_number
+         FROM container_assignment_history h
+         JOIN consignments c ON c.id = h.consignment_id
+        WHERE h.order_id = $1`,
+      [orderId],
+    );
+    const numbers = consRes.rows
+      .map((r) => r.consignment_number)
+      .filter(Boolean);
+    if (!numbers.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Order is not linked to any consignment",
+      });
+    }
+
+    const results = await Promise.all(
+      numbers.map((n) => syncConsignmentFromZoho(n, { force: true })),
+    );
+    const errors = results.flat();
+
+    if (errors.every(Boolean)) {
+      const rateLimited = errors.some((e) => e.response?.status === 429);
+      return res.status(rateLimited ? 429 : 502).json({
+        success: false,
+        message: rateLimited
+          ? "Zoho rate limit reached, please try again shortly"
+          : "Could not reach Zoho. Check your network connection and try again.",
+      });
+    }
+
+    return getOrderBilling(req, res);
+  } catch (err) {
+    logger.error("Failed to sync order billing", {
+      err: err.response?.data || err.message,
+      orderId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to sync billing data" });
   }
 };
 
