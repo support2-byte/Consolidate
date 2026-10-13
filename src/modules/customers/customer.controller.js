@@ -145,7 +145,6 @@ export async function getCustomersPanel(req, res) {
   }
 }
 
-// getCustomers remains the same (DB query with search/limit for efficiency)
 export async function getCustomers(req, res) {
   try {
     const { search = "", limit = 50 } = req.query;
@@ -168,6 +167,7 @@ export async function getCustomers(req, res) {
     res.status(500).json({ error: "Failed to fetch customers" });
   }
 }
+
 export async function deleteCustomer(req, res) {
   const { zoho_id } = req.params; // we only need zoho_id for contacts
   const token = await getZohoAccessToken();
@@ -360,6 +360,7 @@ export async function saveContacts(req, res) {
     });
   }
 }
+
 export async function deleteContact(req, res) {
   const { zoho_id, contact_person_id } = req.params;
   const token = await getZohoAccessToken();
@@ -630,7 +631,6 @@ export async function downloadDocument(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    // Fetch document metadata
     const response = await axios.get(
       `https://www.zohoapis.com/books/v3/documents/${document_id}`,
       {
@@ -666,6 +666,7 @@ export async function downloadDocument(req, res) {
     });
   }
 }
+
 export async function deleteDocument(req, res) {
   const { zoho_id, document_id } = req.params;
 
@@ -709,7 +710,7 @@ export async function deleteDocument(req, res) {
     });
   }
 }
-// Helper function (add outside the function, e.g., at module level)
+
 function isEmptyAddress(addrObj) {
   if (!addrObj || typeof addrObj !== "object") return true;
   const fields = [
@@ -741,11 +742,10 @@ export async function updateCustomer(req, res) {
     associated_by,
     system_notes,
     type,
-    contact_type: bodyContactType, // Rename to avoid confusion
+    contact_type: bodyContactType,
   } = req.body;
 
   try {
-    // Fetch current from DB
     const { rows } = await pool.query(
       "SELECT * FROM customers WHERE zoho_id = $1",
       [zoho_id],
@@ -755,17 +755,15 @@ export async function updateCustomer(req, res) {
     }
     const currentCustomer = rows[0];
 
-    // Check for Zoho-updatable changes (exclude local fields)
     const zohoChanges = { contact_name, email, zoho_notes, address };
     const hasZohoChanges = Object.values(zohoChanges).some(
       (v) => v !== undefined && v !== "" && v !== null,
     );
 
-    let zohoCustomer = { ...currentCustomer }; // Start with current
+    let zohoCustomer = { ...currentCustomer };
     if (hasZohoChanges) {
       const token = await getZohoAccessToken();
 
-      // Build partial payload: NO contact_type!
       const payload = {};
       if (contact_name !== undefined && contact_name !== "") {
         payload.contact_name = contact_name;
@@ -793,7 +791,6 @@ export async function updateCustomer(req, res) {
         }
       }
 
-      // Only call Zoho if payload has at least one field
       if (Object.keys(payload).length > 0) {
         const zohoRes = await axios.put(
           `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,

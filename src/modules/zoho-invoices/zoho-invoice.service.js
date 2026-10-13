@@ -2,7 +2,11 @@ import axios from "axios";
 import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
-import { getBooksBaseUrl, UPSERT_SQL } from "./zoho-invoice.controller.js";
+import {
+  getBooksBaseUrl,
+  UPSERT_SQL,
+  toZohoConsignment,
+} from "./zoho-invoice.controller.js";
 
 const NON_DUE_STATUSES = ["paid", "void"];
 
@@ -113,25 +117,23 @@ export const getZohoDueContext = async ({ type, itemRef, customerRef }) => {
   if (open.length) {
     try {
       const token = await getZohoAccessToken();
-      await Promise.all(
-        open.map(async (m) => {
-          const res = await axios.get(
-            `${getBooksBaseUrl()}/invoices/${m.zoho_invoice_id}`,
-            { headers: zohoHeaders(token), params: zohoParams() },
-          );
-          if (res.data.code !== 0) {
-            throw new Error(res.data.message || "Zoho error");
-          }
-          m.status = res.data.invoice.status;
-          m.balance = Number(res.data.invoice.balance ?? 0);
-          await pool.query(
-            `UPDATE zoho_invoices
+      await mapWithLimit(open, 2, async (m) => {
+        const res = await axios.get(
+          `${getBooksBaseUrl()}/invoices/${m.zoho_invoice_id}`,
+          { headers: zohoHeaders(token), params: zohoParams() },
+        );
+        if (res.data.code !== 0) {
+          throw new Error(res.data.message || "Zoho error");
+        }
+        m.status = res.data.invoice.status;
+        m.balance = Number(res.data.invoice.balance ?? 0);
+        await pool.query(
+          `UPDATE zoho_invoices
                 SET status = $1, balance = $2, synced_at = NOW()
               WHERE zoho_invoice_id = $3`,
-            [m.status, m.balance, m.zoho_invoice_id],
-          );
-        }),
-      );
+          [m.status, m.balance, m.zoho_invoice_id],
+        );
+      });
     } catch (err) {
       logger.warn("Failed to refresh Zoho invoices before due calculation", {
         itemRef,
@@ -225,7 +227,9 @@ export const uploadInvoiceToZoho = async ({
         },
         {
           customfield_id: process.env.ZOHO_CONSIGNMENT_FIELD_ID,
-          value: context.consignmentNumber,
+          value:
+            context.consignmentNumber &&
+            toZohoConsignment(context.consignmentNumber),
         },
       ].filter((f) => f.customfield_id && f.value),
       ...(discount > 0 && {
@@ -445,7 +449,7 @@ export const uploadConsignmentInvoicesToZoho = async ({
             ],
             custom_field_hash: {
               cf_order_number: o.order_number,
-              cf_consignment_number: consNo,
+              cf_consignment_number: toZohoConsignment(consNo),
             },
           };
 
