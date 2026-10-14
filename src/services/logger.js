@@ -23,13 +23,11 @@ const logger = winston.createLogger({
         winston.format.printf(({ timestamp, level, message, ...meta }) => {
           const metaString =
             Object.keys(meta).length > 0
-              ? chalk.hex("#8B5CF6")(
-                  JSON.stringify(meta, null, 2).replace(/\r?\n\s*/g, " "),
-                )
+              ? chalk.hex("#8B5CF6")(JSON.stringify(meta, null, 2))
               : "";
 
           return `${chalk.dim(timestamp)} [${level}] ${chalk.cyan(message)}${
-            metaString ? ` ${metaString}` : ""
+            metaString ? `\n${metaString}` : ""
           }`;
         }),
       ),

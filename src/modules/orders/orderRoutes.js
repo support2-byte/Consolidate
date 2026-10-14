@@ -23,6 +23,11 @@ import {
   getOrderTracking,
   notifySpecificItemsStatus,
   createOrderCollections,
+  listBookingFormsForImport,
+  getBookingFormForImport,
+  updateCollectionStatus,
+  createGatepass,
+  getGatepassesForCollection,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -574,5 +579,15 @@ router.get("/pdf-data/:orderId", getPdfData);
  *         description: Order not found
  */
 router.post("/:orderId/notify", notifySpecificItemsStatus);
+
+router.get("/booking/list", requireAuth, listBookingFormsForImport);
+router.get("/booking/:bookingFormId", requireAuth, getBookingFormForImport);
+router.patch(
+  "/:orderId/collections/:collectionId/status",
+  updateCollectionStatus,
+);
+
+router.post("/:collectionId/gatepass", createGatepass);
+router.get("/:collectionId/gatepass", getGatepassesForCollection);
 
 export default router;

@@ -9,69 +9,55 @@ import pool from "../db/pool.js"; // your pool import
  * @param {Object} options - Optional config
  * @returns {Promise} Result from pool.query
  */
-export async function withUserAudit(req, query, params = [], options = {}) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
 
-    const userEmail = req?.user?.email || "unknown-user";
+export async function withUserAudit(
+  req,
+  client,
+  query,
+  params = [],
+  options = {},
+) {
+  const userEmail = req?.user?.email || "unknown-user";
 
-    // For INSERT queries – add created_by & updated_by
-    if (query.trim().toUpperCase().startsWith("INSERT")) {
-      // Find the VALUES part
-      const insertMatch = query.match(
-        /INSERT INTO\s+\w+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i,
-      );
-      if (insertMatch) {
-        const columns = insertMatch[1].split(",").map((c) => c.trim());
-        const valuesPlaceholders = insertMatch[2]
-          .split(",")
-          .map((v) => v.trim());
+  if (query.trim().toUpperCase().startsWith("INSERT")) {
+    const insertMatch = query.match(
+      /INSERT INTO\s+\w+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i,
+    );
+    if (insertMatch) {
+      const columns = insertMatch[1].split(",").map((c) => c.trim());
+      const valuesPlaceholders = insertMatch[2].split(",").map((v) => v.trim());
 
-        // Append audit columns if not already present
-        if (!columns.includes("created_by")) {
-          columns.push("created_by", "updated_by", "created_at", "updated_at");
-          valuesPlaceholders.push(
-            `$${params.length + 1}`,
-            `$${params.length + 2}`,
-            "NOW()",
-            "NOW()",
-          );
-          params.push(userEmail, userEmail);
-        }
-
-        // Rebuild query
-        query = query
-          .replace(
-            /VALUES\s*\([^)]+\)/i,
-            `VALUES (${valuesPlaceholders.join(", ")})`,
-          )
-          .replace(/\([^)]+\)/, `(${columns.join(", ")})`);
-      }
-    }
-
-    // For UPDATE queries – always set updated_by & updated_at
-    else if (query.trim().toUpperCase().startsWith("UPDATE")) {
-      if (!query.toLowerCase().includes("updated_by")) {
-        params.push(userEmail);
-
-        query = query.replace(
-          /\bWHERE\b/i,
-          `, updated_by = $${params.length} WHERE`,
+      if (!columns.includes("created_by")) {
+        columns.push("created_by", "updated_by", "created_at", "updated_at");
+        valuesPlaceholders.push(
+          `$${params.length + 1}`,
+          `$${params.length + 2}`,
+          "NOW()",
+          "NOW()",
         );
+        params.push(userEmail, userEmail);
       }
+
+      query = query
+        .replace(
+          /VALUES\s*\([^)]+\)/i,
+          `VALUES (${valuesPlaceholders.join(", ")})`,
+        )
+        .replace(/\([^)]+\)/, `(${columns.join(", ")})`);
     }
-
-    const result = await client.query(query, params);
-
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    if (client) await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    if (client) client.release();
+  } else if (query.trim().toUpperCase().startsWith("UPDATE")) {
+    if (!query.toLowerCase().includes("updated_by")) {
+      params.push(userEmail);
+      query = query.replace(
+        /\bWHERE\b/i,
+        `, updated_by = $${params.length} WHERE`,
+      );
+    }
   }
+
+  // No BEGIN/COMMIT/ROLLBACK/connect/release here anymore —
+  // the caller owns the transaction lifecycle.
+  return client.query(query, params);
 }
 
 // utils/withAudit.js

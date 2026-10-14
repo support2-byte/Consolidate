@@ -4,6 +4,12 @@ import {
   getEmailSubscriptions,
   resendNotification,
   deleteEmailQueue,
+  getConfirmationEmails,
+  resendConfirmationEmail,
+  deleteConfirmationEmail,
+  getAllInvoiceEmails,
+  resendInvoiceNotification,
+  deleteInvoiceEmailQueue,
 } from "./notification.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
 
@@ -94,5 +100,29 @@ router.post("/:id/resend", requireAuth, resendNotification);
  *         description: Notification not found
  */
 router.delete("/:id/delete", requireAuth, deleteEmailQueue);
+
+router.get("/confirmation-emails", requireAuth, getConfirmationEmails);
+router.post(
+  "/confirmation-emails/:id/resend",
+  requireAuth,
+  resendConfirmationEmail,
+);
+router.delete(
+  "/confirmation-emails/:id/delete",
+  requireAuth,
+  deleteConfirmationEmail,
+);
+
+router.get("/invoice-emails", requireAuth, getAllInvoiceEmails);
+router.post(
+  "/invoice-emails/:id/resend",
+  requireAuth,
+  resendInvoiceNotification,
+);
+router.delete(
+  "/invoice-emails/:id/delete",
+  requireAuth,
+  deleteInvoiceEmailQueue,
+);
 
 export default router;

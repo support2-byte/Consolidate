@@ -14,9 +14,13 @@ import {
   updateDocument,
   deleteCustomer,
   getCustomersPanel,
+  getAppCustomerStatusMap,
+  toggleAppCustomerAccess,
+  bulkImportCustomersFromDocs,
 } from "./customer.controller.js"; // Adjust path as needed
 import upload from "../../middleware/upload.js";
 import { get } from "http";
+import { requireAuth } from "../auth/auth.middleware.js";
 const router = express.Router();
 // const upload = multer({ storage: multer.memoryStorage() });
 
@@ -381,5 +385,10 @@ router.delete("/:zoho_id/documents/:document_id", deleteDocument);
  *         description: Document not found
  */
 router.get("/:zoho_id/documents/:document_id/download", downloadDocument);
+
+router.get("/status-map", requireAuth, getAppCustomerStatusMap);
+router.post("/toggle-access", requireAuth, toggleAppCustomerAccess);
+
+router.post("/import-from-doc", requireAuth, bulkImportCustomersFromDocs);
 
 export default router;

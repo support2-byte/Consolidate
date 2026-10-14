@@ -7,6 +7,8 @@ import {
 } from "../../services/calculateEta.js";
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
+import { withTransaction } from "../../services/transaction.js";
+import { getReceiverPayments } from "../zoho-invoices/zoho-bill.controller.js";
 
 function normalizeDate(dateStr) {
   if (!dateStr) return null;
@@ -150,6 +152,7 @@ export async function createOrder(req, res) {
 
     const ordersResult = await withUserAudit(
       req,
+      client,
       `INSERT INTO orders (
         booking_ref, status, rgl_booking_number, place_of_loading, point_of_origin,
         final_destination, place_of_delivery, order_remarks, attachments
@@ -264,6 +267,7 @@ export async function createOrder(req, res) {
 
       const recResult = await withUserAudit(
         req,
+        client,
         `INSERT INTO receivers (
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
           receiver_marks_and_number, eta, etd, shipping_line,
@@ -273,11 +277,17 @@ export async function createOrder(req, res) {
         RETURNING id`,
         [
           orderId,
-          p.receiver_name || p.receiverName || "",
-          p.receiver_contact || p.receiverContact || "",
-          p.receiver_address || p.receiverAddress || "",
-          p.receiver_email || p.receiverEmail || "",
-          p.receiver_marks_and_number || "",
+          p[`${partyPrefix}_name`] || p.receiver_name || p.sender_name || "",
+          p[`${partyPrefix}_contact`] ||
+            p.receiver_contact ||
+            p.sender_contact ||
+            "",
+          p[`${partyPrefix}_address`] ||
+            p.receiver_address ||
+            p.sender_address ||
+            "",
+          p[`${partyPrefix}_email`] || p.receiver_email || p.sender_email || "",
+          p.receiver_marks_and_number || p.sender_marks_and_number || "",
           normEta,
           normEtd,
           "",
@@ -293,13 +303,7 @@ export async function createOrder(req, res) {
           p.full_partial || "Full",
           p.qty_delivered ? parseInt(p.qty_delivered) : null,
           receiverItemRefs,
-          p[`${partyPrefix}_ref`] ||
-            p[`${partyPrefix}Ref`] ||
-            p.receiver_ref ||
-            p.receiverRef ||
-            p.sender_ref ||
-            p.senderRef ||
-            "",
+          p[`${partyPrefix}_ref`] || p.receiver_ref || p.sender_ref || "",
         ],
       );
 
@@ -375,12 +379,14 @@ export async function createOrder(req, res) {
         const itemRef = item.item_ref || item.itemRef || "";
         await withUserAudit(
           req,
+          client,
           `INSERT INTO order_items (
-            order_id, receiver_id, item_ref, pickup_location, delivery_address,
+            order_id, sender_id, receiver_id, item_ref, pickup_location, delivery_address,
             category, subcategory, type, total_number, weight, container_details, status
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
           [
             orderId,
+            senderId,
             receiverId,
             itemRef,
             item.pickup_location || item.pickupLocation || "",
@@ -442,6 +448,7 @@ export async function createOrder(req, res) {
       for (const d of dropOffByParty[i] || []) {
         await withUserAudit(
           req,
+          client,
           `INSERT INTO drop_off_details (
             order_id, receiver_id, drop_method, dropoff_name, drop_off_cnic, drop_off_mobile, plate_no, drop_date
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -468,6 +475,7 @@ export async function createOrder(req, res) {
 
     await withUserAudit(
       req,
+      client,
       `INSERT INTO transport_details (
         order_id, transport_type, drop_method, dropoff_name, drop_off_cnic, drop_off_mobile,
         plate_no, drop_date, collection_method, collection_scope, qty_delivered,
@@ -1826,10 +1834,9 @@ export async function getOrderById(req, res) {
       });
     });
 
-    // Drop-off details per receiver
     const dropOffResult = await client.query(
       `
-      SELECT 
+      SELECT
         receiver_id,
         json_agg(
           json_build_object(
@@ -1854,51 +1861,76 @@ export async function getOrderById(req, res) {
 
     const collectionsResult = await client.query(
       `
-  SELECT 
-    oc.receiver_id,
-    json_agg(
-      json_build_object(
-        'id',                   oc.id,
-        'collectionMethod',     oc.collection_method,
-        'collectionScope',      oc.collection_scope,
-        'clientReceiverId',     oc.client_receiver_id,
-        'clientReceiverMobile', oc.client_receiver_mobile,
-        'plateNo',              oc.plate_no,
-        'deliveryDate',         TO_CHAR(oc.delivery_date, 'YYYY-MM-DD'),
-        'createdAt',            oc.created_at,
-        'items', COALESCE(items.items, '[]'::json),
-        'gatepass', COALESCE(gp.gatepass, '[]'::json)
-      ) ORDER BY oc.id DESC
-    ) AS collections
-  FROM order_collections oc
-  LEFT JOIN LATERAL (
-    SELECT json_agg(
-      json_build_object(
-        'id', oci.id,
-        'orderItemId', oci.order_item_id,
-        'itemRef', oci.item_ref,
-        'qtyDelivered', oci.qty_delivered
-      )
-    ) AS items
-    FROM order_collection_items oci
-    WHERE oci.collection_id = oc.id
-  ) items ON true
-  LEFT JOIN LATERAL (
-    SELECT json_agg(
-      json_build_object(
-        'id', ocg.id,
-        'url', ocg.url,
-        'originalname', ocg.originalname,
-        'mimetype', ocg.mimetype,
-        'size', ocg.size
-      )
-    ) AS gatepass
-    FROM order_collection_gatepass ocg
-    WHERE ocg.collection_id = oc.id
-  ) gp ON true
-  WHERE oc.order_id = $1
-  GROUP BY oc.receiver_id
-  `,
+        SELECT 
+          oc.receiver_id,
+          json_agg(
+            json_build_object(
+              'id',                   oc.id,
+              'collectionMethod',     oc.collection_method,
+              'collectionScope',      oc.collection_scope,
+              'clientReceiverId',     oc.client_receiver_id,
+              'clientReceiverMobile', oc.client_receiver_mobile,
+              'plateNo',              oc.plate_no,
+              'deliveryDate',         TO_CHAR(oc.delivery_date, 'YYYY-MM-DD'),
+              'createdAt',            oc.created_at,
+              'status',                COALESCE(oc.status, false),
+              'items', COALESCE(items.items, '[]'::json),
+              'gatepass', COALESCE(gp.gatepass, '[]'::json),
+              'generatedGatepasses', COALESCE(ggp.gatepasses, '[]'::json)
+            ) ORDER BY oc.id DESC
+          ) AS collections
+        FROM order_collections oc
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', oci.id,
+              'orderItemId', oci.order_item_id,
+              'itemRef', oci.item_ref,
+              'qtyDelivered', oci.qty_delivered
+            )
+          ) AS items
+          FROM order_collection_items oci
+          WHERE oci.collection_id = oc.id
+        ) items ON true
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', ocg.id,
+              'url', ocg.url,
+              'originalname', ocg.originalname,
+              'mimetype', ocg.mimetype,
+              'size', ocg.size
+            )
+          ) AS gatepass
+          FROM order_collection_gatepass ocg
+          WHERE ocg.collection_id = oc.id
+        ) gp ON true
+        LEFT JOIN LATERAL (
+          SELECT json_agg(
+            json_build_object(
+              'id', g.id,
+              'gpNumber', g.gp_number,
+              'driverName', g.driver_name,
+              'driverId', g.driver_id,
+              'driverContact', g.driver_contact,
+              'plateNo', g.plate_no,
+              'pickupLocation', g.pickup_location,
+              'qty', g.qty,
+              'weight', g.weight,
+              'commodity', g.commodity,
+              'marksAndNumber', g.marks_and_number,
+              'customerName', g.customer_name,
+              'customerContact', g.customer_contact,
+              'gateDate', TO_CHAR(g.gate_date, 'YYYY-MM-DD'),
+              'createdAt', g.created_at
+            ) ORDER BY g.id DESC
+          ) AS gatepasses
+          FROM gatepass_records g
+          WHERE g.collection_id = oc.id
+        ) ggp ON true
+        WHERE oc.order_id = $1
+        GROUP BY oc.receiver_id
+       `,
       [numericId],
     );
 
@@ -3419,11 +3451,6 @@ export async function removeReceiver(req, res) {
 
     const { orderId, receiverId } = req.params;
 
-    console.log(
-      `[removeReceiver] Removing receiver ${receiverId} from order ${orderId}`,
-    );
-
-    // ── 1. Verify receiver belongs to this order ──────────────────────────
     const receiverCheck = await client.query(
       `SELECT id FROM receivers WHERE id = $1 AND order_id = $2`,
       [receiverId, orderId],
@@ -3436,35 +3463,24 @@ export async function removeReceiver(req, res) {
         .json({ error: "Receiver not found for this order" });
     }
 
-    // ── 2. Delete child records first (FK constraints) ────────────────────
     const deletedItems = await client.query(
       `DELETE FROM order_items WHERE receiver_id = $1 RETURNING id`,
       [receiverId],
-    );
-    console.log(
-      `[removeReceiver] Deleted ${deletedItems.rowCount} order_items`,
     );
 
     const deletedDropOffs = await client.query(
       `DELETE FROM drop_off_details WHERE receiver_id = $1 RETURNING id`,
       [receiverId],
     );
-    console.log(
-      `[removeReceiver] Deleted ${deletedDropOffs.rowCount} drop_off_details`,
-    );
 
-    // ── 3. Delete the receiver ────────────────────────────────────────────
     await client.query(`DELETE FROM receivers WHERE id = $1`, [receiverId]);
-    console.log(`[removeReceiver] Receiver ${receiverId} deleted`);
 
-    // ── 4. Update order updated_at ────────────────────────────────────────
     await client.query(`UPDATE orders SET updated_at = NOW() WHERE id = $1`, [
       orderId,
     ]);
 
     await client.query("COMMIT");
 
-    // ── 5. Return updated receivers list ──────────────────────────────────
     const updatedReceivers = await client.query(
       `SELECT *, receiver_marks_and_number AS "marksAndNumber"
        FROM receivers WHERE order_id = $1 ORDER BY id`,
@@ -4948,6 +4964,7 @@ function normalizeReceiver(row) {
     receiverEmail: kycApproved
       ? row.receiver_kyc_email
       : row.receiver_customer_email || row.receiver_email || "",
+    receiverMarksAndNumber: row.receiver_marks_and_number,
     kycApproved,
     emiratesId: row.receiver_emirates_id || "",
     passportNumber: row.receiver_passport_number || "",
@@ -5009,7 +5026,7 @@ export async function getPdfData(req, res) {
     const RECEIVERS_QUERY = `
       SELECT
         r.id, r.order_id,
-        r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email,
+        r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, r.receiver_marks_and_number,
         r.receiver_ref,
         r.containers,
         sd_full.shippingdetails,
@@ -5033,26 +5050,14 @@ export async function getPdfData(req, res) {
             'id', oi.id,
             'category', COALESCE(oi.category, ''),
             'subcategory', COALESCE(oi.subcategory, ''),
-            -- itemName: what the PDFs should print as the product/goods description.
-            -- Prefer subcategory (the specific item, e.g. "LADIES SUITS"),
-            -- fall back to category only if subcategory is blank.
             'itemName', COALESCE(NULLIF(oi.subcategory, ''), oi.category, ''),
             'totalNumber', COALESCE(oi.total_number, 0)::int,
             'weight', COALESCE(oi.weight, 0)::numeric,
             'itemRef', COALESCE(oi.item_ref, ''),
-            -- status / consignmentStatus: order_items' own lifecycle fields.
-            -- Previously omitted from the API response entirely, so the
-            -- frontend/PDF never saw e.g. "Loaded into Container".
             'status', COALESCE(oi.status, ''),
             'consignmentStatus', COALESCE(oi.consignment_status, ''),
             'trackingEta', TO_CHAR(ot.eta, 'YYYY-MM-DD'),
-            -- containerAssignments: real assignment records for this item,
-            -- sourced from container_assignment_history by detail_id, NOT
-            -- from the (unreliable/empty) oi.container_details jsonb column.
             'containerAssignments', COALESCE(cah_agg.assignments, '[]'::json),
-            -- containerDetails kept for backward compatibility with any
-            -- existing frontend code that still reads it; now built from the
-            -- same reliable source instead of oi.container_details.
             'containerDetails', COALESCE(cah_agg.legacy_shape, '[]'::json)
           ) ORDER BY oi.id
         ) AS shippingdetails
@@ -5088,8 +5093,6 @@ export async function getPdfData(req, res) {
             ) AS legacy_shape
           FROM container_assignment_history cah
           WHERE cah.detail_id = oi.id
-            -- action_type filter: only count actual assignments, not any
-            -- future REMOVE/UNASSIGN rows you may add to this history table.
             AND cah.action_type = 'ASSIGN'
         ) cah_agg ON TRUE
         WHERE oi.receiver_id = r.id
@@ -5341,6 +5344,17 @@ export async function createOrderCollections(req, res) {
       return res.status(404).json({ error: "Order not found" });
     }
 
+    const payments = await getReceiverPayments(orderId);
+    const unpaid = collections.filter(
+      (c) => payments?.[c.receiverId] !== "paid",
+    );
+    if (unpaid.length) {
+      await client.query("ROLLBACK");
+      return res
+        .status(403)
+        .json({ error: "Payment is not completed for the selected receiver" });
+    }
+
     const filesByReceiver = {};
     for (const f of files) {
       const match = f.fieldname.match(/^gatepass_(.+)$/);
@@ -5384,10 +5398,12 @@ export async function createOrderCollections(req, res) {
 
       const headerRes = await withUserAudit(
         req,
+        client,
         `INSERT INTO order_collections (
           order_id, receiver_id, collection_method, collection_scope,
-          client_receiver_id, client_receiver_mobile, plate_no, delivery_date
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          client_receiver_id, client_receiver_mobile, plate_no, delivery_date,
+          status
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         RETURNING *`,
         [
           orderId,
@@ -5398,9 +5414,44 @@ export async function createOrderCollections(req, res) {
           c.clientReceiverMobile || null,
           c.plateNo || null,
           c.deliveryDate ? normalizeDate(c.deliveryDate) : null,
+          !!c.status,
         ],
       );
+
       const collectionId = headerRes.rows[0].id;
+
+      const createdGatepasses = [];
+      if (Array.isArray(c.gatepasses) && c.gatepasses.length) {
+        for (const g of c.gatepasses) {
+          if (!g.driverName || !g.plateNo) continue;
+          const gpNumber = `GP-${collectionId}-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 90 + 10)}`;
+          const gpRes = await client.query(
+            `INSERT INTO gatepass_records
+            (collection_id, gp_number, driver_name, driver_id, driver_contact,
+            plate_no, pickup_location, qty, weight, commodity,
+            marks_and_number, customer_name, customer_contact, gate_date)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          RETURNING *`,
+            [
+              collectionId,
+              gpNumber,
+              g.driverName,
+              g.driverId || null,
+              g.driverContact || null,
+              g.plateNo,
+              g.pickupLocation || null,
+              g.qty ? parseInt(g.qty, 10) : null,
+              g.weight ? parseFloat(g.weight) : null,
+              g.commodity || null,
+              g.marksAndNumber || null,
+              g.customerName || null,
+              g.customerContact || null,
+              g.gateDate || null,
+            ],
+          );
+          createdGatepasses.push(gpRes.rows[0]);
+        }
+      }
 
       const itemValues = [];
       const itemPlaceholders = c.items
@@ -5482,3 +5533,237 @@ export async function createOrderCollections(req, res) {
     if (client) client.release();
   }
 }
+
+export const listBookingFormsForImport = async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        bc.id,
+        bc.form_id,
+        bc.mode,
+        bc.subject,
+        bc.message,
+        bc.total_qty,
+        bc.total_weight,
+        bc.created_at,
+        row_to_json(c.*) AS company,
+        COALESCE(
+          json_agg(DISTINCT jsonb_build_object(
+            'id', s.id, 'name', s.name, 'email', s.email,
+            'phone', s.phone, 'address', s.address,
+            'booking_submitted_at', s.booking_submitted_at,
+            'signature_url', sub_s.signature_url
+          )) FILTER (WHERE s.id IS NOT NULL), '[]'
+        ) AS senders,
+        COALESCE(
+          json_agg(DISTINCT jsonb_build_object(
+            'id', r.id, 'name', r.name, 'email', r.email,
+            'phone', r.phone, 'address', r.address,
+            'booking_submitted_at', r.booking_submitted_at,
+            'signature_url', sub_r.signature_url
+          )) FILTER (WHERE r.id IS NOT NULL), '[]'
+        ) AS receivers
+      FROM booking_confirmations bc
+      JOIN companies c ON c.id = bc.company_id
+      LEFT JOIN booking_confirmation_senders s ON s.booking_form_id = bc.id
+      LEFT JOIN booking_confirmation_receivers r ON r.booking_form_id = bc.id
+      LEFT JOIN booking_confirmation_submissions sub_s
+        ON sub_s.form_submitter_id = s.id AND sub_s.participant_type = 'sender'
+      LEFT JOIN booking_confirmation_submissions sub_r
+        ON sub_r.form_submitter_id = r.id AND sub_r.participant_type = 'receiver'
+      GROUP BY bc.id, c.id
+      ORDER BY bc.created_at DESC
+    `);
+    return res.json(rows);
+  } catch (err) {
+    console.error("listBookingFormsForImport error:", err);
+    return res.status(500).json({ error: "Failed to fetch booking forms" });
+  }
+};
+
+export const getBookingFormForImport = async (req, res) => {
+  const { bookingFormId } = req.params;
+  try {
+    const bcRes = await pool.query(
+      `SELECT bc.*, row_to_json(c.*) AS company
+       FROM booking_confirmations bc
+       JOIN companies c ON c.id = bc.company_id
+       WHERE bc.id = $1`,
+      [bookingFormId],
+    );
+    if (!bcRes.rows.length) return res.status(404).json({ error: "Not found" });
+    const bc = bcRes.rows[0];
+
+    const sendersRes = await pool.query(
+      `SELECT * FROM booking_confirmation_senders WHERE booking_form_id = $1`,
+      [bookingFormId],
+    );
+    const receiversRes = await pool.query(
+      `SELECT * FROM booking_confirmation_receivers WHERE booking_form_id = $1`,
+      [bookingFormId],
+    );
+
+    const itemsRes = await pool.query(
+      `SELECT id, category, subcategory, type, qty, weight, place_of_loading, place_of_destination
+        FROM booking_confirmation_items
+        WHERE booking_form_id = $1
+        ORDER BY id ASC`,
+      [bookingFormId],
+    );
+
+    const submitterIds = [
+      ...sendersRes.rows.map((s) => s.id),
+      ...receiversRes.rows.map((r) => r.id),
+    ];
+    let formUrl = null;
+    if (submitterIds.length) {
+      const urlRes = await pool.query(
+        `SELECT form_url FROM booking_confirmation_submissions
+         WHERE form_submitter_id = ANY($1::int[]) AND form_url IS NOT NULL
+         ORDER BY submitted_at DESC LIMIT 1`,
+        [submitterIds],
+      );
+      formUrl = urlRes.rows[0]?.form_url || null;
+    }
+
+    return res.json({
+      formUrl,
+      orderData: {
+        subject: bc.subject,
+        message: bc.message,
+        total_qty: bc.total_qty,
+        total_weight: bc.total_weight,
+        senders: sendersRes.rows,
+        receivers: receiversRes.rows,
+        items: itemsRes.rows,
+      },
+    });
+  } catch (err) {
+    console.error("getBookingFormForImport error:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to fetch booking form detail" });
+  }
+};
+
+export async function updateCollectionStatus(req, res) {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    const { status } = req.body;
+
+    client = await pool.connect();
+    const result = await withUserAudit(
+      req,
+      client,
+      `UPDATE order_collections SET status = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+      [!!status, collectionId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Collection not found" });
+    }
+
+    return res.json({ success: true, collection: result.rows[0] });
+  } catch (error) {
+    console.error("Error updating collection status:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+}
+
+export const createGatepass = async (req, res) => {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    const {
+      driverName,
+      driverId,
+      driverContact,
+      plateNo,
+      pickupLocation,
+      qty,
+      weight,
+      commodity,
+      marksAndNumber,
+      customerName,
+      customerContact,
+      gateDate,
+    } = req.body;
+
+    if (!driverName || !plateNo) {
+      return res
+        .status(400)
+        .json({ error: "Driver name and truck number are required" });
+    }
+
+    client = await pool.connect();
+
+    const collectionRes = await client.query(
+      "SELECT id FROM order_collections WHERE id = $1",
+      [collectionId],
+    );
+    if (collectionRes.rowCount === 0) {
+      return res.status(404).json({ error: "Collection not found" });
+    }
+
+    const gpNumber = `GP-${collectionId}-${Date.now().toString().slice(-6)}`;
+
+    const result = await withUserAudit(
+      req,
+      client,
+      `INSERT INTO gatepass_records
+        (collection_id, gp_number, driver_name, driver_id, driver_contact,
+         plate_no, pickup_location, qty, weight, commodity,
+         marks_and_number, customer_name, customer_contact, gate_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING *`,
+      [
+        collectionId,
+        gpNumber,
+        driverName,
+        driverId || null,
+        driverContact || null,
+        plateNo,
+        pickupLocation || null,
+        qty ? parseInt(qty, 10) : null,
+        weight ? parseFloat(weight) : null,
+        commodity || null,
+        marksAndNumber || null,
+        customerName || null,
+        customerContact || null,
+        gateDate || null,
+      ],
+    );
+
+    return res.status(201).json({ success: true, gatepass: result.rows[0] });
+  } catch (error) {
+    console.error("Error creating gatepass:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+};
+
+export const getGatepassesForCollection = async (req, res) => {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    client = await pool.connect();
+    const result = await client.query(
+      "SELECT * FROM gatepass_records WHERE collection_id = $1 ORDER BY id DESC",
+      [collectionId],
+    );
+    return res.json({ gatepasses: result.rows });
+  } catch (error) {
+    console.error("Error fetching gatepasses:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (client) client.release();
+  }
+};

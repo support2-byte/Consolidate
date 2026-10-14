@@ -35,6 +35,61 @@ function formatDateTime(date) {
   );
 }
 
+const FRONTEND_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
+
+const STATUS_ACTION_LINKS = {
+  "Order Created": {
+    recipientType: "sender",
+    heading: "Want to schedule your drop-off?",
+    links: [
+      {
+        path: "drop-off-request",
+        text: "Schedule Drop-off",
+        description:
+          "Choose a pickup date and zone so we can collect your shipment from your address.",
+      },
+    ],
+  },
+  "Shipment Delivered": {
+    recipientType: "receiver",
+    heading: "Your shipment has arrived. What would you like to do next?",
+    links: [
+      {
+        path: "purchase-storage",
+        text: "Arrange Storage",
+        description:
+          "Need more time before collecting? Request storage space for your goods.",
+      },
+      {
+        path: "request-delivery",
+        text: "Request Delivery",
+        description:
+          "Want it brought to you? Request delivery to your address.",
+      },
+    ],
+  },
+};
+
+function buildActionLinksHtml(statusLabel, itemRef, recipientType) {
+  const config = STATUS_ACTION_LINKS[statusLabel];
+  if (
+    !config ||
+    config.recipientType !== String(recipientType || "").toLowerCase()
+  ) {
+    return "";
+  }
+
+  const width = Math.floor(100 / config.links.length);
+  const cells = config.links
+    .map(
+      (link) =>
+        `<td style="vertical-align:top;width:${width}%;padding:0 10px 0 0"><p style="margin:0 0 6px;font-size:13px;color:#475569">${escapeHtml(link.description)}</p><a class="cta" style="margin:0" href="${FRONTEND_URL}/${link.path}/${encodeURIComponent(itemRef)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a></td>`,
+    )
+    .join("");
+
+  return `<div style="margin-top:18px"><p style="margin:0;font-weight:700;color:#0f172a">${escapeHtml(config.heading)}</p><table role="presentation" style="width:100%;margin-top:14px;border-collapse:collapse"><tr>${cells}</tr></table></div>`;
+}
+
 function buildSubject(templateData) {
   return `Royal Gulf Shipping – ${templateData.statusLabel} (Ref: ${templateData.refId || "—"})`;
 }
@@ -81,6 +136,11 @@ function buildOrderCreatedHtml(templateData) {
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
     ),
+    actionLinks: buildActionLinksHtml(
+      templateData.statusLabel || "Order Created",
+      templateData.refId,
+      templateData.recipientType,
+    ),
     currentYear: new Date().getFullYear(),
   });
 }
@@ -100,6 +160,13 @@ function buildShipmentUpdateHtml(templateData) {
     ),
     trackLink: escapeHtml(
       templateData.trackLink || "https://trackorder.royalgulfshipping.com/",
+    ),
+    actionLinks: buildActionLinksHtml(
+      templateData.statusLabel === "Order Created"
+        ? ""
+        : templateData.statusLabel || "Shipment Updated",
+      templateData.refId,
+      templateData.recipientType,
     ),
     currentYear: new Date().getFullYear(),
   });
@@ -201,6 +268,7 @@ export async function sendShipmentEmail(shipmentData) {
 
   const templateData = {
     isNewOrder: true,
+    recipientType: shipmentData.recipientType,
     receiverName,
     statusLabel: String(shipmentData.statusLabel || "Order Created"),
     statusMsg: String(
@@ -300,6 +368,7 @@ async function buildAndSendTracking(
 
   const templateData = {
     isNewOrder: false,
+    recipientType: statusData.recipientType,
     receiverName: statusData.receiverName || "Valued Customer",
     statusLabel: String(
       statusData.statusLabel || tracking.current_status || "Shipment Updated",

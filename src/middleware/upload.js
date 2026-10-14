@@ -1,6 +1,6 @@
 import multer from "multer";
-import { v2 as cloudinary } from "cloudinary";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
+import cloudinary from "../services/cloudinary.js";
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -263,6 +263,43 @@ export const companyUpload = multer({
   },
 }).fields([
   { name: "logo", maxCount: 1 },
+  { name: "signature", maxCount: 1 },
+]);
+
+export const bookingConfirmationUpload = multer({
+  storage: new CloudinaryStorage({
+    cloudinary,
+    params: (req, file) => {
+      const formId = (req.body?.formId || "unknown")
+        .toString()
+        .toUpperCase()
+        .replace(/\s+/g, "");
+      const match = file.fieldname.match(
+        /(passportDocument|emiratesDocument|tradeLicenseDocument|signature)/,
+      );
+      const label = match ? match[1] : "file";
+      const isImage = file.mimetype.startsWith("image/");
+      const ext = EXT_BY_MIME[file.mimetype] || "bin";
+      const basePublicId = `${formId}_${label}_${Date.now()}`;
+      return {
+        folder: "consolidate-app/booking-confirmation",
+        public_id: isImage ? basePublicId : `${basePublicId}.${ext}`,
+        allowed_formats: ["jpg", "jpeg", "png", "pdf"],
+        resource_type: isImage ? "image" : "raw",
+        type: isImage ? "upload" : "authenticated",
+      };
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 4 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["image/jpeg", "image/png", "application/pdf"];
+    if (allowedTypes.includes(file.mimetype)) cb(null, true);
+    else cb(new Error("Invalid file type. Allowed: JPG, PNG, PDF"));
+  },
+}).fields([
+  { name: "passportDocument", maxCount: 1 },
+  { name: "emiratesDocument", maxCount: 1 },
+  { name: "tradeLicenseDocument", maxCount: 1 },
   { name: "signature", maxCount: 1 },
 ]);
 

@@ -1,5 +1,4 @@
 import pool from "../../db/pool.js";
-import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import { v2 as cloudinary } from "cloudinary";
 import { withTransaction } from "../../services/transaction.js";
@@ -872,7 +871,7 @@ export async function getUsageHistory(req, res) {
 
       UNION ALL
 
-      SELECT 
+            SELECT 
         cah.created_at as event_time,
         'ASSIGNMENT' as event_type,
         cah.status as event_status,

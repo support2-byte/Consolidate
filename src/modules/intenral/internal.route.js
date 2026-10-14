@@ -5,6 +5,10 @@ import {
   createKycForm,
   getCustomerByZohoId,
   processKycEmailQueue,
+  getRequests,
+  approveRequest,
+  rejectRequest,
+  getRequestDuePreview,
 } from "./internal.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
 import { kycUpload } from "../../middleware/upload.js";
@@ -113,5 +117,14 @@ router.get("/customer/:zohoId", getCustomerByZohoId);
  *         description: Invalid input
  */
 router.post("/submit-kyc", kycUpload, createKycForm);
+
+router.get("/get-requests", requireAuth, getRequests);
+router.get(
+  "/requests/:type/:id/due-preview",
+  requireAuth,
+  getRequestDuePreview,
+);
+router.post("/requests/:type/:id/approve", requireAuth, approveRequest);
+router.post("/requests/:type/:id/reject", requireAuth, rejectRequest);
 
 export default router;
