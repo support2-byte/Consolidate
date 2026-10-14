@@ -473,7 +473,7 @@ export const createWebNgeniusOrder = async (req, res) => {
       orderReference: invoice.invoice_id,
       amount: Number(invoice.amount),
       currencyCode: "AED",
-      redirectUrl: `${process.env.WEB_APP_BASE_URL}/invoice-payment/${invoice.invoice_id}?paid=1`,
+      redirectUrl: `${process.env.FORM_BASE_URL}/invoice-payment/${invoice.invoice_id}?paid=1`,
     });
     logger.info("createWebNgeniusOrder: order created", {
       invoiceId,
