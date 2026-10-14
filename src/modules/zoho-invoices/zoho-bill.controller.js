@@ -470,6 +470,56 @@ export const getOrderPaymentStatus = async (req, res) => {
   }
 };
 
+export const refreshOrderPaymentStatus = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+  try {
+    const orderRes = await pool.query(
+      "SELECT rgl_booking_number FROM orders WHERE id = $1",
+      [orderId],
+    );
+    if (!orderRes.rows[0]) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const formNo = String(orderRes.rows[0].rgl_booking_number ?? "").trim();
+    if (!formNo) {
+      return res.status(400).json({
+        success: false,
+        message: "Order has no form number to check",
+      });
+    }
+
+    const errors = await syncOrderFromZoho(formNo);
+    if (errors.every(Boolean)) {
+      const rateLimited = errors.some((e) => e.response?.status === 429);
+      return res.status(rateLimited ? 429 : 502).json({
+        success: false,
+        message: rateLimited
+          ? "Zoho rate limit reached, please try again shortly"
+          : "Could not reach Zoho. Check your network connection and try again.",
+      });
+    }
+
+    const receiverPayments = await getReceiverPayments(orderId);
+    return res.json({ success: true, receiverPayments });
+  } catch (err) {
+    logger.error("Failed to refresh order payment status", {
+      err: err.response?.data || err.message,
+      orderId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to check payment status" });
+  }
+};
+
 const BASE_CURRENCY = "AED";
 
 const withAed = (d) => {
