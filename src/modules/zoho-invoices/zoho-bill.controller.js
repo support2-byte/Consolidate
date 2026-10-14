@@ -8,6 +8,7 @@ import {
   mapWithLimit,
   withRetry,
   syncInvoicesForConsignment,
+  syncInvoicesForOrder,
 } from "./zoho-invoice.controller.js";
 
 const EXCLUDED_STATUSES = ["void", "draft"];
@@ -198,12 +199,7 @@ const syncBillsForConsignment = async (consignmentNumber, token) => {
       }
     };
 
-    let exact = await attempt("bill_number equals", { bill_number: formNo });
-    if (!exact.length) {
-      exact = await attempt("bill_number contains", {
-        bill_number_contains: formNo,
-      });
-    }
+    const exact = await attempt("bill_number equals", { bill_number: formNo });
     if (!exact.length) return 0;
 
     const synced = await syncBillRows(exact, token);
@@ -212,6 +208,38 @@ const syncBillsForConsignment = async (consignmentNumber, token) => {
   });
 
   return counts.reduce((s, n) => s + n, 0);
+};
+
+const syncBillsForOrder = async (formNo, token) => {
+  const wantedForm = key(formNo);
+  if (!wantedForm) return 0;
+
+  const attempt = async (label, filters) => {
+    try {
+      const list = await fetchAllZohoBillList(token, filters, 1);
+      const exact = list.filter((b) => key(b.bill_number) === wantedForm);
+      logger.info("[BILL-ORDER] lookup", {
+        formNo,
+        label,
+        listed: list.length,
+        exact: exact.length,
+      });
+      return exact;
+    } catch (err) {
+      logger.error("[BILL-ORDER] lookup failed", {
+        formNo,
+        label,
+        status: err.response?.status,
+        err: err.response?.data || err.message,
+      });
+      return [];
+    }
+  };
+
+  const exact = await attempt("bill_number equals", { bill_number: formNo });
+  if (!exact.length) return 0;
+
+  return syncBillRows(exact, token);
 };
 
 const CONSIGNMENT_SYNC_TTL_MS = 60_000;
@@ -276,6 +304,48 @@ const syncConsignmentFromZoho = (consignmentNumber, opts) => {
     );
   }
   return inflightSyncs.get(k);
+};
+
+const inflightOrderSyncs = new Map();
+
+const syncOrderFromZoho = (formNo) => {
+  const k = key(formNo);
+  if (!inflightOrderSyncs.has(k)) {
+    const run = async (label, fn) => {
+      try {
+        await fn();
+        return null;
+      } catch (err) {
+        logger.error("Failed to sync order billing", {
+          label,
+          formNo,
+          status: err.response?.status,
+          err: err.response?.data || err.message,
+        });
+        return err;
+      }
+    };
+
+    inflightOrderSyncs.set(
+      k,
+      (async () => {
+        let token;
+        try {
+          token = await getZohoAccessToken();
+        } catch (err) {
+          logger.error("Failed to get Zoho token for order sync", {
+            err: err.response?.data || err.message,
+          });
+          return [err, err];
+        }
+        return Promise.all([
+          run("invoices", () => syncInvoicesForOrder(formNo)),
+          run("bills", () => syncBillsForOrder(formNo, token)),
+        ]);
+      })().finally(() => inflightOrderSyncs.delete(k)),
+    );
+  }
+  return inflightOrderSyncs.get(k);
 };
 
 export const getZohoBillPdf = async (req, res) => {
@@ -567,8 +637,14 @@ export const getOrderBilling = async (req, res) => {
     }
 
     const orderKey = key(order.rgl_booking_number);
-    if (!orderKey)
-      return res.json({ success: true, row: null, receiverPayments: {} });
+    const linkRes = await pool.query(
+      `SELECT DISTINCT lower(btrim(c.consignment_number)) AS cn
+         FROM container_assignment_history h
+         JOIN consignments c ON c.id = h.consignment_id
+        WHERE h.order_id = $1`,
+      [orderId],
+    );
+    const linkedCons = linkRes.rows.map((r) => r.cn).filter(Boolean);
 
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
@@ -580,8 +656,9 @@ export const getOrderBilling = async (req, res) => {
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
            FROM zoho_invoices
           WHERE lower(btrim(order_number)) = $1
+            AND lower(btrim(consignment_number)) = ANY($2::text[])
           ORDER BY invoice_date, id`,
-        [orderKey],
+        [orderKey, linkedCons],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
@@ -626,27 +703,25 @@ export const syncOrderBilling = async (req, res) => {
   }
 
   try {
-    const consRes = await pool.query(
-      `SELECT DISTINCT c.consignment_number
-         FROM container_assignment_history h
-         JOIN consignments c ON c.id = h.consignment_id
-        WHERE h.order_id = $1`,
+    const orderRes = await pool.query(
+      "SELECT rgl_booking_number FROM orders WHERE id = $1",
       [orderId],
     );
-    const numbers = consRes.rows
-      .map((r) => r.consignment_number)
-      .filter(Boolean);
-    if (!numbers.length) {
+    if (!orderRes.rows[0]) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const formNo = String(orderRes.rows[0].rgl_booking_number ?? "").trim();
+    if (!formNo) {
       return res.status(400).json({
         success: false,
-        message: "Order is not linked to any consignment",
+        message: "Order has no form number to sync",
       });
     }
 
-    const results = await Promise.all(
-      numbers.map((n) => syncConsignmentFromZoho(n, { force: true })),
-    );
-    const errors = results.flat();
+    const errors = await syncOrderFromZoho(formNo);
 
     if (errors.every(Boolean)) {
       const rateLimited = errors.some((e) => e.response?.status === 429);
