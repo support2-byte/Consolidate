@@ -442,6 +442,51 @@ export const syncInvoicesForConsignment = async (consignmentNumber, token) => {
   return counts.reduce((s, n) => s + n, 0);
 };
 
+export const syncInvoicesForOrder = async (formNo) => {
+  const token = await getZohoAccessToken();
+  const orderFilter =
+    process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
+  const wantedForm = String(formNo ?? "")
+    .trim()
+    .toLowerCase();
+  if (!wantedForm) return 0;
+
+  const attempt = async (label, filters) => {
+    try {
+      const list = await fetchAllZohoInvoiceList(token, filters, 1);
+      const exact = list.filter(
+        (i) =>
+          String(i[orderFilter] ?? "")
+            .trim()
+            .toLowerCase() === wantedForm,
+      );
+      logger.info("[INV-ORDER] lookup", {
+        formNo,
+        label,
+        listed: list.length,
+        exact: exact.length,
+      });
+      return exact;
+    } catch (err) {
+      logger.error("[INV-ORDER] lookup failed", {
+        formNo,
+        label,
+        status: err.response?.status,
+        err: err.response?.data || err.message,
+      });
+      return [];
+    }
+  };
+
+  let exact = await attempt("equals", { [orderFilter]: formNo });
+  if (!exact.length) {
+    exact = await attempt("contains", { [`${orderFilter}_contains`]: formNo });
+  }
+  if (!exact.length) return 0;
+
+  return syncInvoiceRows(exact, token);
+};
+
 export const syncZohoInvoices = async (req, res) => {
   try {
     const result = await runZohoSync();
