@@ -8,7 +8,10 @@ import {
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
 import { withTransaction } from "../../services/transaction.js";
-import { getReceiverPayments } from "../zoho-invoices/zoho-bill.controller.js";
+import {
+  getReceiverPayments,
+  getUnreleasedReceivers,
+} from "../zoho-invoices/zoho-bill.controller.js";
 
 function normalizeDate(dateStr) {
   if (!dateStr) return null;
@@ -5344,15 +5347,21 @@ export async function createOrderCollections(req, res) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const payments = await getReceiverPayments(orderId);
-    const unpaid = collections.filter(
-      (c) => payments?.[c.receiverId] !== "paid",
-    );
-    if (unpaid.length) {
+    const receiverIds = [
+      ...new Set(collections.map((c) => c.receiverId).filter(Boolean)),
+    ];
+    const blocked = await getUnreleasedReceivers(orderId, receiverIds);
+    if (blocked === null) {
       await client.query("ROLLBACK");
-      return res
-        .status(403)
-        .json({ error: "Payment is not completed for the selected receiver" });
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (blocked.length) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error:
+          "Payment is not completed and no approval is on file for the selected receiver",
+        receiverIds: blocked,
+      });
     }
 
     const filesByReceiver = {};
@@ -5703,11 +5712,23 @@ export const createGatepass = async (req, res) => {
     client = await pool.connect();
 
     const collectionRes = await client.query(
-      "SELECT id FROM order_collections WHERE id = $1",
+      "SELECT id, order_id, receiver_id FROM order_collections WHERE id = $1",
       [collectionId],
     );
     if (collectionRes.rowCount === 0) {
       return res.status(404).json({ error: "Collection not found" });
+    }
+
+    const { order_id, receiver_id } = collectionRes.rows[0];
+    const blocked = await getUnreleasedReceivers(order_id, [receiver_id]);
+    if (blocked === null) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (blocked.length) {
+      return res.status(403).json({
+        error:
+          "Payment is not completed and no approval is on file for this receiver",
+      });
     }
 
     const gpNumber = `GP-${collectionId}-${Date.now().toString().slice(-6)}`;

@@ -10,7 +10,10 @@ import { sendKycFormEmail } from "../../services/sendKycEmail.js";
 import crypto from "crypto";
 import { withTransaction } from "../../services/transaction.js";
 import { generateOtp } from "../../services/generateOtp.js";
-import { getZohoDueContext } from "../zoho-invoices/zoho-invoice.service.js";
+import {
+  getZohoDueContext,
+  generateUniqueInvoiceId,
+} from "../zoho-invoices/zoho-invoice.service.js";
 
 const generateFormSeed = () => {
   return crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
@@ -682,7 +685,7 @@ export const approveRequest = async (req, res) => {
         };
       }
 
-      const invoiceId = `INV-${generateFormSeed()}`;
+      const invoiceId = await generateUniqueInvoiceId();
 
       logger.info("Creating invoice for approved request", {
         type,

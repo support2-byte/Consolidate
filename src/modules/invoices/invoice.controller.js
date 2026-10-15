@@ -7,7 +7,10 @@ import {
   zohoHeaders,
   zohoParams,
 } from "../zoho-invoices/zoho-bill.controller.js";
-import { getZohoDueContext } from "../zoho-invoices/zoho-invoice.service.js";
+import {
+  getZohoDueContext,
+  generateUniqueInvoiceId,
+} from "../zoho-invoices/zoho-invoice.service.js";
 import {
   getBooksBaseUrl,
   UPSERT_SQL,
@@ -158,7 +161,6 @@ export async function createOverstayedInvoice(req, res) {
     await client.query("BEGIN");
 
     const {
-      invoiceId,
       orderId,
       receiverId,
       itemRef,
@@ -218,6 +220,8 @@ export async function createOverstayedInvoice(req, res) {
     const finalSubtotal = Number.isFinite(Number(subtotal))
       ? Number(subtotal)
       : 0;
+
+    const invoiceId = await generateUniqueInvoiceId();
 
     const invoiceRes = await client.query(
       `INSERT INTO overstay_invoices
@@ -862,6 +866,15 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       (z) => z.invoice_number === invoice.invoice_id,
     );
     if (hit) {
+      const sameInvoice =
+        hit.customer_id === ctx.customerId &&
+        String(hit.reference_number || "").trim() === ctx.orderNumber;
+      if (!sameInvoice) {
+        return res.status(409).json({
+          success: false,
+          message: "Invoice number conflicts with a different invoice in Zoho.",
+        });
+      }
       await pool.query(
         `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
           WHERE id = $2 AND zoho_invoice_id IS NULL`,
