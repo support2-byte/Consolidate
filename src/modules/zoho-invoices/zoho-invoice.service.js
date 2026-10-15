@@ -1,4 +1,5 @@
 import axios from "axios";
+import crypto from "crypto";
 import pool from "../../db/pool.js";
 import logger from "../../services/logger.js";
 import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
@@ -510,4 +511,24 @@ export const uploadConsignmentInvoicesToZoho = async ({
   }
 
   return result;
+};
+
+export const generateUniqueInvoiceId = async () => {
+  for (let i = 0; i < 10; i++) {
+    const candidate = `INV-${crypto
+      .randomInt(0, 1_000_000)
+      .toString()
+      .padStart(6, "0")}`;
+    const { rowCount } = await pool.query(
+      `SELECT 1 FROM overstay_invoices WHERE invoice_id = $1
+       UNION ALL SELECT 1 FROM storage_invoices WHERE invoice_id = $1
+       UNION ALL SELECT 1 FROM delivery_invoices WHERE invoice_id = $1
+       UNION ALL SELECT 1 FROM dropoff_invoices WHERE invoice_id = $1
+       UNION ALL SELECT 1 FROM zoho_invoices WHERE invoice_number = $1
+       LIMIT 1`,
+      [candidate],
+    );
+    if (!rowCount) return candidate;
+  }
+  throw new Error("Unable to generate a unique invoice id");
 };

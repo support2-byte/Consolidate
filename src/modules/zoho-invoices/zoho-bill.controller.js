@@ -388,12 +388,15 @@ const sum = (docs) => Number(docs.reduce((s, d) => s + d.total, 0).toFixed(2));
 
 const strip = ({ order_number, ...rest }) => rest;
 
-const paymentStatusOf = (activeInvoices) => {
-  if (!activeInvoices.length) return "no_invoice";
-  if (activeInvoices.every((d) => d.balance <= 0)) return "paid";
-  return activeInvoices.some((d) => d.balance < d.total)
-    ? "partially_paid"
-    : "unpaid";
+const paymentStatusOf = (invoices) => {
+  const live = invoices.filter((d) => d.status !== "void");
+  if (!live.length) return "no_invoice";
+
+  const issued = live.filter((d) => d.status !== "draft");
+  if (!issued.length) return "unpaid";
+
+  if (issued.every((d) => d.balance <= 0)) return "paid";
+  return issued.some((d) => d.balance < d.total) ? "partially_paid" : "unpaid";
 };
 
 const normalizeName = (v) =>
@@ -407,7 +410,7 @@ const normalizeName = (v) =>
 
 const computeReceiverPayments = (receivers, invoices) => {
   const byCustomer = {};
-  for (const inv of counted(invoices)) {
+  for (const inv of invoices) {
     const k = normalizeName(inv.customer);
     (byCustomer[k] = byCustomer[k] || []).push(inv);
   }
@@ -444,6 +447,36 @@ export const getReceiverPayments = async (orderId) => {
   return computeReceiverPayments(recRes.rows, invRes.rows);
 };
 
+export const getReceiverApprovals = async (orderId) => {
+  const { rows } = await pool.query(
+    `SELECT id, payment_approved, payment_approved_by, payment_approved_at
+       FROM receivers
+      WHERE order_id = $1`,
+    [orderId],
+  );
+  return Object.fromEntries(
+    rows.map((r) => [
+      r.id,
+      {
+        approved: r.payment_approved === true,
+        approvedBy: r.payment_approved_by,
+        approvedAt: r.payment_approved_at,
+      },
+    ]),
+  );
+};
+
+export const getUnreleasedReceivers = async (orderId, receiverIds) => {
+  const [payments, approvals] = await Promise.all([
+    getReceiverPayments(orderId),
+    getReceiverApprovals(orderId),
+  ]);
+  if (!payments) return null;
+  return receiverIds.filter(
+    (id) => payments[id] !== "paid" && !approvals[id]?.approved,
+  );
+};
+
 export const getOrderPaymentStatus = async (req, res) => {
   const orderId = parseInt(req.params.orderId, 10);
   if (isNaN(orderId) || orderId <= 0) {
@@ -452,13 +485,16 @@ export const getOrderPaymentStatus = async (req, res) => {
       .json({ success: false, message: "Invalid order ID" });
   }
   try {
-    const receiverPayments = await getReceiverPayments(orderId);
+    const [receiverPayments, receiverApprovals] = await Promise.all([
+      getReceiverPayments(orderId),
+      getReceiverApprovals(orderId),
+    ]);
     if (!receiverPayments) {
       return res
         .status(404)
         .json({ success: false, message: "Order not found" });
     }
-    return res.json({ success: true, receiverPayments });
+    return res.json({ success: true, receiverPayments, receiverApprovals });
   } catch (err) {
     logger.error("Failed to build order payment status", {
       err: err.response?.data || err.message,
@@ -507,8 +543,11 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       });
     }
 
-    const receiverPayments = await getReceiverPayments(orderId);
-    return res.json({ success: true, receiverPayments });
+    const [receiverPayments, receiverApprovals] = await Promise.all([
+      getReceiverPayments(orderId),
+      getReceiverApprovals(orderId),
+    ]);
+    return res.json({ success: true, receiverPayments, receiverApprovals });
   } catch (err) {
     logger.error("Failed to refresh order payment status", {
       err: err.response?.data || err.message,
@@ -517,6 +556,65 @@ export const refreshOrderPaymentStatus = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Failed to check payment status" });
+  }
+};
+
+export const setReceiverPaymentApproval = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  const { receiverId } = req.params;
+  const { approved } = req.body;
+
+  if (isNaN(orderId) || orderId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid order ID" });
+  }
+  if (typeof approved !== "boolean") {
+    return res
+      .status(400)
+      .json({ success: false, message: "approved must be true or false" });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE receivers
+          SET payment_approved = $1,
+              payment_approved_by = CASE WHEN $1 THEN $2::int ELSE NULL END,
+              payment_approved_at = CASE WHEN $1 THEN NOW() ELSE NULL END
+        WHERE id = $3 AND order_id = $4
+        RETURNING payment_approved, payment_approved_by, payment_approved_at`,
+      [approved, req.user?.id ?? null, receiverId, orderId],
+    );
+    if (!rows[0]) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Receiver not found on this order" });
+    }
+
+    logger.info("Receiver payment approval changed", {
+      orderId,
+      receiverId,
+      approved,
+      by: req.user?.id,
+    });
+
+    return res.json({
+      success: true,
+      approval: {
+        approved: rows[0].payment_approved,
+        approvedBy: rows[0].payment_approved_by,
+        approvedAt: rows[0].payment_approved_at,
+      },
+    });
+  } catch (err) {
+    logger.error("Failed to update receiver payment approval", {
+      err: err.response?.data || err.message,
+      orderId,
+      receiverId,
+    });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to update approval" });
   }
 };
 
@@ -732,6 +830,7 @@ export const getOrderBilling = async (req, res) => {
       success: true,
       row: buildBillingRow(order, invRes.rows, billRes.rows),
       receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
+      receiverApprovals: await getReceiverApprovals(orderId),
     });
   } catch (err) {
     logger.error("Failed to build order billing", {

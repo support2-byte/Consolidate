@@ -12,11 +12,13 @@ import {
   refreshOrderPaymentStatus,
   getOrderBilling,
   syncOrderBilling,
+  setReceiverPaymentApproval,
 } from "./zoho-bill.controller.js";
 import { requireAuth, requireRole } from "../auth/auth.middleware.js";
 
 const router = express.Router();
 const jobDetailsAccess = requireRole("super admin", "admin");
+const approvalAccess = requireRole("super admin", "admin", "manager");
 
 router.get("/", requireAuth, getZohoInvoices);
 router.post("/sync", requireAuth, syncZohoInvoices);
@@ -56,5 +58,12 @@ router.post(
 );
 router.get("/bill/:id/pdf", requireAuth, jobDetailsAccess, getZohoBillPdf);
 router.get("/:id/pdf", requireAuth, getZohoInvoicePdf);
+
+router.patch(
+  "/order/:orderId/receiver/:receiverId/payment-approval",
+  requireAuth,
+  approvalAccess,
+  setReceiverPaymentApproval,
+);
 
 export default router;
