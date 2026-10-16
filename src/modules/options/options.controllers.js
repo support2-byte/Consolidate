@@ -772,18 +772,20 @@ export const addNewStatus = async (req, res) => {
       container_status,
       consignment_status,
       days_offset,
+      grace_days,
       sorting_number,
     } = req.body;
 
     const newStatus = await pool.query(
-      `INSERT INTO statuses (order_status, container_status, consignment_status, days_offset, sorting_number, status)
-       VALUES ($1, $2, $3, $4, $5, true)
-       RETURNING *`,
+      `INSERT INTO statuses (order_status, container_status, consignment_status, days_offset, grace_days, sorting_number, status)
+   VALUES ($1, $2, $3, $4, $5, $6, true)
+   RETURNING *`,
       [
         order_status || null,
         container_status || null,
         consignment_status || null,
         days_offset ?? 0,
+        grace_days ?? 0,
         sorting_number ?? 0,
       ],
     );
@@ -828,21 +830,23 @@ export const updateStatus = async (req, res) => {
       container_status,
       consignment_status,
       days_offset,
+      grace_days,
       status,
       sorting_number,
     } = req.body;
 
     const updatedStatus = await pool.query(
       `UPDATE statuses
-       SET
-         order_status = COALESCE($1, order_status),
-         container_status = COALESCE($2, container_status),
-         consignment_status = COALESCE($3, consignment_status),
-         days_offset = COALESCE($4, days_offset),
-         status = COALESCE($5, status),
-         sorting_number = COALESCE($6, sorting_number)
-       WHERE id = $7
-       RETURNING *`,
+   SET
+     order_status = COALESCE($1, order_status),
+     container_status = COALESCE($2, container_status),
+     consignment_status = COALESCE($3, consignment_status),
+     days_offset = COALESCE($4, days_offset),
+     status = COALESCE($5, status),
+     sorting_number = COALESCE($6, sorting_number),
+     grace_days = COALESCE($7, grace_days)
+   WHERE id = $8
+   RETURNING *`,
       [
         order_status,
         container_status,
@@ -850,6 +854,7 @@ export const updateStatus = async (req, res) => {
         days_offset,
         status,
         sorting_number,
+        grace_days,
         id,
       ],
     );
