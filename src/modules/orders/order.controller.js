@@ -1197,6 +1197,7 @@ export const getOrders = async (req, res) => {
 
                       'trackingEta', ot.eta,
                       'trackingStatus', ot.status,
+                      'isDelayed', COALESCE(em.is_delayed, false),
 
                       'containerDetails',
                       COALESCE(
@@ -1250,6 +1251,7 @@ export const getOrders = async (req, res) => {
                     ORDER BY oi.id
                   )
                   FROM order_items oi
+                  LEFT JOIN eta_monitor em ON em.order_item_id = oi.id
                   LEFT JOIN LATERAL (
                   SELECT ot.eta, ot.status
                   FROM (

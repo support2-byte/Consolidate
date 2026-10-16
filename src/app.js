@@ -3,6 +3,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
+import cron from "node-cron";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 import authRoutes from "./modules/auth/auth.routes.js";
@@ -23,6 +24,7 @@ import storageRoutes from "./modules/storage/storage.route.js";
 import dropOffRoutes from "./modules/drop-offs/drop-off.route.js";
 import addressRoutes from "./modules/address/address.route.js";
 import zohoInvoiceRoutes from "./modules/zoho-invoices/zoho-invoice.routes.js";
+import etaMonitorRoutes from "./modules/etaMonitoring/etaMonitor.routes.js";
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
 import {
@@ -35,6 +37,7 @@ import appDashboardRoutes from "./modules/mobile-app/dashboard/dashboard.route.j
 import appShipmentRoutes from "./modules/mobile-app/shipments/shipment.route.js";
 import appInvoiceRoutes from "./modules/mobile-app/invoices/invoice.route.js";
 import appOptionRoutes from "./modules/mobile-app/options/option.route.js";
+import { runEtaMonitor } from "./modules/etaMonitoring/etaMonitor.service.js";
 
 dotenv.config();
 
@@ -148,6 +151,7 @@ app.use("/api/storage", storageRoutes);
 app.use("/api/drop-off", dropOffRoutes);
 app.use("/api/address", addressRoutes);
 app.use("/api/zoho-invoice", zohoInvoiceRoutes);
+app.use("/api/eta-monitor", etaMonitorRoutes);
 
 app.use("/api/mobile-app/auth", appAuthRoutes);
 app.use("/api/mobile-app/dashboard", appDashboardRoutes);
@@ -239,5 +243,21 @@ app.get("/health", (_req, res) => {
 
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
+
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    console.log("[CRON] ETA monitor triggered:", new Date().toISOString());
+    try {
+      await runEtaMonitor();
+      console.log("[CRON] ETA monitor completed successfully");
+    } catch (e) {
+      console.error("[CRON] ETA monitor failed:", e);
+    }
+  },
+  { timezone: "Asia/Karachi" },
+);
+
+console.log("[CRON] ETA monitor scheduler registered");
 
 export default app;
