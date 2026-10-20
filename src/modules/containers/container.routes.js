@@ -18,7 +18,6 @@ import {
   updateContainerStatus,
   deleteContainerAttachment,
   getAttachmentSignedUrl,
-  // getContainers
 } from "./container.controller.js";
 import { handleContainerUpload } from "../../middleware/handleUpload.js";
 import { requireAuth } from "../../modules/auth/auth.middleware.js";
@@ -343,7 +342,7 @@ router.put("/:cid", requireAuth, handleContainerUpload, updateContainer);
  *       404:
  *         description: Container not found
  */
-router.put("/status/:cid/", updateContainerStatus);
+router.put("/status/:cid/", requireAuth, updateContainerStatus);
 
 /**
  * @swagger

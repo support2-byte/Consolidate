@@ -2,6 +2,7 @@ import pool from "../../db/pool.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import { v2 as cloudinary } from "cloudinary";
 import { withTransaction } from "../../services/transaction.js";
+import { getActorLabel } from "../../services/statusSync.js";
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -1477,13 +1478,10 @@ export async function updateContainerStatus(req, res) {
 
     const { cid } = req.params;
 
-    const {
-      current_status,
-      derived_status,
-      location,
-      container_status,
-      created_by = req.user?.email || "system",
-    } = req.body;
+    const { current_status, derived_status, location, container_status } =
+      req.body;
+
+    const created_by = await getActorLabel(pool, req);
 
     if (derived_status || location) {
       await client.query(

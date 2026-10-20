@@ -3,6 +3,11 @@ import { withUserAudit } from "../../middleware/dbAudit.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import logger from "../../services/logger.js";
 import { withTransaction } from "../../services/transaction.js";
+import {
+  getStatusRow,
+  applyConsignmentStatus,
+  getActorLabel,
+} from "../../services/statusSync.js";
 import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
 
 function safeParseJsonArray(val) {
@@ -1562,14 +1567,12 @@ export async function deleteConsignment(req, res) {
 }
 
 export async function advanceStatus(req, res) {
-  let syncOrderIds = [];
-  let consignmentEta = null;
-
   try {
     const numericId = Number(req.params.id);
-
     if (!Number.isInteger(numericId) || numericId <= 0) {
       return res.status(400).json({
+        success: false,
+        message: "Invalid consignment ID.",
         error: "Invalid consignment ID.",
       });
     }
@@ -1578,282 +1581,73 @@ export async function advanceStatus(req, res) {
       `SELECT id, status FROM consignments WHERE id = $1`,
       [numericId],
     );
-
     if (!rows.length) {
       return res.status(404).json({
+        success: false,
+        message: "Consignment not found",
         error: "Consignment not found",
       });
     }
-
     const currentStatus = rows[0].status;
 
     const statusResult = await pool.query(
-      `
-        SELECT
-          id,
-          consignment_status,
-          order_status,
-          container_status,
-          days_offset,
-          sorting_number,
-          send_email
-        FROM statuses
-        WHERE status = true
-        AND consignment_status IS NOT NULL
-        ORDER BY sorting_number ASC
-      `,
+      `SELECT id, consignment_status, order_status, container_status, days_offset, sorting_number, send_email
+         FROM statuses
+        WHERE status = true AND consignment_status IS NOT NULL
+        ORDER BY sorting_number ASC`,
     );
-
     const statuses = statusResult.rows;
-
     const currentIndex = statuses.findIndex(
       (s) => s.consignment_status === currentStatus,
     );
 
-    const nextStatusRow = statuses[currentIndex + 1];
-
-    const nextStatus = nextStatusRow.consignment_status;
-    const syncedStatus = nextStatusRow.order_status;
-    const containerStatus = nextStatusRow.container_status;
-    const statusSendEmail = nextStatusRow.send_email === true;
-
-    if (nextStatus === "Delivered") {
-      const itemCheckRes = await pool.query(
-        `
-        SELECT
-          COUNT(DISTINCT oi.id) AS total_items,
-          COUNT(DISTINCT oi.id) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered_items
-        FROM container_assignment_history cah
-        JOIN order_items oi ON oi.id = cah.detail_id
-        WHERE cah.consignment_id = $1
-        `,
-        [numericId],
-      );
-
-      const { total_items, delivered_items } = itemCheckRes.rows[0];
-
-      if (
-        Number(total_items) === 0 ||
-        Number(delivered_items) < Number(total_items)
-      ) {
-        return res.status(400).json({
-          error: `Cannot advance to Delivered — ${delivered_items}/${total_items} items have "Shipment Delivered" status.`,
-        });
-      }
-
-      consignmentEta = new Date().toISOString().split("T")[0];
-    } else {
-      const etaResult = await calculateETA(pool, syncedStatus);
-
-      consignmentEta = etaResult?.eta ?? null;
+    if (currentIndex === -1) {
+      const msg = `Current status "${currentStatus}" is not part of the workflow; use manual status change`;
+      return res.status(400).json({ success: false, message: msg, error: msg });
     }
+    const nextRow = statuses[currentIndex + 1];
+    if (!nextRow) {
+      return res.status(400).json({
+        success: false,
+        message: "No next status available",
+        error: "No next status available",
+      });
+    }
+    const nextStatus = nextRow.consignment_status;
 
+    let consignmentEta = null;
+    if (nextStatus === "Delivered") {
+      const assigned = await getAssignedItems(pool, "consignment", numericId);
+      const check = await pool.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status = 'Shipment Delivered')::int AS delivered
+           FROM order_items WHERE id = ANY($1::int[])`,
+        [assigned.map((a) => a.detail_id)],
+      );
+      const { total, delivered } = check.rows[0];
+      if (total === 0 || delivered < total) {
+        const msg = `Cannot advance to Delivered — ${delivered}/${total} items have "Shipment Delivered" status.`;
+        return res
+          .status(400)
+          .json({ success: false, message: msg, error: msg });
+      }
+      consignmentEta = new Date().toISOString().split("T")[0];
+    } else if (nextRow.order_status) {
+      consignmentEta =
+        (await calculateETA(pool, nextRow.order_status))?.eta ?? null;
+    }
+    const createdBy = await getActorLabel(pool, req);
+    let updatedItems = [];
     await withTransaction(async (client) => {
-      await client.query(
-        `
-        UPDATE consignments
-        SET status=$1,
-            eta=$2,
-            updated_at=NOW()
-        WHERE id=$3
-        `,
-        [nextStatus, consignmentEta, numericId],
-      );
-
-      if (containerStatus) {
-        await client.query(
-          `
-            UPDATE container_master
-            SET status = $1
-            WHERE cid IN (
-              SELECT DISTINCT cid
-              FROM container_assignment_history
-              WHERE consignment_id = $2
-            )
-          `,
-          [containerStatus, numericId],
-        );
-
-        await client.query(
-          `
-            UPDATE container_assignment_history
-            SET status = $1
-            WHERE consignment_id = $2
-          `,
-          [containerStatus, numericId],
-        );
-
-        await client.query(
-          `
-            UPDATE order_items oi
-            SET status = $1, updated_at = NOW()
-            FROM container_assignment_history cah
-            WHERE cah.detail_id = oi.id
-              AND cah.consignment_id = $2
-              AND oi.status IS DISTINCT FROM 'Shipment Delivered'
-            `,
-          [syncedStatus, numericId],
-        );
-      }
-      try {
-        await client.query(
-          `
-            INSERT INTO order_tracking
-            (
-              order_id,
-              sender_id,
-              sender_ref,
-              receiver_id,
-              container_id,
-              consignment_id,
-              status,
-              old_status,
-              item_ref,
-              eta,
-              etd,
-              created_by,
-              module_id
-            )
-            SELECT
-              cah.order_id,
-              ot.sender_id,
-              ot.sender_ref,
-              cah.receiver_id,
-              cah.cid,
-              c.id,
-              $1,
-              $2,
-              oi.item_ref,
-              $3,
-              $3,
-              $4,
-              $6
-            FROM container_assignment_history cah
-            JOIN consignments c
-              ON c.id = cah.consignment_id
-            JOIN order_items oi
-              ON oi.id = cah.detail_id
-            LEFT JOIN LATERAL (
-              SELECT sender_id, sender_ref
-              FROM order_tracking
-              WHERE item_ref = oi.item_ref
-              ORDER BY created_time DESC
-              LIMIT 1
-            ) ot ON TRUE
-            WHERE cah.consignment_id = $5
-          `,
-          [
-            syncedStatus,
-            currentStatus,
-            consignmentEta,
-            req.user?.username || req.user?.email || "system",
-            numericId,
-            6,
-          ],
-        );
-      } catch (e) {
-        throw e;
-      }
-
-      const orderIdsRes = await client.query(
-        `
-          SELECT jsonb_array_elements_text(orders::jsonb) AS order_id
-          FROM consignments
-          WHERE id=$1
-        `,
-        [numericId],
-      );
-
-      syncOrderIds = orderIdsRes.rows
-        .map((r) => parseInt(r.order_id, 10))
-        .filter(Boolean);
-
-      if (syncOrderIds.length) {
-        await client.query(
-          `
-          UPDATE orders
-            SET status=$1,
-            updated_at=NOW()
-          WHERE id = ANY($2::int[])
-          `,
-          [syncedStatus, syncOrderIds],
-        );
-        await client.query(
-          `
-          UPDATE receivers
-            SET status=$1,
-            eta=$2,
-            updated_at=NOW()
-          WHERE order_id = ANY($3::int[])
-          `,
-          [syncedStatus, consignmentEta, syncOrderIds],
-        );
-        if (statusSendEmail) {
-          const emailReceiversRes = await client.query(
-            `
-          SELECT r.id AS recipient_id, r.order_id, r.receiver_email AS email,
-                 r.receiver_name AS name, oi.item_ref
-          FROM receivers r
-          JOIN order_items oi ON oi.receiver_id = r.id
-          WHERE r.order_id = ANY($1::int[])
-            AND r.receiver_email IS NOT NULL
-          `,
-            [syncOrderIds],
-          );
-
-          for (const r of emailReceiversRes.rows) {
-            await client.query(
-              `
-            INSERT INTO email_queue (
-              order_id, recipient_id, recipient_type,
-              recipient_email, recipient_name, email_type, status, item_ref
-            ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-            `,
-              [
-                r.order_id,
-                r.recipient_id,
-                "receiver",
-                r.email,
-                r.name,
-                "order_status_update",
-                r.item_ref,
-              ],
-            );
-          }
-
-          const emailSendersRes = await client.query(
-            `
-          SELECT s.id AS recipient_id, s.order_id, s.sender_email AS email,
-                 s.sender_name AS name, oi.item_ref
-          FROM senders s
-          JOIN order_items oi ON oi.order_id = s.order_id
-          WHERE s.order_id = ANY($1::int[])
-            AND s.sender_email IS NOT NULL
-          `,
-            [syncOrderIds],
-          );
-
-          for (const s of emailSendersRes.rows) {
-            await client.query(
-              `
-            INSERT INTO email_queue (
-              order_id, recipient_id, recipient_type,
-              recipient_email, recipient_name, email_type, status, item_ref
-            ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-            `,
-              [
-                s.order_id,
-                s.recipient_id,
-                "sender",
-                s.email,
-                s.name,
-                "order_status_update",
-                s.item_ref,
-              ],
-            );
-          }
-        }
-      }
+      updatedItems = await applyConsignmentStatus(client, {
+        consignmentId: numericId,
+        statusRow: nextRow,
+        previousStatus: currentStatus,
+        eta: consignmentEta,
+        createdBy,
+        userId: req.user?.id,
+        reason: "Advanced to next status",
+      });
     });
 
     return res.json({
@@ -1861,21 +1655,22 @@ export async function advanceStatus(req, res) {
       data: {
         previousStatus: currentStatus,
         newStatus: nextStatus,
-        syncedStatus,
+        syncedStatus: nextRow.order_status,
         eta: consignmentEta,
+        affectedItems: updatedItems.length,
       },
     });
   } catch (err) {
-    console.error("advanceStatus ERROR:", {
+    logger.error("advanceStatus ERROR:", {
       message: err.message,
       code: err.code,
       detail: err.detail,
       hint: err.hint,
-      position: err.position,
       stack: err.stack,
     });
-
     return res.status(500).json({
+      success: false,
+      message: "Failed",
       error: "Failed",
       details: err.message,
     });
@@ -1883,395 +1678,81 @@ export async function advanceStatus(req, res) {
 }
 
 export async function changeConsignmentStatus(req, res) {
-  let syncOrderIds = [];
-  let consignmentEta = null;
-
   try {
     const numericId = Number(req.params.id);
-
     if (!Number.isInteger(numericId) || numericId <= 0) {
       return res.status(400).json({
+        success: false,
+        message: "Invalid consignment ID.",
         error: "Invalid consignment ID.",
       });
     }
 
     const { newStatus, reason, days_offset } = req.body;
-
     if (!newStatus?.trim()) {
       return res.status(400).json({
+        success: false,
+        message: "newStatus is required",
         error: "newStatus is required",
       });
     }
-
     if (days_offset === undefined || days_offset === null) {
       return res.status(400).json({
+        success: false,
+        message: "days_offset is required",
         error: "days_offset is required",
       });
     }
 
-    const trimmedStatus = newStatus.trim();
-    const syncedStatus = trimmedStatus;
+    const statusRow = await getStatusRow(pool, "consignment", newStatus);
+    if (!statusRow) {
+      return res.status(400).json({
+        success: false,
+        message: `"${newStatus}" is not a valid consignment status`,
+        error: `"${newStatus}" is not a valid consignment status`,
+      });
+    }
+    const trimmedStatus = statusRow.consignment_status;
 
     const { rows } = await pool.query(
-      `
-      SELECT
-        id,
-        status,
-        consignment_number,
-        orders
-      FROM consignments
-      WHERE id = $1
-      `,
+      `SELECT id, status FROM consignments WHERE id = $1`,
       [numericId],
     );
-
     if (!rows.length) {
       return res.status(404).json({
+        success: false,
+        message: "Consignment not found",
         error: "Consignment not found",
       });
     }
-
-    const consignment = rows[0];
-    const currentStatus = consignment.status;
-
+    const currentStatus = rows[0].status;
     if (currentStatus === trimmedStatus) {
       return res.status(400).json({
+        success: false,
+        message: "New status is the same as current status",
         error: "New status is the same as current status",
       });
     }
 
-    let rawOrders = [];
-
-    try {
-      rawOrders = Array.isArray(consignment.orders)
-        ? consignment.orders
-        : JSON.parse(consignment.orders || "[]");
-    } catch {
-      rawOrders = [];
-    }
-
-    syncOrderIds = rawOrders
-      .map((id) => Number(id))
-      .filter((id) => Number.isInteger(id) && id > 0);
-
+    const consignmentEta =
+      trimmedStatus === "Delivered"
+        ? new Date().toISOString().split("T")[0]
+        : new Date(Date.now() + Number(days_offset) * 86400000)
+            .toISOString()
+            .split("T")[0];
+    const createdBy = await getActorLabel(pool, req);
+    let updatedItems = [];
     await withTransaction(async (client) => {
-      if (trimmedStatus === "Delivered") {
-        consignmentEta = new Date().toISOString().split("T")[0];
-      } else {
-        const days = Number(days_offset);
-
-        consignmentEta = new Date(Date.now() + days * 24 * 60 * 60 * 1000)
-          .toISOString()
-          .split("T")[0];
-      }
-
-      const containerStatusResult = await client.query(
-        `
-          SELECT container_status, order_status, sorting_number, send_email
-          FROM statuses
-          WHERE consignment_status = $1
-        `,
-        [trimmedStatus],
-      );
-
-      let containerStatus =
-        containerStatusResult.rows[0]?.container_status ?? null;
-      const orderStatus = containerStatusResult.rows[0]?.order_status ?? null;
-      const currentSortingNumber =
-        containerStatusResult.rows[0]?.sorting_number ?? null;
-      const statusSendEmail =
-        containerStatusResult.rows[0]?.send_email === true;
-
-      if (!containerStatus && currentSortingNumber !== null) {
-        const fallbackResult = await client.query(
-          `
-          SELECT container_status
-          FROM statuses
-          WHERE sorting_number < $1 AND container_status IS NOT NULL
-          ORDER BY sorting_number DESC
-          LIMIT 1
-          `,
-          [currentSortingNumber],
-        );
-
-        containerStatus = fallbackResult.rows[0]?.container_status ?? null;
-      }
-
-      await client.query(
-        `
-        UPDATE consignments
-        SET
-          status = $1,
-          eta = $2,
-          updated_at = NOW()
-        WHERE id = $3
-        `,
-        [trimmedStatus, consignmentEta, numericId],
-      );
-
-      if (containerStatus) {
-        await client.query(
-          `
-            UPDATE container_master
-            SET status = $1
-            WHERE cid IN (
-              SELECT DISTINCT cid
-              FROM container_assignment_history
-              WHERE consignment_id = $2
-            )
-          `,
-          [containerStatus, numericId],
-        );
-
-        await client.query(
-          `
-            UPDATE container_assignment_history
-            SET status = $1
-            WHERE consignment_id = $2
-            `,
-          [containerStatus, numericId],
-        );
-      }
-
-      await client.query(
-        `
-          INSERT INTO order_tracking (
-            order_id,
-            sender_id,
-            sender_ref,
-            receiver_id,
-            container_id,
-            consignment_id,
-            status,
-            old_status,
-            item_ref,
-            eta,
-            etd,
-            created_by,
-            module_id
-          )
-          SELECT
-            cah.order_id,
-            ot.sender_id,
-            ot.sender_ref,
-            cah.receiver_id,
-            cah.cid,
-            c.id,
-            $1,
-            $2,
-            oi.item_ref,
-            $3,
-            $3,
-            $4,
-            $6
-          FROM container_assignment_history cah
-          JOIN consignments c
-            ON c.id = cah.consignment_id
-          JOIN order_items oi
-            ON oi.id = cah.detail_id
-          LEFT JOIN LATERAL (
-            SELECT
-              sender_id,
-              sender_ref
-            FROM order_tracking ot
-            WHERE ot.item_ref = oi.item_ref
-            ORDER BY ot.created_time DESC
-            LIMIT 1
-          ) ot ON TRUE
-          WHERE cah.consignment_id = $5
-        `,
-        [
-          syncedStatus,
-          currentStatus,
-          consignmentEta,
-          req.user?.username || req.user?.email || req.user?.id || "system",
-          numericId,
-          6,
-        ],
-      );
-
-      await client.query(
-        `
-        INSERT INTO consignment_tracking (
-          consignment_id,
-          event_type,
-          old_status,
-          new_status,
-          timestamp,
-          details,
-          created_at,
-          source,
-          action
-        )
-        VALUES (
-          $1,
-          $2,
-          COALESCE($3::varchar,'Unknown'),
-          $4,
-          NOW(),
-          $5::jsonb,
-          NOW(),
-          'api',
-          'status_changed'
-        )
-        `,
-        [
-          numericId,
-          "status_updated",
-          currentStatus,
-          trimmedStatus,
-          JSON.stringify({
-            reason: reason || "Manual status change",
-            newEta: consignmentEta,
-            daysOffset: Number(days_offset),
-            user: req.user?.id || "system",
-          }),
-        ],
-      );
-
-      if (syncOrderIds.length) {
-        await client.query(
-          `
-          UPDATE orders
-          SET
-            status = $1,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ANY($2::int[])
-          `,
-          [syncedStatus, syncOrderIds],
-        );
-
-        await client.query(
-          `
-          UPDATE receivers
-          SET
-            status = $1,
-            eta = $2,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE order_id = ANY($3::int[])
-          `,
-          [orderStatus, consignmentEta, syncOrderIds],
-        );
-
-        const receiversRes = await client.query(
-          `
-          SELECT id, order_id, receiver_email, receiver_name
-          FROM receivers
-          WHERE order_id = ANY($1::int[])
-          `,
-          [syncOrderIds],
-        );
-
-        for (const {
-          id: receiverId,
-          order_id: recOrderId,
-          receiver_email,
-          receiver_name,
-        } of receiversRes.rows) {
-          const itemsRes = await client.query(
-            `
-              SELECT
-                id,
-                item_ref,
-                status,
-                container_details
-              FROM order_items
-              WHERE receiver_id = $1
-            `,
-            [receiverId],
-          );
-
-          for (const itemRow of itemsRes.rows) {
-            if (itemRow.status === "Shipment Delivered") {
-              continue;
-            }
-
-            const containerDetails = safeParseJsonArray(
-              itemRow.container_details,
-            ).map((entry) =>
-              entry?.container?.cid
-                ? {
-                    ...entry,
-                    status: orderStatus,
-                  }
-                : entry,
-            );
-
-            await client.query(
-              `
-                UPDATE order_items
-                SET
-                  status = $1,
-                  container_details = $2::jsonb,
-                  updated_at = NOW()
-                WHERE id = $3
-              `,
-              [orderStatus, JSON.stringify(containerDetails), itemRow.id],
-            );
-
-            if (receiver_email && statusSendEmail) {
-              await client.query(
-                `
-                INSERT INTO email_queue (
-                  order_id, recipient_id, recipient_type,
-                  recipient_email, recipient_name, email_type, status, item_ref
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-                `,
-                [
-                  recOrderId,
-                  receiverId,
-                  "receiver",
-                  receiver_email,
-                  receiver_name,
-                  "order_status_update",
-                  itemRow.item_ref,
-                ],
-              );
-            }
-          }
-
-          await updateLinkedContainersStatus(
-            client,
-            receiverId,
-            syncedStatus,
-            "system",
-          );
-        }
-
-        if (statusSendEmail) {
-          const emailSendersRes = await client.query(
-            `
-          SELECT s.id AS recipient_id, s.order_id, s.sender_email AS email,
-                 s.sender_name AS name, oi.item_ref
-          FROM senders s
-          JOIN order_items oi ON oi.order_id = s.order_id
-          WHERE s.order_id = ANY($1::int[])
-            AND s.sender_email IS NOT NULL
-          `,
-            [syncOrderIds],
-          );
-
-          for (const s of emailSendersRes.rows) {
-            await client.query(
-              `
-            INSERT INTO email_queue (
-              order_id, recipient_id, recipient_type,
-              recipient_email, recipient_name, email_type, status, item_ref
-            ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-            `,
-              [
-                s.order_id,
-                s.recipient_id,
-                "sender",
-                s.email,
-                s.name,
-                "order_status_update",
-                s.item_ref,
-              ],
-            );
-          }
-        }
-      }
+      updatedItems = await applyConsignmentStatus(client, {
+        consignmentId: numericId,
+        statusRow,
+        previousStatus: currentStatus,
+        eta: consignmentEta,
+        createdBy,
+        userId: req.user?.id,
+        reason: reason || "Manual status change",
+        daysOffset: Number(days_offset),
+      });
     });
 
     return res.json({
@@ -2280,16 +1761,18 @@ export async function changeConsignmentStatus(req, res) {
       data: {
         previousStatus: currentStatus,
         newStatus: trimmedStatus,
-        syncedStatus,
+        syncedStatus: statusRow.order_status,
         newEta: consignmentEta,
         daysOffset: Number(days_offset),
-        affectedOrders: syncOrderIds.length,
+        affectedItems: updatedItems.length,
+        affectedOrders: new Set(updatedItems.map((i) => i.order_id)).size,
       },
     });
   } catch (err) {
-    console.error("Error changing status:", err);
-
+    logger.error("Error changing consignment status:", err);
     return res.status(500).json({
+      success: false,
+      message: "Failed to change status",
       error: "Failed to change status",
       details: err.message,
     });

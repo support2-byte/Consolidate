@@ -9,6 +9,7 @@ import {
   advanceStatus,
   changeConsignmentStatus,
 } from "../consignment/consignment.controller.js";
+import { requireAuth } from "../auth/auth.middleware.js";
 
 const router = express.Router();
 
@@ -30,7 +31,7 @@ const router = express.Router();
  *               items:
  *                 $ref: '#/components/schemas/Consignment'
  */
-router.get("/", getConsignments);
+router.get("/", requireAuth, getConsignments);
 
 /**
  * @swagger
@@ -50,7 +51,7 @@ router.get("/", getConsignments);
  *               items:
  *                 $ref: '#/components/schemas/ConsignmentStatus'
  */
-router.get("/statuses", getStatuses);
+router.get("/statuses", requireAuth, getStatuses);
 
 /**
  * @swagger
@@ -75,7 +76,7 @@ router.get("/statuses", getStatuses);
  *       404:
  *         description: Consignment not found
  */
-router.get("/:id", getConsignmentById);
+router.get("/:id", requireAuth, getConsignmentById);
 
 /**
  * @swagger
@@ -101,7 +102,7 @@ router.get("/:id", getConsignmentById);
  *       400:
  *         description: Invalid input
  */
-router.post("/", createConsignment);
+router.post("/", requireAuth, createConsignment);
 
 /**
  * @swagger
@@ -132,7 +133,7 @@ router.post("/", createConsignment);
  *       404:
  *         description: Consignment not found
  */
-router.put("/:id", updateConsignment);
+router.put("/:id", requireAuth, updateConsignment);
 
 /**
  * @swagger
@@ -163,7 +164,7 @@ router.put("/:id", updateConsignment);
  *       404:
  *         description: Consignment not found
  */
-router.patch("/:id", updateConsignment);
+router.patch("/:id", requireAuth, updateConsignment);
 
 /**
  * @swagger
@@ -188,7 +189,7 @@ router.patch("/:id", updateConsignment);
  *       404:
  *         description: Consignment not found
  */
-router.put("/:id/next", advanceStatus);
+router.put("/:id/next", requireAuth, advanceStatus);
 
 /**
  * @swagger
@@ -219,7 +220,7 @@ router.put("/:id/next", advanceStatus);
  *       404:
  *         description: Consignment not found
  */
-router.put("/:id/status", changeConsignmentStatus);
+router.put("/:id/status", requireAuth, changeConsignmentStatus);
 
 /**
  * @swagger
@@ -240,6 +241,6 @@ router.put("/:id/status", changeConsignmentStatus);
  *       404:
  *         description: Consignment not found
  */
-router.delete("/:id", deleteConsignment);
+router.delete("/:id", requireAuth, deleteConsignment);
 
 export default router;

@@ -858,6 +858,16 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
     const token = await getZohoAccessToken();
     const headers = zohoHeaders(token);
 
+    const renumberInvoice = async () => {
+      const newId = await generateUniqueInvoiceId(token);
+      await pool.query(`UPDATE ${table} SET invoice_id = $1 WHERE id = $2`, [
+        newId,
+        invoice.id,
+      ]);
+      invoice.invoice_id = newId;
+      return newId;
+    };
+
     const existing = await axios.get(`${getBooksBaseUrl()}/invoices`, {
       headers,
       params: { ...zohoParams(), invoice_number: invoice.invoice_id },
@@ -869,24 +879,21 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       const sameInvoice =
         hit.customer_id === ctx.customerId &&
         String(hit.reference_number || "").trim() === ctx.orderNumber;
-      if (!sameInvoice) {
+      if (sameInvoice) {
+        await pool.query(
+          `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
+            WHERE id = $2 AND zoho_invoice_id IS NULL`,
+          [hit.invoice_id, invoice.id],
+        );
         return res.status(409).json({
           success: false,
-          message: "Invoice number conflicts with a different invoice in Zoho.",
+          message:
+            hit.status === "paid"
+              ? "Invoice is already paid in Zoho."
+              : "Invoice number already exists in Zoho.",
         });
       }
-      await pool.query(
-        `UPDATE ${table} SET zoho_invoice_id = $1, zoho_uploaded_at = NOW()
-          WHERE id = $2 AND zoho_invoice_id IS NULL`,
-        [hit.invoice_id, invoice.id],
-      );
-      return res.status(409).json({
-        success: false,
-        message:
-          hit.status === "paid"
-            ? "Invoice is already paid in Zoho."
-            : "Invoice number already exists in Zoho.",
-      });
+      await renumberInvoice();
     }
 
     const dueAmount = Number(invoice.due_amount || 0);
@@ -934,12 +941,23 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
       },
     };
 
-    const created = await axios.post(`${getBooksBaseUrl()}/invoices`, body, {
-      headers,
-      params: { ...zohoParams(), ignore_auto_number_generation: true },
-    });
-    if (created.data.code !== 0) {
-      throw new Error(created.data.message || "Zoho error");
+    body.invoice_number = invoice.invoice_id;
+    let created;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        created = await axios.post(`${getBooksBaseUrl()}/invoices`, body, {
+          headers,
+          params: { ...zohoParams(), ignore_auto_number_generation: true },
+        });
+        if (created.data.code !== 0) {
+          throw new Error(created.data.message || "Zoho error");
+        }
+        break;
+      } catch (err) {
+        const msg = err.response?.data?.message || err.message || "";
+        if (attempt === 2 || !/already exist/i.test(msg)) throw err;
+        body.invoice_number = await renumberInvoice();
+      }
     }
 
     const zi = created.data.invoice;
@@ -1030,6 +1048,7 @@ export const uploadInvoiceToZohoManual = async (req, res) => {
 
     return res.json({
       success: true,
+      invoiceId: invoice.invoice_id,
       zohoInvoiceId,
       zohoStatus,
       ...(syncWarning && { warning: syncWarning }),
