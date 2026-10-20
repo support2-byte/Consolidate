@@ -7,6 +7,7 @@ import {
 } from "../../services/calculateEta.js";
 import { moveReceiverToNextStatus } from "../../services/moveReceiverToNextStatus.js";
 import { createOrderTracking } from "../../services/createOrderTracking.js";
+import { getStatusRow, applyItemStatus } from "../../services/statusSync.js";
 import { withTransaction } from "../../services/transaction.js";
 import {
   getReceiverPayments,
@@ -311,6 +312,8 @@ export async function createOrder(req, res) {
       );
 
       const receiverId = recResult.rows[0].id;
+      const receiverRef =
+        p[`${partyPrefix}_ref`] || p.receiver_ref || p.sender_ref || "";
 
       const partyStatus = p.status || b.status || "Created";
       const partyRequestedEmail =
@@ -411,6 +414,7 @@ export async function createOrder(req, res) {
           senderId,
           owner.ref || null,
           receiverId,
+          receiverRef || null,
           item.status || "Created",
           normEta,
           normEtd || normEta,
@@ -428,6 +432,7 @@ export async function createOrder(req, res) {
               sender_id,
               sender_ref,
               receiver_id,
+              receiver_ref,
               status,
               eta,
               etd,
@@ -438,9 +443,9 @@ export async function createOrder(req, res) {
             )
             VALUES (
               $1, $2, $3, $4, $5,
-              $6, $7, $8, $9,
+              $6, $7, $8, $9, $10,
               NOW(),
-              $10
+              $11
             )
           `,
           row,
@@ -705,7 +710,7 @@ export async function updateOrder(req, res) {
       const marks = rec.receiver_marks_and_number || rec.marks_and_number || "";
       const eta = rec.eta ? normalizeDate(rec.eta) : null;
       const etd = rec.etd ? normalizeDate(rec.etd) : null;
-      const status = rec.status || "Order Created";
+      const status = rec.status || "Created";
       const remarks = rec.remarks || "";
       const fullPartial = rec.full_partial || "Full";
       const qtyDelivered = rec.qty_delivered || null;
@@ -3524,13 +3529,18 @@ export async function updateSpecificItemsStatus(req, res) {
   } = req.body || {};
 
   if (!Array.isArray(itemRefs) || itemRefs.length === 0) {
-    return res
-      .status(400)
-      .json({ error: "itemRefs must be a non-empty array" });
+    return res.status(400).json({
+      success: false,
+      message: "itemRefs must be a non-empty array",
+      error: "itemRefs must be a non-empty array",
+    });
   }
-
   if (itemRefs.length > 20) {
-    return res.status(400).json({ error: "Maximum 20 items per request" });
+    return res.status(400).json({
+      success: false,
+      message: "Maximum 20 items per request",
+      error: "Maximum 20 items per request",
+    });
   }
 
   let client;
@@ -3538,41 +3548,31 @@ export async function updateSpecificItemsStatus(req, res) {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    const trimmedStatus = (status || "").trim();
-    if (!trimmedStatus) {
-      throw new Error("Status is required");
+    const statusRow = await getStatusRow(client, "order", status);
+    if (!statusRow) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status: "${status}"`,
+        error: `Invalid status: "${status}"`,
+      });
     }
 
-    const statusResult = await client.query(
-      `SELECT order_status FROM statuses WHERE status = true AND order_status ILIKE $1 ORDER BY sorting_number ASC LIMIT 1`,
-      [trimmedStatus],
-    );
-
-    if (statusResult.rowCount === 0) {
-      throw new Error(`Invalid status: "${trimmedStatus}"`);
-    }
-
-    const normalizedStatus = statusResult.rows[0].order_status;
-
+    const params = [Number(orderId), itemRefs];
     let extraWhere = "";
-    const queryParams = [normalizedStatus, Number(orderId), itemRefs];
-
     if (receiverId) {
-      extraWhere = " AND receiver_id = $4";
-      queryParams.push(Number(receiverId));
+      extraWhere = " AND receiver_id = $3";
+      params.push(Number(receiverId));
     }
-
-    const updateResult = await client.query(
-      `UPDATE order_items
-          SET status = $1, updated_at = CURRENT_TIMESTAMP
-        WHERE order_id = $2 AND item_ref = ANY($3::text[])${extraWhere}
-        RETURNING id, receiver_id, item_ref, consignment_status`,
-      queryParams,
+    const found = await client.query(
+      `SELECT id FROM order_items WHERE order_id = $1 AND item_ref = ANY($2::text[])${extraWhere}`,
+      params,
     );
-
-    if (updateResult.rowCount === 0) {
+    if (found.rowCount === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({
+        success: false,
+        message: "No matching items found",
         error: "No matching items found",
         hint: receiverId
           ? "Item(s) may not belong to this receiver"
@@ -3580,177 +3580,38 @@ export async function updateSpecificItemsStatus(req, res) {
       });
     }
 
-    const updatedRows = updateResult.rows;
-    const affectedReceiverIds = [
-      ...new Set(updatedRows.map((r) => r.receiver_id)),
-    ];
+    const eta =
+      (await calculateETA(client, statusRow.order_status))?.eta ?? null;
 
-    for (const rid of affectedReceiverIds) {
-      const agg = await client.query(
-        `SELECT COUNT(*) AS total, COUNT(CASE WHEN consignment_status = 'Shipment Delivered' THEN 1 END) AS delivered FROM order_items WHERE receiver_id = $1`,
-        [rid],
-      );
-      const { total, delivered } = agg.rows[0];
-      if (total > 0 && delivered === total) {
-        await client.query(
-          `UPDATE receivers SET status = 'Shipment Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status != 'Shipment Delivered'`,
-          [rid],
-        );
-      }
-    }
-
-    const affectedItemIds = updatedRows.map((r) => r.id);
-    const consignmentLinkRes = await client.query(
-      `SELECT DISTINCT ON (detail_id) detail_id, consignment_id FROM container_assignment_history WHERE detail_id = ANY($1::int[]) AND consignment_id IS NOT NULL ORDER BY detail_id, created_at DESC`,
-      [affectedItemIds],
-    );
-
-    const affectedConsignmentIds = [
-      ...new Set(consignmentLinkRes.rows.map((r) => r.consignment_id)),
-    ];
-    for (const consId of affectedConsignmentIds) {
-      const agg = await client.query(
-        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered FROM order_items oi JOIN (SELECT DISTINCT ON (detail_id) detail_id, consignment_id FROM container_assignment_history WHERE consignment_id = $1 ORDER BY detail_id, created_at DESC) latest ON latest.detail_id = oi.id`,
-        [consId],
-      );
-      const { total, delivered } = agg.rows[0];
-      if (total > 0 && delivered > 0 && delivered < total) {
-        await client.query(
-          `UPDATE consignments SET status = 'Partially Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IS DISTINCT FROM 'Partially Delivered'`,
-          [consId],
-        );
-      } else if (total > 0 && delivered === total) {
-        await client.query(
-          `UPDATE consignments SET status = 'Delivered', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IS DISTINCT FROM 'Delivered'`,
-          [consId],
-        );
-      }
-    }
-
-    const containerLinkRes = await client.query(
-      `SELECT DISTINCT ON (detail_id) id, detail_id, cid
-        FROM container_assignment_history
-        WHERE detail_id = ANY($1::int[]) AND cid IS NOT NULL
-      ORDER BY detail_id, created_at DESC`,
-      [affectedItemIds],
-    );
-
-    const affectedCids = [...new Set(containerLinkRes.rows.map((r) => r.cid))];
-
-    for (const cid of affectedCids) {
-      const agg = await client.query(
-        `SELECT COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered
-       FROM order_items oi
-       JOIN (
-         SELECT DISTINCT ON (detail_id) detail_id, cid
-           FROM container_assignment_history
-          WHERE cid = $1
-          ORDER BY detail_id, created_at DESC
-       ) latest ON latest.detail_id = oi.id`,
-        [cid],
-      );
-
-      const { total, delivered } = agg.rows[0];
-
-      if (total > 0 && Number(delivered) === Number(total)) {
-        await client.query(
-          `UPDATE container_assignment_history cah
-          SET status = 'Shipment Delivered'
-         FROM (
-           SELECT DISTINCT ON (detail_id) id
-             FROM container_assignment_history
-            WHERE cid = $1
-            ORDER BY detail_id, created_at DESC
-         ) latest
-        WHERE cah.id = latest.id
-          AND cah.status IS DISTINCT FROM 'Shipment Delivered'`,
-          [cid],
-        );
-      }
-    }
-
-    const { eta: calculatedEta } = await calculateETA(client, normalizedStatus);
-    const calculatedEtd = calculatedEta;
-
-    if (forceRecalcEta) {
-      for (const rid of affectedReceiverIds) {
-        await client.query(
-          `UPDATE receivers SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-          [calculatedEta, rid],
-        );
-      }
-    }
-
-    const minEtaRes = await client.query(
-      `SELECT MIN(eta) AS min_eta FROM receivers WHERE order_id = $1`,
-      [Number(orderId)],
-    );
-    if (minEtaRes.rows[0]?.min_eta) {
-      await client.query(
-        `UPDATE orders SET eta = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-        [minEtaRes.rows[0].min_eta, Number(orderId)],
-      );
-    }
-
-    let createdByLabel = "system";
-    if (req.user?.id) {
-      const userRes = await client.query(
-        `SELECT email FROM users WHERE id = $1`,
-        [req.user.id],
-      );
-      createdByLabel = userRes.rows[0]?.email || "system";
-    }
-
-    for (const row of updatedRows) {
-      const consignmentRes = await client.query(
-        `SELECT consignment_id FROM container_assignment_history WHERE detail_id = $1 ORDER BY created_at DESC LIMIT 1`,
-        [row.id],
-      );
-      const lastTrackingRes = await client.query(
-        `SELECT sender_id, sender_ref, receiver_ref, container_id, consignment_id, status FROM order_tracking WHERE order_id = $1 AND receiver_id = $2 AND item_ref = $3 ORDER BY created_time DESC LIMIT 1`,
-        [Number(orderId), row.receiver_id, row.item_ref],
-      );
-      const last = lastTrackingRes.rows[0] || {};
-      const resolvedConsignmentId =
-        consignmentRes.rows[0]?.consignment_id ?? last.consignment_id ?? null;
-
-      await client.query(
-        `INSERT INTO order_tracking (order_id, sender_id, sender_ref, receiver_id, receiver_ref, container_id, consignment_id, status, old_status, item_ref, eta, etd, created_by, created_time, module_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, $14)`,
-        [
-          Number(orderId),
-          last.sender_id ?? null,
-          last.sender_ref ?? null,
-          row.receiver_id,
-          last.receiver_ref ?? null,
-          last.container_id ?? null,
-          resolvedConsignmentId,
-          normalizedStatus,
-          last.status ?? null,
-          row.item_ref,
-          calculatedEta,
-          calculatedEtd,
-          createdByLabel,
-          5,
-        ],
-      );
-    }
+    const updated = await applyItemStatus(client, {
+      itemIds: found.rows.map((r) => r.id),
+      statusRow,
+      eta,
+      receiverEta: forceRecalcEta ? eta : null,
+      createdBy: req.user?.email || req.user?.username || "system",
+      moduleId: 5,
+      protectDelivered: false,
+    });
 
     await client.query("COMMIT");
-
     return res.status(200).json({
       success: true,
-      updatedCount: updateResult.rowCount,
-      eta: calculatedEta,
-      etd: calculatedEtd,
-      message: `Updated ${updateResult.rowCount} item(s) to "${normalizedStatus}"`,
+      updatedCount: updated.length,
+      eta,
+      etd: eta,
+      message: updated.length
+        ? `Updated ${updated.length} item(s) to "${statusRow.order_status}"`
+        : `Item(s) already at "${statusRow.order_status}"`,
     });
   } catch (err) {
     if (client) await client.query("ROLLBACK");
-    console.error("updateSpecificItemsStatus error:", err);
-    return res
-      .status(500)
-      .json({ error: "Failed to update items", details: err.message });
+    logger.error("updateSpecificItemsStatus error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update items",
+      error: "Failed to update items",
+      details: err.message,
+    });
   } finally {
     if (client) client.release();
   }

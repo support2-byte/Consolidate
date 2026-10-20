@@ -392,19 +392,19 @@ export const deleteConfirmationEmail = async (req, res) => {
 };
 
 const INVOICE_LOOKUP = `
-  SELECT id, invoice_id, amount, status, ngenius_order_ref, 'overstayed'::varchar
+  SELECT id, invoice_id, amount, status, ngenius_order_ref, public_ref, 'overstayed'::varchar
     FROM overstay_invoices
    WHERE q.email_type = 'overstayed' AND id = q.invoice_id
   UNION ALL
-  SELECT id, invoice_id, amount, status, ngenius_order_ref, 'storage'::varchar
+  SELECT id, invoice_id, amount, status, ngenius_order_ref, public_ref, 'storage'::varchar
     FROM storage_invoices
    WHERE q.email_type = 'storage' AND id = q.invoice_id
   UNION ALL
-  SELECT id, invoice_id, amount, status, ngenius_order_ref, 'delivery'::varchar
+  SELECT id, invoice_id, amount, status, ngenius_order_ref, public_ref, 'delivery'::varchar
     FROM delivery_invoices
    WHERE q.email_type = 'delivery' AND id = q.invoice_id
   UNION ALL
-  SELECT id, invoice_id, amount, status, ngenius_order_ref, 'dropoff'::varchar
+  SELECT id, invoice_id, amount, status, ngenius_order_ref, public_ref, 'dropoff'::varchar
     FROM dropoff_invoices
    WHERE q.email_type = 'dropoff' AND id = q.invoice_id
 `;
@@ -416,7 +416,7 @@ export const getAllInvoiceEmails = async (req, res) => {
          q.id, q.recipient_id, q.recipient_name, q.recipient_email, q.email_type,
          q.status, q.item_ref, q.attempts, q.created_at, q.sent_at,
          i.invoice_id, i.amount, i.status AS invoice_status,
-         i.ngenius_order_ref,
+         i.ngenius_order_ref, i.public_ref,
          oi.category, oi.subcategory
        FROM invoice_email_queue q
        LEFT JOIN LATERAL (${INVOICE_LOOKUP}) i ON true
@@ -443,7 +443,7 @@ export const resendInvoiceNotification = async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT q.*, i.invoice_id, i.amount
+      `SELECT q.*, i.invoice_id, i.amount, i.public_ref
          FROM invoice_email_queue q
          LEFT JOIN LATERAL (${INVOICE_LOOKUP}) i ON true
         WHERE q.id = $1`,
@@ -465,7 +465,7 @@ export const resendInvoiceNotification = async (req, res) => {
       receiverName: notif.recipient_name || "Valued Customer",
       invoiceId: notif.invoice_id,
       amount: notif.amount,
-      invoiceLink: `${FORM_BASE_URL}/invoice-payment/${encodeURIComponent(notif.invoice_id)}`,
+      invoiceLink: `${FORM_BASE_URL}/invoice-payment/${encodeURIComponent(notif.public_ref || notif.invoice_id)}`,
     });
 
     if (!result.success) {
