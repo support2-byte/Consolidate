@@ -513,12 +513,36 @@ export const uploadConsignmentInvoicesToZoho = async ({
   return result;
 };
 
+export const fetchLatestZohoInvoiceNumber = async (token) => {
+  const { data } = await axios.get(`${getBooksBaseUrl()}/invoices`, {
+    headers: zohoHeaders(token),
+    params: {
+      ...zohoParams(),
+      invoice_number_startswith: "INV-",
+      sort_column: "created_time",
+      sort_order: "D",
+      per_page: 25,
+    },
+  });
+  return Math.max(
+    0,
+    ...(data.invoices || [])
+      .map(
+        (z) => parseInt(String(z.invoice_number).replace(/\D/g, ""), 10) || 0,
+      )
+      .filter((n) => n < 100000),
+  );
+};
+
+const INVOICE_PAD = 5;
+
 export const generateUniqueInvoiceId = async () => {
-  for (let i = 0; i < 10; i++) {
-    const candidate = `INV-${crypto
-      .randomInt(0, 1_000_000)
-      .toString()
-      .padStart(6, "0")}`;
+  const token = await getZohoAccessToken();
+  for (let i = 0; i < 50; i++) {
+    const { rows } = await pool.query(
+      `SELECT nextval('invoice_number_seq')::int AS n`,
+    );
+    const candidate = `INV-${String(rows[0].n).padStart(INVOICE_PAD, "0")}`;
     const { rowCount } = await pool.query(
       `SELECT 1 FROM overstay_invoices WHERE invoice_id = $1
        UNION ALL SELECT 1 FROM storage_invoices WHERE invoice_id = $1
@@ -528,7 +552,15 @@ export const generateUniqueInvoiceId = async () => {
        LIMIT 1`,
       [candidate],
     );
-    if (!rowCount) return candidate;
+    if (rowCount) continue;
+    const { data } = await axios.get(`${getBooksBaseUrl()}/invoices`, {
+      headers: zohoHeaders(token),
+      params: { ...zohoParams(), invoice_number: candidate },
+    });
+    const taken = (data.invoices || []).some(
+      (z) => z.invoice_number === candidate,
+    );
+    if (!taken) return candidate;
   }
   throw new Error("Unable to generate a unique invoice id");
 };
