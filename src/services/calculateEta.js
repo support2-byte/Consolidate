@@ -10,55 +10,43 @@ export function computeDaysUntilEta(etaDateStr, today = new Date()) {
 }
 
 export const calculateETA = async (client, status, baseDate = new Date()) => {
-  if (!status) {
-    return { eta: baseDate.toISOString().split("T")[0], daysUntil: 0 };
-  }
+  const today = baseDate.toISOString().split("T")[0];
+  if (!status) return { eta: today, daysUntil: 0 };
 
   try {
     const configResult = await client.query(
-      `SELECT days_offset, order_status, container_status, consignment_status
-       FROM statuses
-       WHERE status = true
-         AND (
-           order_status = $1
-           OR container_status = $1
-           OR consignment_status = $1
-         )
-       ORDER BY sorting_number ASC
-       LIMIT 1`,
+      `SELECT days_offset, order_status
+         FROM statuses
+        WHERE status = true AND LOWER(order_status) = LOWER($1)
+        ORDER BY sorting_number ASC
+        LIMIT 1`,
       [status],
     );
 
     if (configResult.rowCount === 0) {
-      logger.warn("No ETA configuration found", {
-        status,
-      });
-      return { eta: baseDate.toISOString().split("T")[0], daysUntil: 0 };
+      logger.warn("No ETA configuration found", { status });
+      return { eta: null, daysUntil: null };
     }
 
-    const { days_offset: days, order_status } = configResult.rows[0];
+    const { days_offset, order_status } = configResult.rows[0];
 
     if (order_status?.toLowerCase().includes("delivered")) {
-      return { eta: baseDate.toISOString().split("T")[0], daysUntil: 0 };
+      return { eta: today, daysUntil: 0 };
     }
 
-    const etaDate = new Date(baseDate.getTime() + days * 86400000);
-    const eta = etaDate.toISOString().split("T")[0];
-    const daysUntil = computeDaysUntilEta(eta, baseDate);
+    const days = Number(days_offset);
+    if (days_offset === null || !Number.isFinite(days)) {
+      logger.warn("days_offset missing for status", { status });
+      return { eta: null, daysUntil: null };
+    }
 
-    logger.debug("ETA calculated", {
-      status,
-      orderStatus: order_status,
-      offsetDays: days,
-      eta,
-    });
+    const eta = new Date(baseDate.getTime() + days * 86400000)
+      .toISOString()
+      .split("T")[0];
 
-    return { eta, daysUntil };
+    return { eta, daysUntil: computeDaysUntilEta(eta, baseDate) };
   } catch (err) {
-    logger.error("Failed to calculate ETA", {
-      status,
-      error: err,
-    });
-    return { eta: new Date().toISOString().split("T")[0], daysUntil: 0 };
+    logger.error("Failed to calculate ETA", { status, error: err });
+    return { eta: null, daysUntil: null };
   }
 };
