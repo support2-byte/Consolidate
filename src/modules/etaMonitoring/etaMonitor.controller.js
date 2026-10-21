@@ -239,15 +239,14 @@ export const getMonitorItems = async (req, res) => {
       JOIN order_items oi ON oi.id = m.order_item_id
       JOIN receivers r ON r.id = oi.receiver_id
       JOIN orders o ON o.id = r.order_id
-      LEFT JOIN statuses st ON st.order_status = m.status_snapshot ${where}`;
+      ${where}`;
 
     const [rows, count] = await Promise.all([
       pool.query(
         `SELECT o.rgl_booking_number, o.booking_ref, oi.item_ref, r.receiver_name,
                 m.status_snapshot AS status, (CURRENT_DATE - m.status_since::date) AS days_in_status,
                 ${IDLE_SQL} AS idle_days, m.grace_used, m.is_delayed, m.delayed_reason,
-                COALESCE(st.days_offset, 0) AS days_offset,
-                CASE WHEN COALESCE(st.days_offset, 0) > 0 THEN ${CHECK_AFTER_SQL} ELSE 0 END AS check_after_days,
+                ${CHECK_AFTER_SQL} AS check_after_days,
                 eta_latest(m.order_item_id) AS eta
          ${base}
          ORDER BY GREATEST(m.status_since, COALESCE(m.last_grace_at, m.status_since)) DESC, m.order_item_id DESC

@@ -5,7 +5,7 @@ export const FINAL_STATUSES = ["Shipment Delivered", "Rejected", "Cancelled"];
 
 export const IDLE_SQL = `(CURRENT_DATE - GREATEST(m.status_since, COALESCE(m.last_grace_at, m.status_since))::date)`;
 
-export const CHECK_AFTER_SQL = `CEIL(st.days_offset / 2.0)::int`;
+export const CHECK_AFTER_SQL = `eta_check_after(m.order_item_id)`;
 
 export const runEtaMonitor = async () => {
   const client = await pool.connect();
@@ -13,15 +13,20 @@ export const runEtaMonitor = async () => {
     await client.query("BEGIN");
 
     await client.query(`
-      INSERT INTO eta_monitor (order_item_id, status_snapshot)
-      SELECT oi.id, COALESCE(oi.status, 'Created') FROM order_items oi
+      INSERT INTO eta_monitor (order_item_id, status_snapshot, status_since)
+      SELECT oi.id, COALESCE(oi.status, 'Created'),
+             COALESCE(item_status_since(oi.id), o.created_at, now())
+      FROM order_items oi
+      JOIN receivers r ON r.id = oi.receiver_id
+      JOIN orders o ON o.id = r.order_id
       ON CONFLICT (order_item_id) DO NOTHING`);
 
     const reset = await client.query(`
       WITH changed AS (
         UPDATE eta_monitor m
         SET status_snapshot = COALESCE(oi.status, 'Created'),
-            status_since = now(), grace_used = 0, last_grace_at = NULL,
+            status_since = COALESCE(item_status_since(oi.id), now()),
+            grace_used = 0, last_grace_at = NULL,
             is_delayed = false, delayed_at = NULL, delayed_reason = NULL
         FROM order_items oi
         WHERE oi.id = m.order_item_id
@@ -42,11 +47,9 @@ export const runEtaMonitor = async () => {
       WITH due AS (
         SELECT m.order_item_id, m.status_snapshot AS status
         FROM eta_monitor m
-        JOIN statuses st ON st.order_status = m.status_snapshot
         WHERE m.is_delayed = false
           AND m.grace_used >= $1::int
           AND m.status_snapshot <> ALL($2::text[])
-          AND st.days_offset > 0
           AND ${IDLE_SQL} >= ${CHECK_AFTER_SQL}
       ), upd AS (
         UPDATE eta_monitor m SET is_delayed = true, delayed_at = now(), delayed_reason = 'auto'
@@ -68,11 +71,9 @@ export const runEtaMonitor = async () => {
         SELECT m.order_item_id, m.status_snapshot AS status,
                ${IDLE_SQL} AS idle_days, ${CHECK_AFTER_SQL} AS check_after
         FROM eta_monitor m
-        JOIN statuses st ON st.order_status = m.status_snapshot
         WHERE m.is_delayed = false
           AND m.grace_used < $1::int
           AND m.status_snapshot <> ALL($2::text[])
-          AND st.days_offset > 0
           AND ${IDLE_SQL} >= ${CHECK_AFTER_SQL}
       ), ins AS (
         INSERT INTO eta_notifications (order_item_id, status, idle_days)
