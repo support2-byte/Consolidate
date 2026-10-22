@@ -81,8 +81,7 @@ export const getNotifications = async (req, res) => {
       LEFT JOIN statuses st ON st.order_status = n.status
       WHERE n.state ${resolved ? "<>" : "="} 'pending'
         ${resolved ? "" : `AND COALESCE(m.grace_used, 0) < ${MAX_GRACE}`}
-      ORDER BY ${resolved ? "n.resolved_at DESC NULLS LAST, n.id DESC" : "n.created_at DESC, n.id DESC"}
-      LIMIT 200`);
+      ORDER BY ${resolved ? "n.resolved_at DESC NULLS LAST, n.id DESC" : "n.created_at DESC, n.id DESC"}`);
     return res.json({ success: true, rows });
   } catch (err) {
     return fail(res, err, "eta notifications get");
