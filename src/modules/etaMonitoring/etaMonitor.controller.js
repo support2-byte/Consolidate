@@ -5,6 +5,7 @@ import {
   MAX_GRACE,
   IDLE_SQL,
   CHECK_AFTER_SQL,
+  FINAL_STATUSES,
 } from "./etaMonitor.service.js";
 
 const actor = (req) => req.user?.email || req.user?.name || "admin";
@@ -229,12 +230,32 @@ export const markDelayed = async (req, res) => {
 export const getMonitorItems = async (req, res) => {
   try {
     const { page, limit, offset } = paging(req);
-    const { params, where } = buildFilter(req, "m.status_snapshot", [
+    const { params, where: baseWhere } = buildFilter(req, "m.status_snapshot", [
       "o.rgl_booking_number",
       "o.booking_ref",
       "oi.item_ref",
       "r.receiver_name",
     ]);
+
+    const flag = (req.query.flag || "").trim();
+    let flagCond = "";
+    if (flag === "delayed") {
+      flagCond = `m.is_delayed = true`;
+    } else if (["closed", "stale", "on_track"].includes(flag)) {
+      params.push(FINAL_STATUSES);
+      const fin = `$${params.length}::text[]`;
+      if (flag === "closed")
+        flagCond = `m.is_delayed = false AND m.status_snapshot = ANY(${fin})`;
+      else if (flag === "stale")
+        flagCond = `m.is_delayed = false AND m.status_snapshot <> ALL(${fin}) AND ${IDLE_SQL} >= ${CHECK_AFTER_SQL}`;
+      else
+        flagCond = `m.is_delayed = false AND m.status_snapshot <> ALL(${fin}) AND ${IDLE_SQL} < ${CHECK_AFTER_SQL}`;
+    }
+    const where = flagCond
+      ? baseWhere
+        ? `${baseWhere} AND (${flagCond})`
+        : `WHERE ${flagCond}`
+      : baseWhere;
     const base = `FROM eta_monitor m
       JOIN order_items oi ON oi.id = m.order_item_id
       JOIN receivers r ON r.id = oi.receiver_id
