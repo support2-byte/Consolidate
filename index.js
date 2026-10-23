@@ -1,4 +1,5 @@
 import app from "./src/app.js";
+import { startBatchScheduler } from "./src/services/batchRunner.js";
 import logger from "./src/services/logger.js";
 
 const PORT = process.env.PORT || 5000;
@@ -9,6 +10,7 @@ const server = app.listen(PORT, "0.0.0.0", () => {
     port: PORT,
     environment: process.env.NODE_ENV || "development",
   });
+  startBatchScheduler();
 });
 
 server.on("error", (err) => {
