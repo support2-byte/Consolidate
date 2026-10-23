@@ -126,9 +126,9 @@ export const resendNotification = async (req, res) => {
       }
 
       await pool.query(
-        `UPDATE email_queue
-            SET status = 'failed', attempts = attempts + 1, last_error = $2
-          WHERE id = $1`,
+        `UPDATE invoice_email_queue
+          SET status = 'failed', attempts = attempts + 1, last_error = $2
+        WHERE id = $1`,
         [id, errMsg],
       );
       logger.error("Resend notification failed", { id, error: errMsg });
@@ -136,9 +136,9 @@ export const resendNotification = async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE email_queue
-          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
-        WHERE id = $1`,
+      `UPDATE invoice_email_queue
+        SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
+      WHERE id = $1`,
       [id],
     );
 

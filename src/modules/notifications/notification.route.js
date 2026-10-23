@@ -12,6 +12,7 @@ import {
   deleteInvoiceEmailQueue,
 } from "./notification.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
+import { getBatchStatus, startBatch, stopBatch } from "./batch.controller.js";
 
 const router = express.Router();
 
@@ -124,5 +125,9 @@ router.delete(
   requireAuth,
   deleteInvoiceEmailQueue,
 );
+
+router.get("/batch/:queueKey/status", getBatchStatus);
+router.post("/batch/:queueKey/start", startBatch);
+router.post("/batch/:queueKey/stop", stopBatch);
 
 export default router;
