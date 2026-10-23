@@ -1754,7 +1754,7 @@ export async function getOrderById(req, res) {
           'itemRef',           COALESCE(oi.item_ref, ''),
 
           -- Get latest values from order_tracking
-          'status',            COALESCE(ot.status, oi.consignment_status, ''),
+          'status',            COALESCE(NULLIF(oi.status, ''), oi.consignment_status, ''),
           'eta',               TO_CHAR(ot.eta, 'YYYY-MM-DD'),
           'etd',               TO_CHAR(ot.etd, 'YYYY-MM-DD'),
 
