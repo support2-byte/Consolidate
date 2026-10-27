@@ -352,7 +352,12 @@ async function buildAndSendTracking(
     };
   }
 
-  const subscriberEmails = await getSubscribedEmails(itemRef, orderId);
+  const isSender =
+    String(statusData.recipientType || "").toLowerCase() === "sender";
+
+  const subscriberEmails = isSender
+    ? []
+    : await getSubscribedEmails(itemRef, orderId);
   const emails = mergeRecipients(primaryEmails, subscriberEmails);
 
   if (emails.length === 0) {

@@ -1109,17 +1109,27 @@ export async function createConsignment(req, res) {
     });
 
     let zoho = { created: [], skipped: [], failed: [] };
-    try {
-      zoho = await uploadConsignmentInvoicesToZoho({
-        consignmentNumber: newConsignment.consignment_number,
-        orderIds: input.orders,
-        consignmentValue: newConsignment.consignment_value,
-      });
-    } catch (zohoErr) {
-      logger.error(`[createConsignment] Zoho invoice upload failed`, {
+    const zohoUploadEnabled =
+      process.env.ZOHO_CONSIGNMENT_UPLOAD_ENABLED === "true";
+
+    if (!zohoUploadEnabled) {
+      logger.info(`[createConsignment] Zoho invoice upload paused, skipping`, {
         consignment_id: newConsignment.id,
-        message: zohoErr.message,
+        consignment_number: newConsignment.consignment_number,
       });
+    } else {
+      try {
+        zoho = await uploadConsignmentInvoicesToZoho({
+          consignmentNumber: newConsignment.consignment_number,
+          orderIds: input.orders,
+          consignmentValue: newConsignment.consignment_value,
+        });
+      } catch (zohoErr) {
+        logger.error(`[createConsignment] Zoho invoice upload failed`, {
+          consignment_id: newConsignment.id,
+          message: zohoErr.message,
+        });
+      }
     }
 
     res.status(201).json({

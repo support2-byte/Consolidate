@@ -116,24 +116,55 @@ export const resendNotification = async (req, res) => {
       const errMsg = result.error || result.message || "Unknown error";
 
       if (result.skipped) {
-        await pool.query(
-          `UPDATE email_queue SET status = 'skipped', last_error = $2 WHERE id = $1`,
+        const { rows: skippedRows } = await pool.query(
+          `UPDATE email_queue SET status = 'skipped', last_error = $2
+            WHERE id = $1
+        RETURNING *`,
           [id, errMsg],
         );
-        return res
-          .status(200)
-          .json({ success: false, skipped: true, message: errMsg });
+        return res.status(200).json({
+          success: false,
+          skipped: true,
+          message: errMsg,
+          row: skippedRows[0],
+        });
       }
 
-      await pool.query(
-        `UPDATE invoice_email_queue
-          SET status = 'failed', attempts = attempts + 1, last_error = $2
-        WHERE id = $1`,
+      const { rows: failedRows } = await pool.query(
+        `UPDATE email_queue
+            SET status = 'failed', attempts = attempts + 1, last_error = $2
+          WHERE id = $1
+      RETURNING *`,
         [id, errMsg],
       );
       logger.error("Resend notification failed", { id, error: errMsg });
-      return res.status(500).json({ success: false, message: errMsg });
+      return res
+        .status(500)
+        .json({ success: false, message: errMsg, row: failedRows[0] });
     }
+
+    const { rows: sentRows } = await pool.query(
+      `UPDATE email_queue
+          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
+        WHERE id = $1
+    RETURNING *`,
+      [id],
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Email sent",
+      row: sentRows[0],
+    });
+
+    await pool.query(
+      `UPDATE email_queue
+          SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
+        WHERE id = $1`,
+      [id],
+    );
+
+    return res.status(200).json({ success: true, message: "Email sent" });
 
     await pool.query(
       `UPDATE invoice_email_queue
@@ -186,13 +217,18 @@ export const getConfirmationEmails = async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
         eq.id,
-        eq.status,
-        eq.created_at,
-        eq.sent_at,
+        bc.form_id,
+        p.party_type,
+        p.name AS recipient_name,
         eq.recipient_email,
         eq.cc_emails,
         eq.bcc_emails,
-        bc.form_id,
+        p.booking_submitted_at,
+        eq.status,
+        eq.last_error,
+        eq.created_at,
+        eq.sent_at,
+        p.uuid AS party_uuid,
         bc.subject,
         bc.message,
         bc.mode,
@@ -200,18 +236,19 @@ export const getConfirmationEmails = async (req, res) => {
         bc.total_weight,
         c.company,
         c.logo_url AS company_logo_url,
-        COALESCE(r.name, s.name) AS recipient_name,
-        COALESCE(r.uuid, s.uuid) AS party_uuid,
-        CASE WHEN r.id IS NOT NULL THEN 'receiver' ELSE 'sender' END AS party_type,
-        s.name AS sender_name,
+        bs.name AS sender_name,
         COALESCE(items.items, '[]'::json) AS items
       FROM confirmation_email_queue eq
       JOIN booking_confirmations bc ON bc.id = eq.order_confirmation_id
       JOIN companies c ON c.id = bc.company_id
-      LEFT JOIN booking_confirmation_receivers r
-        ON r.email_queue_id = eq.id
-      LEFT JOIN booking_confirmation_senders s
-        ON s.email_queue_id = eq.id
+      JOIN LATERAL (
+        SELECT 'sender' AS party_type, s.name, s.uuid, s.booking_submitted_at
+          FROM booking_confirmation_senders s WHERE s.email_queue_id = eq.id
+        UNION ALL
+        SELECT 'receiver', r.name, r.uuid, r.booking_submitted_at
+          FROM booking_confirmation_receivers r WHERE r.email_queue_id = eq.id
+      ) p ON true
+      LEFT JOIN booking_confirmation_senders bs ON bs.booking_form_id = bc.id
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
           'category', bci.category,
@@ -231,6 +268,13 @@ export const getConfirmationEmails = async (req, res) => {
     return res.json({ success: true, notifications: rows });
   } catch (err) {
     logger.error("getConfirmationEmails failed", err);
+    if (err.code === "23503") {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This email is linked to a booking form and cannot be deleted.",
+      });
+    }
     return res
       .status(500)
       .json({ message: "Failed to load confirmation emails" });
@@ -241,85 +285,11 @@ export const resendConfirmationEmail = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const { rows } = await pool.query(
-      `SELECT
-        eq.id, eq.recipient_email, eq.cc_emails, eq.bcc_emails,
-        bc.form_id, bc.mode, bc.total_qty, bc.total_weight,
-        c.company, c.logo_url AS company_logo_url,
-        COALESCE(r.name, s.name) AS recipient_name,
-        COALESCE(r.uuid, s.uuid) AS party_uuid,
-        CASE WHEN r.id IS NOT NULL THEN 'receiver' ELSE 'sender' END AS party_type,
-        s.name AS sender_name,
-        COALESCE(items.items, '[]'::json) AS items
-      FROM confirmation_email_queue eq
-      JOIN booking_confirmations bc ON bc.id = eq.order_confirmation_id
-      JOIN companies c ON c.id = bc.company_id
-      LEFT JOIN booking_confirmation_receivers r ON r.email_queue_id = eq.id
-      LEFT JOIN booking_confirmation_senders s ON s.email_queue_id = eq.id
-      LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object(
-          'category', bci.category,
-          'subcategory', bci.subcategory,
-          'type', bci.type,
-          'qty', bci.qty,
-          'weight', bci.weight,
-          'placeOfLoading', bci.place_of_loading,
-          'placeOfDestination', bci.place_of_destination
-        ) ORDER BY bci.id) AS items
-        FROM booking_confirmation_items bci
-        WHERE bci.booking_form_id = bc.id
-      ) items ON true
-      WHERE eq.id = $1`,
-      [id],
-    );
+    const result = await sendConfirmationById(id);
 
-    if (!rows.length) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Queue entry not found" });
+    if (result.skipped) {
+      return res.status(409).json({ success: false, message: result.message });
     }
-
-    const entry = rows[0];
-    const newOtp = generateOtp();
-
-    if (entry.party_type === "receiver") {
-      await pool.query(
-        `UPDATE booking_confirmation_receivers
-            SET otp = $2, otp_verified_at = NULL
-          WHERE email_queue_id = $1`,
-        [id, newOtp],
-      );
-    } else {
-      await pool.query(
-        `UPDATE booking_confirmation_senders
-            SET otp = $2, otp_verified_at = NULL
-          WHERE email_queue_id = $1`,
-        [id, newOtp],
-      );
-    }
-
-    const viewLink =
-      entry.form_id && entry.party_uuid
-        ? `${FORM_BASE_URL}/booking-confirmation/${entry.party_uuid}/${entry.party_type}`
-        : "#";
-
-    const result = await sendConfirmationEmail({
-      recipientEmail: entry.recipient_email,
-      recipientName: entry.recipient_name,
-      senderName: entry.sender_name,
-      companyName: entry.company,
-      companyLogo: entry.company_logo_url,
-      mode: entry.mode,
-      totalQty: entry.total_qty,
-      totalWeight: entry.total_weight,
-      lastUpdated: entry.created_at,
-      viewLink,
-      ccEmails: entry.cc_emails,
-      bccEmails: entry.bcc_emails,
-      otp: newOtp,
-      items: entry.items,
-    });
-
     if (!result.success) {
       throw new Error(result.error || "Send failed");
     }
