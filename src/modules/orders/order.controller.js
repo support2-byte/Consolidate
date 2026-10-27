@@ -3909,6 +3909,7 @@ export async function getOrderByItemRef(req, res) {
 
       return {
         ...order,
+        status_sequence: statusSequence,
         receivers: Object.values(order.receivers).map((r) => ({
           ...r,
           items: Object.values(r.items),
