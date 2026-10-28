@@ -64,18 +64,26 @@ const sendKycById = async (id) => {
 const CONFIRMATION_QUERY = `
   SELECT
     eq.id, eq.recipient_email, eq.cc_emails, eq.bcc_emails, eq.created_at,
+    eq.subject, eq.message,
     bc.form_id, bc.mode, bc.total_qty, bc.total_weight,
     c.company, c.logo_url AS company_logo_url,
-    COALESCE(r.name, s.name) AS recipient_name,
-    COALESCE(r.uuid, s.uuid) AS party_uuid,
-    CASE WHEN r.id IS NOT NULL THEN 'receiver' ELSE 'sender' END AS party_type,
-    s.name AS sender_name,
+    p.party_type, p.name AS recipient_name, p.uuid AS party_uuid,
+    p.booking_submitted_at,
+    bs.name AS sender_name,
+    br.name AS receiver_name,
     COALESCE(items.items, '[]'::json) AS items
   FROM confirmation_email_queue eq
   JOIN booking_confirmations bc ON bc.id = eq.order_confirmation_id
   JOIN companies c ON c.id = bc.company_id
-  LEFT JOIN booking_confirmation_receivers r ON r.email_queue_id = eq.id
-  LEFT JOIN booking_confirmation_senders s ON s.email_queue_id = eq.id
+  JOIN LATERAL (
+    SELECT 'sender' AS party_type, s.name, s.uuid, s.booking_submitted_at
+      FROM booking_confirmation_senders s WHERE s.email_queue_id = eq.id
+    UNION ALL
+    SELECT 'receiver', r.name, r.uuid, r.booking_submitted_at
+      FROM booking_confirmation_receivers r WHERE r.email_queue_id = eq.id
+  ) p ON true
+  LEFT JOIN booking_confirmation_senders bs ON bs.booking_form_id = bc.id
+  LEFT JOIN booking_confirmation_receivers br ON br.booking_form_id = bc.id
   LEFT JOIN LATERAL (
     SELECT json_agg(json_build_object(
       'category', bci.category,
@@ -91,31 +99,33 @@ const CONFIRMATION_QUERY = `
   ) items ON true
   WHERE eq.id = $1`;
 
-const sendConfirmationById = async (id) => {
+export const sendConfirmationById = async (id) => {
   const { rows } = await pool.query(CONFIRMATION_QUERY, [id]);
   if (!rows.length) return { success: false, error: "Queue entry not found" };
 
   const entry = rows[0];
+  if (entry.booking_submitted_at) {
+    return {
+      success: false,
+      skipped: true,
+      message: "This party has already submitted the form",
+    };
+  }
+
   const otp = generateOtp();
-  const table =
-    entry.party_type === "receiver"
-      ? "booking_confirmation_receivers"
-      : "booking_confirmation_senders";
-
-  await pool.query(
-    `UPDATE ${table} SET otp = $2, otp_verified_at = NULL WHERE email_queue_id = $1`,
-    [id, otp],
-  );
-
   const viewLink =
     entry.form_id && entry.party_uuid
       ? `${FORM_BASE_URL}/booking-confirmation/${entry.party_uuid}/${entry.party_type}`
       : "#";
 
-  return sendConfirmationEmail({
+  const result = await sendConfirmationEmail({
     recipientEmail: entry.recipient_email,
     recipientName: entry.recipient_name,
     senderName: entry.sender_name,
+    receiverName: entry.receiver_name,
+    partyRole: entry.party_type,
+    subject: entry.subject,
+    message: entry.message,
     companyName: entry.company,
     companyLogo: entry.company_logo_url,
     mode: entry.mode,
@@ -128,6 +138,20 @@ const sendConfirmationById = async (id) => {
     otp,
     items: entry.items,
   });
+
+  if (!result.success) return result;
+
+  const table =
+    entry.party_type === "receiver"
+      ? "booking_confirmation_receivers"
+      : "booking_confirmation_senders";
+
+  await pool.query(
+    `UPDATE ${table} SET otp = $2, otp_verified_at = NULL WHERE email_queue_id = $1`,
+    [id, otp],
+  );
+
+  return result;
 };
 
 const sendInvoiceById = async (id) => {

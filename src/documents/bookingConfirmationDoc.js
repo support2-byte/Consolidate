@@ -28,14 +28,23 @@ export const generateBookingConfirmationHtml = (
     year: "numeric",
   });
 
+  const isSender = extras.participantRole === "sender";
+
   const senderName = order?.senderName || "";
   const senderContact = order?.senderContact || "";
 
   const receiverName = order?.receiverName || "";
   const receiverContact = order?.receiverContact || "";
-  const receiverAddress = order?.receiverAddress || "";
-  const receiverEmail = order?.receiverEmail || "";
-  const receiverCompany = order?.receiverCompany || "";
+
+  const toName = isSender ? senderName : receiverName;
+  const toContact = isSender ? senderContact : receiverContact;
+  const toAddress = (
+    (isSender ? order?.senderAddress : order?.receiverAddress) || ""
+  ).replace(/, /g, ",<br>");
+  const toEmail = (isSender ? order?.senderEmail : order?.receiverEmail) || "";
+  const toCompany = isSender ? "" : order?.receiverCompany || "";
+  const otherName = isSender ? receiverName : senderName;
+  const otherContact = isSender ? receiverContact : senderContact;
 
   const mode = order?.mode || "_________";
 
@@ -209,20 +218,20 @@ export const generateBookingConfirmationHtml = (
                 <td class="red-text" style="white-space: pre-line; border: 1px solid #aaa;">
                     ${company?.company || ""}<br>
                     Address: ${(company?.address || "").replace(/, /g, ",<br>")}<br>
-                    Contact Person: ${senderName}<br>
+                    Contact Person: ${otherName}<br>
                     Tel: ${company?.phone || ""}<br>
                     E-Mail: ${company?.email || ""}
                 </td>
                 <td class="red-text" colspan="2" style="white-space: pre-line; border: 1px solid #aaa; color: #000000 !important;">
-                    ${receiverName}<br>
-                    ${receiverCompany ? `Company: ${receiverCompany}<br>` : ""}
-                    Address: ${receiverAddress.replace(/, /g, ",<br>")}<br>
-                    Contact Person: ${receiverName}<br>
+                    ${toName}<br>
+                    ${toCompany ? `Company: ${toCompany}<br>` : ""}
+                    Address: ${toAddress}<br>
+                    Contact Person: ${toName}<br>
                     Passport No: <span class="golden-text">${passportNumber}</span><br>
                     Emirates ID #: <span class="golden-text">${emiratesId}</span><br>
                     Trade License No: <span class="golden-text">${tradeLicenseNumber}</span><br>
-                    Tel: ${receiverContact || "_________"}<br>
-                    E-Mail: ${receiverEmail}
+                    Tel: ${toContact || "_________"}<br>
+                    E-Mail: ${toEmail}
                 </td>
             </tr>
         </table>
@@ -264,13 +273,13 @@ export const generateBookingConfirmationHtml = (
             <tr class="red-text">
                 <td style="border: 1px solid #aaa;">
                     Either of the Party from<br>sender or receiver paying the Invoice<br>
-                    <span style="color: black;">Attn: ${senderName || "_________"}</span><br>
-                    Tel: ${senderContact || "_________"}
+                    <span style="color: black;">Attn: ${isSender ? toName : otherName || "_________"}</span><br>
+                    Tel: ${isSender ? toContact || "_________" : otherContact || "_________"}
                 </td>
                 <td style="border: 1px solid #aaa;">
                     Individual or company suppose to be the<br>recipient of the consignment<br>
-                    <span style="color: black;">Attn: ${receiverName || "_________"}</span><br>
-                    Tel: ${receiverContact || "_________"}
+                    <span style="color: black;">Attn: ${isSender ? otherName || "_________" : toName || "_________"}</span><br>
+                    Tel: ${isSender ? otherContact || "_________" : toContact || "_________"}
                 </td>
             </tr>
         </table>
@@ -296,7 +305,7 @@ export const generateBookingConfirmationHtml = (
             </tr>
             <tr>
                 <td style="vertical-align: top; padding-top: 8px;">
-                    <div style="border-bottom: 1px solid #000; height: 24px; color: #000000 !important;">${receiverName}</div>
+                    <div style="border-bottom: 1px solid #000; height: 24px; color: #000000 !important;">${toName}</div>
                     <b>Name</b>
                 </td>
                 <td></td>

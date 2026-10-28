@@ -40,179 +40,213 @@ const insertBookingConfirmation = async (client, params) => {
   throw new Error("Failed to generate a unique form_id after 5 attempts");
 };
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const normEmail = (v) =>
+  String(v || "")
+    .trim()
+    .toLowerCase();
+const normEmailList = (v) => [
+  ...new Set((Array.isArray(v) ? v : []).map(normEmail).filter(Boolean)),
+];
+const isValidParty = (p) =>
+  Boolean(p?.name?.trim() && p?.phone?.trim() && p?.address?.trim()) &&
+  EMAIL_RE.test(normEmail(p?.email));
+
+const enqueueConfirmationEmail = async (
+  client,
+  { to, cc, bcc, subject, message, bookingId },
+) => {
+  const {
+    rows: [row],
+  } = await client.query(
+    `INSERT INTO confirmation_email_queue
+       (recipient_email, cc_emails, bcc_emails, subject, message, status, order_confirmation_id)
+     VALUES ($1,$2,$3,$4,$5,'pending',$6)
+     RETURNING id`,
+    [
+      to,
+      Array.isArray(cc) && cc.length ? cc.join(", ") : null,
+      Array.isArray(bcc) && bcc.length ? bcc.join(", ") : null,
+      subject,
+      message,
+      bookingId,
+    ],
+  );
+  return row.id;
+};
+
 export const saveConfirmationData = async (req, res) => {
-  const { companyId, subject, message, mode, sender, items, participants } =
-    req.body;
+  const {
+    companyId,
+    subject,
+    message,
+    mode,
+    sender,
+    receiver,
+    cc,
+    bcc,
+    items,
+  } = req.body;
 
   if (!companyId) {
     return res.status(400).json({ message: "Company is required" });
   }
-  if (!sender?.name || !sender?.email || !sender?.phone || !sender?.address) {
+  if (!isValidParty(sender)) {
     return res.status(400).json({
-      message: "Sender name, email, phone, and address are required",
+      message: "Sender name, a valid email, phone, and address are required",
     });
   }
-  if (!subject || !message || !mode) {
+  if (!isValidParty(receiver)) {
+    return res.status(400).json({
+      message: "Receiver name, a valid email, phone, and address are required",
+    });
+  }
+  if (!subject?.trim() || !message?.trim() || !mode?.trim()) {
     return res
       .status(400)
       .json({ message: "Subject, message, and mode are required" });
   }
-  if (!Array.isArray(participants) || !participants.length) {
-    return res.status(400).json({ message: "Add at least one recipient" });
+
+  const senderEmail = normEmail(sender.email);
+  const receiverEmail = normEmail(receiver.email);
+  const ccList = normEmailList(cc);
+  const bccList = normEmailList(bcc);
+
+  if (senderEmail === receiverEmail) {
+    return res.status(400).json({
+      message: "Sender and receiver must use different email addresses",
+    });
+  }
+  if ([...ccList, ...bccList].some((e) => !EMAIL_RE.test(e))) {
+    return res
+      .status(400)
+      .json({ message: "One or more Cc/Bcc addresses are invalid" });
+  }
+  if (
+    [...ccList, ...bccList].some(
+      (e) => e === senderEmail || e === receiverEmail,
+    )
+  ) {
+    return res.status(400).json({
+      message: "Sender and receiver emails cannot be repeated in Cc/Bcc",
+    });
   }
 
-  const invalid = participants.find(
-    (p) => !p.name || !p.email || !p.phone || !p.address,
+  const itemList = Array.isArray(items) ? items : [];
+  if (!itemList.length) {
+    return res.status(400).json({ message: "Add at least one item" });
+  }
+  const badItem = itemList.find(
+    (i) =>
+      !i.category ||
+      !i.subcategory ||
+      !i.type ||
+      !i.portOfLoading ||
+      !i.portOfDestination ||
+      !(Number(i.qty) > 0) ||
+      !(Number(i.weight) > 0),
   );
-  if (invalid) {
+  if (badItem) {
     return res.status(400).json({
-      message: `Missing name, email, phone, or address for ${invalid.email || "a participant"}`,
+      message:
+        "Every item needs category, subcategory, type, ports, qty and weight",
     });
   }
 
   try {
     const result = await withTransaction(async (client) => {
-      const totalQty = (items || []).reduce(
-        (sum, i) => sum + (Number(i.qty) || 0),
+      const totalQty = itemList.reduce((sum, i) => sum + Number(i.qty), 0);
+      const totalWeight = itemList.reduce(
+        (sum, i) => sum + Number(i.weight),
         0,
       );
-      const totalWeight = (items || []).reduce(
-        (sum, i) => sum + (Number(i.weight) || 0),
-        0,
-      );
-
-      const toEntries = participants.filter((p) => p.role === "to");
-      const ccEntries = participants.filter((p) => p.role === "cc");
-      const bccEntries = participants.filter((p) => p.role === "bcc");
-
-      if (!toEntries.length) {
-        return res
-          .status(400)
-          .json({ message: "At least one 'To' recipient is required" });
-      }
 
       const confirmation = await insertBookingConfirmation(client, [
         companyId,
-        mode,
-        subject,
-        message,
+        mode.trim(),
+        subject.trim(),
+        message.trim(),
         totalQty,
         totalWeight,
         req.user.id,
       ]);
 
-      const {
-        rows: [senderRow],
-      } = await client.query(
+      const senderQueueId = await enqueueConfirmationEmail(client, {
+        to: senderEmail,
+        cc: ccList,
+        bcc: bccList,
+        subject: subject.trim(),
+        message: message.trim(),
+        bookingId: confirmation.id,
+      });
+
+      await client.query(
         `INSERT INTO booking_confirmation_senders
-          (uuid, booking_form_id, name, email, phone, address, otp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
-        RETURNING id, otp`,
+           (uuid, booking_form_id, name, email, phone, address, otp, email_queue_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
           crypto.randomUUID(),
           confirmation.id,
-          sender.name,
-          sender.email,
-          sender.phone,
-          sender.address,
+          sender.name.trim(),
+          senderEmail,
+          sender.phone.trim(),
+          sender.address.trim(),
           generateOtp(),
+          senderQueueId,
         ],
       );
 
-      const {
-        rows: [senderQueuedEmail],
-      } = await client.query(
-        `INSERT INTO confirmation_email_queue
-            (recipient_email, cc_emails, bcc_emails, subject, message, status, order_confirmation_id, created_at)
-          VALUES ($1,$2,$3,$4,$5,'pending',$6, now())
-          RETURNING id`,
-        [
-          sender.email,
-          ccEntries.length ? ccEntries.map((p) => p.email).join(", ") : null,
-          bccEntries.length ? bccEntries.map((p) => p.email).join(", ") : null,
-          subject,
-          message,
-          confirmation.id,
-        ],
-      );
-
-      await client.query(
-        `UPDATE booking_confirmation_senders SET email_queue_id = $1 WHERE id = $2`,
-        [senderQueuedEmail.id, senderRow.id],
-      );
-
-      for (const item of items || []) {
+      for (const item of itemList) {
         await client.query(
           `INSERT INTO booking_confirmation_items
-              (booking_form_id, category, subcategory, type, qty, weight,
+             (booking_form_id, category, subcategory, type, qty, weight,
               place_of_loading, place_of_destination)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [
             confirmation.id,
             item.category,
             item.subcategory,
             item.type,
-            item.qty,
-            item.weight,
+            Number(item.qty),
+            Number(item.weight),
             item.portOfLoading,
             item.portOfDestination,
           ],
         );
       }
 
-      const primaryReceiver = toEntries[0];
+      const receiverQueueId = await enqueueConfirmationEmail(client, {
+        to: receiverEmail,
+        cc: ccList,
+        bcc: bccList,
+        subject: subject.trim(),
+        message: message.trim(),
+        bookingId: confirmation.id,
+      });
 
-      const {
-        rows: [receiverRow],
-      } = await client.query(
+      await client.query(
         `INSERT INTO booking_confirmation_receivers
-          (uuid, booking_form_id, name, email, phone, address, company_name, role, otp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        RETURNING id, otp`,
+           (uuid, booking_form_id, name, email, phone, address, company_name, role, otp, email_queue_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'to',$8,$9)`,
         [
           crypto.randomUUID(),
           confirmation.id,
-          primaryReceiver.name,
-          primaryReceiver.email,
-          primaryReceiver.phone,
-          primaryReceiver.address,
-          primaryReceiver.company || "",
-          "to",
+          receiver.name.trim(),
+          receiverEmail,
+          receiver.phone.trim(),
+          receiver.address.trim(),
+          (receiver.company || "").trim(),
           generateOtp(),
+          receiverQueueId,
         ],
       );
 
-      const {
-        rows: [queuedEmail],
-      } = await client.query(
-        `INSERT INTO confirmation_email_queue
-     (recipient_email, cc_emails, bcc_emails, subject, message, status, order_confirmation_id, created_at)
-   VALUES ($1,$2,$3,$4,$5,'pending',$6, now())
-   RETURNING id`,
-        [
-          toEntries.map((p) => p.email).join(", "),
-          ccEntries.length ? ccEntries.map((p) => p.email).join(", ") : null,
-          bccEntries.length ? bccEntries.map((p) => p.email).join(", ") : null,
-          subject,
-          message,
-          confirmation.id,
-        ],
-      );
-
-      await client.query(
-        `UPDATE booking_confirmation_receivers SET email_queue_id = $1 WHERE id = $2`,
-        [queuedEmail.id, receiverRow.id],
-      );
-
-      return { formId: confirmation.form_id, queued: 2 };
+      return { formId: confirmation.form_id };
     });
 
-    return res.status(201).json({
-      success: true,
-      formId: result.formId,
-      queued: result.queued,
-      total: result.queued,
-    });
+    return res
+      .status(201)
+      .json({ success: true, formId: result.formId, queued: 2, total: 2 });
   } catch (err) {
     logger.error("confirmation-email-queue failed", err);
     return res
@@ -521,6 +555,11 @@ export const submitBookingConfirmation = async (req, res) => {
 
     return res.json({ success: true, submissionId });
   } catch (err) {
+    if (err.code === "23505") {
+      return res.status(400).json({
+        message: "This booking confirmation has already been submitted.",
+      });
+    }
     logger.error("submitBookingConfirmation failed", err);
     return res
       .status(500)
@@ -540,6 +579,9 @@ export const listBookingConfirmations = async (req, res) => {
         bc.created_at,
         bc.form_id,
         bc.created_by,
+        bc.imported_order_id,
+        bc.imported_at,
+        o.rgl_booking_number AS imported_rgl_booking_number,
         json_build_object(
           'id', c.id,
           'company', c.company,
@@ -555,11 +597,13 @@ export const listBookingConfirmations = async (req, res) => {
         COALESCE(items.rows, '[]') AS items
       FROM booking_confirmations bc
       JOIN companies c ON c.id = bc.company_id
+      LEFT JOIN orders o ON o.id = bc.imported_order_id
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
           'id', s.id, 'uuid', s.uuid, 'name', s.name, 'email', s.email,
           'phone', s.phone, 'address', s.address,
-          'booking_submitted_at', s.booking_submitted_at
+          'booking_submitted_at', s.booking_submitted_at,
+          'signature_url', (SELECT sub.signature_url FROM booking_confirmation_submissions sub WHERE sub.participant_type = 'sender' AND sub.form_submitter_id = s.id LIMIT 1)
         )) AS rows
         FROM booking_confirmation_senders s
         WHERE s.booking_form_id = bc.id
@@ -568,7 +612,8 @@ export const listBookingConfirmations = async (req, res) => {
         SELECT json_agg(json_build_object(
           'id', r.id, 'uuid', r.uuid, 'name', r.name, 'email', r.email,
           'phone', r.phone, 'address', r.address, 'company_name', r.company_name,
-          'role', r.role, 'booking_submitted_at', r.booking_submitted_at
+          'role', r.role, 'booking_submitted_at', r.booking_submitted_at,
+          'signature_url', (SELECT sub.signature_url FROM booking_confirmation_submissions sub WHERE sub.participant_type = 'receiver' AND sub.form_submitter_id = r.id LIMIT 1)
         )) AS rows
         FROM booking_confirmation_receivers r
         WHERE r.booking_form_id = bc.id
@@ -608,11 +653,13 @@ export const getBookingConfirmationById = async (req, res) => {
 
     const [sendersRes, receiversRes, itemsRes] = await Promise.all([
       pool.query(
-        `SELECT * FROM booking_confirmation_senders WHERE booking_form_id = $1 ORDER BY id`,
+        `SELECT id, uuid, name, email, phone, address, booking_submitted_at, otp_verified_at
+         FROM booking_confirmation_senders WHERE booking_form_id = $1 ORDER BY id`,
         [id],
       ),
       pool.query(
-        `SELECT * FROM booking_confirmation_receivers WHERE booking_form_id = $1 ORDER BY id`,
+        `SELECT id, uuid, name, email, phone, address, company_name, role, booking_submitted_at, otp_verified_at
+         FROM booking_confirmation_receivers WHERE booking_form_id = $1 ORDER BY id`,
         [id],
       ),
       pool.query(

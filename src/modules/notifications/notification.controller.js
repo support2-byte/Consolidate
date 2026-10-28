@@ -8,6 +8,7 @@ import {
 } from "../../services/sendOrderEmail.js";
 import { sendInvoiceEmail } from "../../services/sendInvoiceEmail.js";
 import { generateOtp } from "../../services/generateOtp.js";
+import { sendConfirmationById } from "../../services/queueSenders.js";
 
 const FORM_BASE_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
 
@@ -237,6 +238,7 @@ export const getConfirmationEmails = async (req, res) => {
         c.company,
         c.logo_url AS company_logo_url,
         bs.name AS sender_name,
+        br.name AS receiver_name,
         COALESCE(items.items, '[]'::json) AS items
       FROM confirmation_email_queue eq
       JOIN booking_confirmations bc ON bc.id = eq.order_confirmation_id
@@ -249,6 +251,7 @@ export const getConfirmationEmails = async (req, res) => {
           FROM booking_confirmation_receivers r WHERE r.email_queue_id = eq.id
       ) p ON true
       LEFT JOIN booking_confirmation_senders bs ON bs.booking_form_id = bc.id
+      LEFT JOIN booking_confirmation_receivers br ON br.booking_form_id = bc.id
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
           'category', bci.category,

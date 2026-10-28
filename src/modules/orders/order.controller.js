@@ -146,6 +146,45 @@ export async function createOrder(req, res) {
       });
     }
 
+    const bookingFormId = parseInt(b.booking_confirmation_id, 10) || null;
+    if (bookingFormId) {
+      const {
+        rows: [form],
+      } = await client.query(
+        `SELECT bc.imported_order_id,
+                EXISTS (SELECT 1 FROM booking_confirmation_senders s
+                         WHERE s.booking_form_id = bc.id AND s.booking_submitted_at IS NOT NULL) AS sender_done,
+                EXISTS (SELECT 1 FROM booking_confirmation_receivers r
+                         WHERE r.booking_form_id = bc.id AND r.booking_submitted_at IS NOT NULL) AS receiver_done
+           FROM booking_confirmations bc
+          WHERE bc.id = $1
+          FOR UPDATE OF bc`,
+        [bookingFormId],
+      );
+
+      if (!form) {
+        await client.query("ROLLBACK");
+        return res
+          .status(404)
+          .json({ success: false, error: "Booking form not found" });
+      }
+      if (form.imported_order_id) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          success: false,
+          error: "This booking form has already been imported into an order",
+        });
+      }
+      if (!form.sender_done || !form.receiver_done) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          success: false,
+          error:
+            "Both sender and receiver must submit their forms before importing",
+        });
+      }
+    }
+
     const statusEmailRes = await client.query(
       `SELECT order_status, send_email FROM statuses`,
     );
@@ -176,6 +215,15 @@ export async function createOrder(req, res) {
     );
     const { id: orderId } = ordersResult.rows[0];
     const newOrder = ordersResult.rows[0];
+
+    if (bookingFormId) {
+      await client.query(
+        `UPDATE booking_confirmations
+            SET imported_order_id = $1, imported_at = NOW()
+          WHERE id = $2`,
+        [orderId, bookingFormId],
+      );
+    }
 
     const senderResult = await client.query(
       `INSERT INTO senders (
@@ -5419,13 +5467,16 @@ export const listBookingFormsForImport = async (req, res) => {
         bc.total_qty,
         bc.total_weight,
         bc.created_at,
+        bc.imported_order_id,
+        o.rgl_booking_number AS imported_rgl_booking_number,
         row_to_json(c.*) AS company,
         COALESCE(
           json_agg(DISTINCT jsonb_build_object(
             'id', s.id, 'name', s.name, 'email', s.email,
             'phone', s.phone, 'address', s.address,
             'booking_submitted_at', s.booking_submitted_at,
-            'signature_url', sub_s.signature_url
+            'signature_url', sub_s.signature_url,
+            'form_url', sub_s.form_url
           )) FILTER (WHERE s.id IS NOT NULL), '[]'
         ) AS senders,
         COALESCE(
@@ -5433,18 +5484,20 @@ export const listBookingFormsForImport = async (req, res) => {
             'id', r.id, 'name', r.name, 'email', r.email,
             'phone', r.phone, 'address', r.address,
             'booking_submitted_at', r.booking_submitted_at,
-            'signature_url', sub_r.signature_url
+            'signature_url', sub_r.signature_url,
+            'form_url', sub_r.form_url
           )) FILTER (WHERE r.id IS NOT NULL), '[]'
         ) AS receivers
       FROM booking_confirmations bc
       JOIN companies c ON c.id = bc.company_id
+      LEFT JOIN orders o ON o.id = bc.imported_order_id
       LEFT JOIN booking_confirmation_senders s ON s.booking_form_id = bc.id
       LEFT JOIN booking_confirmation_receivers r ON r.booking_form_id = bc.id
       LEFT JOIN booking_confirmation_submissions sub_s
         ON sub_s.form_submitter_id = s.id AND sub_s.participant_type = 'sender'
       LEFT JOIN booking_confirmation_submissions sub_r
         ON sub_r.form_submitter_id = r.id AND sub_r.participant_type = 'receiver'
-      GROUP BY bc.id, c.id
+      GROUP BY bc.id, c.id, o.id
       ORDER BY bc.created_at DESC
     `);
     return res.json(rows);
@@ -5467,14 +5520,32 @@ export const getBookingFormForImport = async (req, res) => {
     if (!bcRes.rows.length) return res.status(404).json({ error: "Not found" });
     const bc = bcRes.rows[0];
 
+    if (bc.imported_order_id) {
+      return res.status(409).json({
+        error: "This booking form has already been imported into an order",
+      });
+    }
+
     const sendersRes = await pool.query(
-      `SELECT * FROM booking_confirmation_senders WHERE booking_form_id = $1`,
+      `SELECT id, name, email, phone, address, booking_submitted_at
+         FROM booking_confirmation_senders WHERE booking_form_id = $1`,
       [bookingFormId],
     );
     const receiversRes = await pool.query(
-      `SELECT * FROM booking_confirmation_receivers WHERE booking_form_id = $1`,
+      `SELECT id, name, email, phone, address, company_name, booking_submitted_at
+         FROM booking_confirmation_receivers WHERE booking_form_id = $1`,
       [bookingFormId],
     );
+
+    if (
+      !sendersRes.rows.some((s) => s.booking_submitted_at) ||
+      !receiversRes.rows.some((r) => r.booking_submitted_at)
+    ) {
+      return res.status(400).json({
+        error:
+          "Both sender and receiver must submit their forms before importing",
+      });
+    }
 
     const itemsRes = await pool.query(
       `SELECT id, category, subcategory, type, qty, weight, place_of_loading, place_of_destination
