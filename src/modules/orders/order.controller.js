@@ -2081,28 +2081,6 @@ export async function getOrderById(req, res) {
         : "",
     };
 
-    let overallStatus = "Created";
-    if (receivers.length > 0) {
-      const receiverStatuses = receivers.map((r) => r.status || "Created");
-      if (receiverStatuses.includes("Cancelled")) {
-        overallStatus = "Cancelled";
-      } else {
-        const statusOrder = {
-          Created: 0,
-          "In Process": 1,
-          "Ready for Loading": 2,
-          "Loaded Into Container": 3,
-          Delivered: 4,
-        };
-        const maxIdx = Math.max(
-          ...receiverStatuses.map((s) => statusOrder[s] || 0),
-        );
-        overallStatus =
-          Object.keys(statusOrder).find((k) => statusOrder[k] === maxIdx) ||
-          "Created";
-      }
-    }
-
     let overallEta = null;
     const withContainers = receivers.filter((r) =>
       r.shippingDetails?.some((sd) => sd.containerDetails?.length > 0),
@@ -2127,8 +2105,7 @@ export async function getOrderById(req, res) {
     res.json({
       ...formattedOrderRow,
       eta: overallEta,
-      overall_status: overallStatus,
-      status: overallStatus,
+      status: orderRow.status,
       attachments: parsedAttachments,
       gatepass: parsedGatepass,
       collection_scope: orderRow.collection_scope,
