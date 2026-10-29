@@ -6,6 +6,10 @@ export const sendConfirmationEmail = async ({
   recipientEmail,
   recipientName,
   senderName,
+  receiverName,
+  partyRole,
+  subject,
+  message,
   companyName,
   companyLogo,
   mode,
@@ -22,6 +26,9 @@ export const sendConfirmationEmail = async ({
     const emailTemplate = buildConfirmationEmailHtml({
       recipientName,
       senderName,
+      receiverName,
+      partyRole,
+      message,
       companyName,
       companyLogo,
       mode,
@@ -38,7 +45,7 @@ export const sendConfirmationEmail = async ({
       to: recipientEmail,
       cc: ccEmails || undefined,
       bcc: bccEmails || undefined,
-      subject: "Your Booking Confirmation",
+      subject: subject?.trim() || "Your Booking Confirmation",
       html: emailTemplate,
     });
 
