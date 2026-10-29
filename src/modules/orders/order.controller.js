@@ -19,7 +19,8 @@ import {
 } from "../zoho-invoices/zoho-bill.controller.js";
 import crypto from "crypto";
 
-const TRACKING_PREFIX = "RGSL-ORD-";
+const ORDER_TRACKING_PREFIX = "RGSL-ORD-";
+const ITEM_TRACKING_PREFIX = "RGSL-ITM-";
 const TRACKING_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const randomTrackingSuffix = () =>
@@ -30,12 +31,26 @@ const randomTrackingSuffix = () =>
 
 const generateTrackingId = async (client, used) => {
   for (let i = 0; i < 10; i++) {
-    const id = `${TRACKING_PREFIX}${randomTrackingSuffix()}`;
+    const id = `${ORDER_TRACKING_PREFIX}${randomTrackingSuffix()}`;
     if (used.has(id)) continue;
     const { rowCount } = await client.query(
-      `SELECT 1 FROM orders WHERE tracking_id = $1
-       UNION ALL
-       SELECT 1 FROM order_items WHERE tracking_id = $1`,
+      `SELECT 1 FROM orders WHERE tracking_id = $1`,
+      [id],
+    );
+    if (rowCount === 0) {
+      used.add(id);
+      return id;
+    }
+  }
+  throw new Error("Failed to generate unique tracking id");
+};
+
+const generateItemTrackingId = async (client, used) => {
+  for (let i = 0; i < 10; i++) {
+    const id = `${ITEM_TRACKING_PREFIX}${randomTrackingSuffix()}`;
+    if (used.has(id)) continue;
+    const { rowCount } = await client.query(
+      `SELECT 1 FROM order_items WHERE tracking_id = $1`,
       [id],
     );
     if (rowCount === 0) {
@@ -428,7 +443,7 @@ export async function createOrder(req, res) {
 
       for (const item of items) {
         const itemRef = item.item_ref || item.itemRef || "";
-        const itemTrackingId = await generateTrackingId(
+        const itemTrackingId = await generateItemTrackingId(
           client,
           usedTrackingIds,
         );
@@ -895,7 +910,10 @@ export async function updateOrder(req, res) {
         const existingItemId = item.existing_id || null;
 
         if (existingItemId) {
-          const newItemTrackingId = await generateTrackingId(client, new Set());
+          const newItemTrackingId = await generateItemTrackingId(
+            client,
+            new Set(),
+          );
           await client.query(
             `INSERT INTO order_items (order_id, receiver_id, total_number, weight, total_weight,
               container_details, category, subcategory, type, pickup_location, 
