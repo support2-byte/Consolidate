@@ -1,10 +1,8 @@
 import express from "express";
 import {
-  processEmailQueue,
   verifyRecaptcha,
   createKycForm,
   getCustomerByZohoId,
-  processKycEmailQueue,
   getRequests,
   approveRequest,
   rejectRequest,
@@ -14,38 +12,6 @@ import { requireAuth } from "../auth/auth.middleware.js";
 import { kycUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
-
-/**
- * @swagger
- * /api/internal/process-email-queue:
- *   post:
- *     summary: Process pending emails in the notification queue
- *     tags: [Internal]
- *     responses:
- *       200:
- *         description: Queue processed
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/QueueProcessResult'
- */
-router.post("/process-email-queue", processEmailQueue);
-
-/**
- * @swagger
- * /api/internal/process-kyc-email-queue:
- *   post:
- *     summary: Process pending KYC-related emails in the queue
- *     tags: [Internal]
- *     responses:
- *       200:
- *         description: KYC email queue processed
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/QueueProcessResult'
- */
-router.post("/process-kyc-email-queue", processKycEmailQueue);
 
 /**
  * @swagger

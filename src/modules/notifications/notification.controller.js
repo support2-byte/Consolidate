@@ -8,19 +8,21 @@ import {
 } from "../../services/sendOrderEmail.js";
 import { sendInvoiceEmail } from "../../services/sendInvoiceEmail.js";
 import { generateOtp } from "../../services/generateOtp.js";
-import { sendConfirmationById } from "../../services/queueSenders.js";
+import { QUEUES, sendConfirmationById } from "../../services/queueSenders.js";
 
 const FORM_BASE_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
 
 export const getAllNotifications = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.item_ref, oi.status AS item_status, eq.recipient_type,
-              eq.recipient_email, eq.recipient_name, eq.email_type, eq.status,
-              eq.attempts, eq.last_error, eq.created_at, eq.sent_at
+      `SELECT eq.id, o.rgl_booking_number AS order_form_no, eq.tracking_id,
+              COALESCE(oi.status, o.status) AS item_status,
+              eq.recipient_type, eq.recipient_email, eq.recipient_name,
+              eq.email_type, eq.status, eq.attempts, eq.last_error,
+              eq.created_at, eq.sent_at
          FROM email_queue eq
          JOIN orders o ON o.id = eq.order_id
-         LEFT JOIN order_items oi ON TRIM(oi.item_ref) ILIKE TRIM(eq.item_ref)
+         LEFT JOIN order_items oi ON oi.tracking_id = eq.tracking_id
         ORDER BY eq.created_at DESC, eq.id DESC`,
     );
     if (rows.length === 0) {
@@ -93,25 +95,7 @@ export const resendNotification = async (req, res) => {
 
     let result;
 
-    if (notif.email_type === "order_created") {
-      result = await sendShipmentEmail({
-        email: notif.recipient_email,
-        orderId: notif.order_id,
-        itemRef: notif.item_ref,
-        recipientId: notif.recipient_id,
-        recipientType: notif.recipient_type,
-        receiverName: notif.recipient_name || "Valued Customer",
-      });
-    } else {
-      result = await notifySingleStatusUpdate({
-        email: notif.recipient_email,
-        itemRef: notif.item_ref,
-        orderId: notif.order_id,
-        recipientId: notif.recipient_id,
-        recipientType: notif.recipient_type,
-        receiverName: notif.recipient_name || "Valued Customer",
-      });
-    }
+    result = await QUEUES.emails.send(id);
 
     if (!result.success) {
       const errMsg = result.error || result.message || "Unknown error";
@@ -162,15 +146,6 @@ export const resendNotification = async (req, res) => {
       `UPDATE email_queue
           SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
         WHERE id = $1`,
-      [id],
-    );
-
-    return res.status(200).json({ success: true, message: "Email sent" });
-
-    await pool.query(
-      `UPDATE invoice_email_queue
-        SET status = 'sent', attempts = attempts + 1, sent_at = NOW(), last_error = NULL
-      WHERE id = $1`,
       [id],
     );
 

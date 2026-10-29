@@ -25,7 +25,7 @@ const sendNotificationById = async (id) => {
   const common = {
     email: n.recipient_email,
     orderId: n.order_id,
-    itemRef: n.item_ref,
+    trackingId: n.tracking_id,
     recipientId: n.recipient_id,
     recipientType: n.recipient_type,
     receiverName: n.recipient_name || "Valued Customer",
