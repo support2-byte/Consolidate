@@ -543,7 +543,7 @@ router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
  *       404:
  *         description: Order not found
  */
-router.get("/pdf-data/:orderId", getPdfData);
+router.get("/pdf-data/:orderId", requireAuth, getPdfData);
 
 /**
  * @swagger
@@ -587,7 +587,7 @@ router.patch(
   updateCollectionStatus,
 );
 
-router.post("/:collectionId/gatepass", createGatepass);
-router.get("/:collectionId/gatepass", getGatepassesForCollection);
+router.post("/:collectionId/gatepass", requireAuth, createGatepass);
+router.get("/:collectionId/gatepass", requireAuth, getGatepassesForCollection);
 
 export default router;
