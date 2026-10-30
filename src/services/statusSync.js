@@ -196,6 +196,46 @@ export async function rollupDelivered(client, itemIds) {
   }
 }
 
+export async function queueStatusEmails(
+  db,
+  { itemIds, emailType = "order_status_update" },
+) {
+  const ids = [...new Set((itemIds || []).filter(Boolean))];
+  if (!ids.length) return 0;
+
+  const r = await db.query(
+    `WITH items AS (
+       SELECT oi.id, oi.order_id, oi.sender_id, oi.receiver_id,
+              oi.tracking_id AS item_tracking_id
+         FROM order_items oi WHERE oi.id = ANY($1::int[])
+     ),
+     rc AS (
+       SELECT order_id, COUNT(*)::int AS n FROM receivers
+        WHERE order_id IN (SELECT order_id FROM items) GROUP BY order_id
+     )
+     INSERT INTO email_queue
+       (order_id, recipient_id, recipient_type, recipient_email, recipient_name,
+        email_type, status, tracking_id)
+     SELECT DISTINCT i.order_id, s.id, 'sender', s.sender_email, s.sender_name,
+            $2::varchar, 'pending', o.tracking_id
+       FROM items i
+       JOIN orders o  ON o.id = i.order_id
+       JOIN senders s ON s.id = i.sender_id
+      WHERE COALESCE(s.sender_email,'') <> '' AND s.email_opt_in IS NOT FALSE
+     UNION ALL
+     SELECT DISTINCT i.order_id, r.id, 'receiver', r.receiver_email, r.receiver_name,
+            $2::varchar, 'pending',
+            CASE WHEN rc.n > 1 THEN i.item_tracking_id ELSE o.tracking_id END
+       FROM items i
+       JOIN orders o    ON o.id = i.order_id
+       JOIN receivers r ON r.id = i.receiver_id
+       JOIN rc          ON rc.order_id = i.order_id
+      WHERE COALESCE(r.receiver_email,'') <> '' AND r.email_opt_in IS NOT FALSE`,
+    [ids, emailType],
+  );
+  return r.rowCount;
+}
+
 export async function applyItemStatus(
   client,
   {
@@ -257,20 +297,7 @@ export async function applyItemStatus(
   );
 
   if (statusRow.send_email === true) {
-    await client.query(
-      `INSERT INTO email_queue
-         (order_id, recipient_id, recipient_type, recipient_email, recipient_name, email_type, status, item_ref)
-       SELECT oi.order_id, r.id, 'receiver', r.receiver_email, r.receiver_name,
-              'order_status_update', 'pending', oi.item_ref
-         FROM order_items oi JOIN receivers r ON r.id = oi.receiver_id
-        WHERE oi.id = ANY($1::int[]) AND COALESCE(r.receiver_email,'') <> ''
-       UNION ALL
-       SELECT oi.order_id, s.id, 'sender', s.sender_email, s.sender_name,
-              'order_status_update', 'pending', oi.item_ref
-         FROM order_items oi JOIN senders s ON s.id = oi.sender_id
-        WHERE oi.id = ANY($1::int[]) AND COALESCE(s.sender_email,'') <> ''`,
-      [rows.map((r) => r.id)],
-    );
+    await queueStatusEmails(client, { itemIds: rows.map((r) => r.id) });
   }
 
   await syncParents(client, rows, receiverEta);

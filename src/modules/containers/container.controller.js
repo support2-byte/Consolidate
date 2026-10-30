@@ -2,7 +2,11 @@ import pool from "../../db/pool.js";
 import { calculateETA } from "../../services/calculateEta.js";
 import { v2 as cloudinary } from "cloudinary";
 import { withTransaction } from "../../services/transaction.js";
-import { getActorLabel } from "../../services/statusSync.js";
+import {
+  applyContainerStatus,
+  getActorLabel,
+  getStatusRow,
+} from "../../services/statusSync.js";
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -1506,213 +1510,27 @@ export async function updateContainerStatus(req, res) {
     }
 
     if (container_status && current_status) {
-      const statusResult = await client.query(
-        `
-          SELECT order_status, days_offset, send_email
-          FROM statuses
-          WHERE container_status = $1
-        `,
-        [container_status],
+      const statusRow = await getStatusRow(
+        client,
+        "container",
+        container_status,
       );
-
-      const order_status = statusResult.rows[0]?.order_status ?? null;
-      const days_offset = statusResult.rows[0]?.days_offset ?? null;
-      const statusSendEmail = statusResult.rows[0]?.send_email === true;
-
-      let eta = null;
-      let daysUntil = null;
-      if (order_status) {
-        const result = await calculateETA(client, order_status);
-        eta = result.eta;
-        daysUntil = result.daysUntil;
+      if (!statusRow) {
+        await client.query("ROLLBACK");
+        return res
+          .status(400)
+          .json({ error: `Invalid container status "${container_status}"` });
       }
-
-      await client.query(
-        `
-          UPDATE container_master
-          SET status = $1
-          WHERE cid = $2
-        `,
-        [container_status, cid],
-      );
-
-      const assignmentResult = await client.query(
-        `
-          UPDATE container_assignment_history cah
-          SET status = $1
-          FROM order_items oi
-          WHERE cah.detail_id = oi.id
-            AND cah.order_id = oi.order_id
-            AND cah.receiver_id = oi.receiver_id
-            AND cah.cid = $2
-            AND cah.action_type = 'ASSIGN'
-            AND cah.status = $3
-          RETURNING cah.receiver_id, cah.detail_id, cah.consignment_id
-        `,
-        [container_status, cid, current_status],
-      );
-
-      const receiverIds = [
-        ...new Set(
-          assignmentResult.rows.map((r) => r.receiver_id).filter(Boolean),
-        ),
-      ];
-
-      const detailIds = [
-        ...new Set(
-          assignmentResult.rows.map((r) => r.detail_id).filter(Boolean),
-        ),
-      ];
-
-      const consignmentIdByDetailId = new Map(
-        assignmentResult.rows.map((r) => [r.detail_id, r.consignment_id]),
-      );
-
-      if (detailIds.length) {
-        await client.query(
-          `
-          UPDATE order_items
-          SET status = $1, updated_at = NOW()
-          WHERE id = ANY($2::int[])
-          `,
-          [order_status, detailIds],
-        );
-      }
-
-      for (const receiverId of receiverIds) {
-        const receiverResult = await client.query(
-          `
-          SELECT
-            id,
-            receiver_ref,
-            receiver_email,
-            receiver_name,
-            status
-          FROM receivers
-          WHERE id = $1
-          `,
-          [receiverId],
-        );
-
-        const receiver = receiverResult.rows[0];
-
-        if (!receiver) continue;
-
-        const oldStatus = receiver.status || null;
-
-        const itemsResult = await client.query(
-          `
-          SELECT
-            oi.id,
-            oi.order_id,
-            oi.sender_id,
-            oi.receiver_id,
-            oi.item_ref,
-            s.sender_ref,
-            s.sender_email,
-            s.sender_name
-          FROM order_items oi
-          LEFT JOIN senders s
-            ON s.id = oi.sender_id
-          WHERE oi.receiver_id = $1
-            AND oi.id = ANY($2::int[])
-          `,
-          [receiverId, detailIds],
-        );
-
-        for (const item of itemsResult.rows) {
-          await client.query(
-            `
-              INSERT INTO order_tracking (
-                order_id,
-                sender_id,
-                sender_ref,
-                receiver_id,
-                receiver_ref,
-                container_id,
-                consignment_id,
-                status,
-                old_status,
-                item_ref,
-                created_by,
-                created_time,
-                eta,
-                etd,
-                module_id
-              )
-              VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14
-              )
-            `,
-            [
-              item.order_id,
-              item.sender_id,
-              item.sender_ref,
-              item.receiver_id,
-              receiver.receiver_ref,
-              cid,
-              consignmentIdByDetailId.get(item.id) ?? null,
-              container_status,
-              oldStatus,
-              item.item_ref,
-              created_by,
-              eta,
-              eta,
-              4,
-            ],
-          );
-
-          if (receiver.receiver_email && statusSendEmail) {
-            await client.query(
-              `
-              INSERT INTO email_queue (
-                order_id, recipient_id, recipient_type,
-                recipient_email, recipient_name, email_type, status, item_ref
-              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-              `,
-              [
-                item.order_id,
-                receiver.id,
-                "receiver",
-                receiver.receiver_email,
-                receiver.receiver_name,
-                "order_status_update",
-                item.item_ref,
-              ],
-            );
-          }
-
-          if (item.sender_id && item.sender_email && statusSendEmail) {
-            await client.query(
-              `
-              INSERT INTO email_queue (
-                order_id, recipient_id, recipient_type,
-                recipient_email, recipient_name, email_type, status, item_ref
-              ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-              `,
-              [
-                item.order_id,
-                item.sender_id,
-                "sender",
-                item.sender_email,
-                item.sender_name,
-                "order_status_update",
-                item.item_ref,
-              ],
-            );
-          }
-        }
-
-        await client.query(
-          `
-          UPDATE receivers
-            SET status = $1,
-                eta = $2
-          WHERE id = $3
-          `,
-          [order_status, eta, receiverId],
-        );
-      }
+      const eta = statusRow.order_status
+        ? ((await calculateETA(client, statusRow.order_status))?.eta ?? null)
+        : null;
+      await applyContainerStatus(client, {
+        cid: Number(cid),
+        currentStatus: current_status,
+        statusRow,
+        eta,
+        createdBy: created_by,
+      });
     }
 
     await client.query("COMMIT");

@@ -1,6 +1,16 @@
+const esc = (v) =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
 export const buildConfirmationEmailHtml = ({
   recipientName,
   senderName,
+  receiverName,
+  partyRole,
+  message,
   companyName,
   companyLogo,
   mode,
@@ -11,11 +21,20 @@ export const buildConfirmationEmailHtml = ({
   otp,
   items,
 }) => {
-  const safeName = recipientName?.trim() || "Customer";
-  const safeCompany = companyName?.trim() || "Royal Gulf Shipping & Logistics";
+  const safeName = esc(recipientName?.trim() || "Customer");
+  const safeCompany = esc(
+    companyName?.trim() || "Royal Gulf Shipping & Logistics",
+  );
   const safeLogo =
     companyLogo ||
     "https://royalgulfshipping.com/wp-content/uploads/2023/08/RGSL-LOGO.png";
+
+  const isSenderParty = partyRole === "sender";
+  const otherParty = esc(isSenderParty ? receiverName : senderName);
+  const introText = `${safeCompany} has prepared a booking confirmation in which you are named as the ${isSenderParty ? "sender" : "receiver"}${otherParty ? `, ${isSenderParty ? "shipping to" : "receiving from"} ${otherParty}` : ""}. Please review the details below and complete your form using the button.`;
+  const messageSection = message?.trim()
+    ? `<div class="info-box" style="margin-top: 0; margin-bottom: 24px;"><p style="margin: 0; white-space: pre-line;">${esc(message.trim())}</p></div>`
+    : "";
 
   const itemsRows =
     Array.isArray(items) && items.length
@@ -23,13 +42,13 @@ export const buildConfirmationEmailHtml = ({
           .map(
             (it) => `
         <tr>
-          <td>${it.category || "—"}</td>
-          <td>${it.subcategory || "—"}</td>
-          <td>${it.type || "—"}</td>
+          <td>${esc(it.category) || "—"}</td>
+          <td>${esc(it.subcategory) || "—"}</td>
+          <td>${esc(it.type) || "—"}</td>
           <td>${it.qty ?? "—"}</td>
           <td>${it.weight ?? "—"} KG</td>
-          <td>${it.placeOfLoading || "—"}</td>
-          <td>${it.placeOfDestination || "—"}</td>
+          <td>${esc(it.placeOfLoading) || "—"}</td>
+          <td>${esc(it.placeOfDestination) || "—"}</td>
         </tr>`,
           )
           .join("")
@@ -119,7 +138,8 @@ export const buildConfirmationEmailHtml = ({
   </div>
   <div class="content">
     <p class="greeting">Dear ${safeName},</p>
-    <p class="body-text">Please find your booking confirmation details below from ${senderName || "our team"} at ${safeCompany}.</p>
+    <p class="body-text">${introText}</p>
+    ${messageSection}
     <div class="btn-wrapper">
         <a class="btn" href="${viewLink}" style="display: inline-block; background: #097D76; color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 40px; font-weight: 600; font-size: 16px;">
             <i class="fas fa-file-invoice btn-icon"></i>
@@ -155,7 +175,7 @@ export const buildConfirmationEmailHtml = ({
     <img src="${safeLogo}" alt="${safeCompany}" class="footer-logo">
     <div class="footer-text">
       ${safeCompany}<br>
-      This document was sent by ${senderName || "our team"}. If the button above doesn't work, contact us directly.
+      This email was sent on behalf of ${safeCompany}. If the button above doesn't work, contact us directly.
     </div>
     <div class="footer-divider"></div>
     <div class="footer-copyright">
