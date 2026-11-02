@@ -774,7 +774,7 @@ export const getOrderBilling = async (req, res) => {
 
   try {
     const orderRes = await pool.query(
-      "SELECT id, booking_ref, rgl_booking_number FROM orders WHERE id = $1",
+      "SELECT id, booking_ref, rgl_booking_number, created_at FROM orders WHERE id = $1",
       [orderId],
     );
     const order = orderRes.rows[0];
@@ -785,14 +785,6 @@ export const getOrderBilling = async (req, res) => {
     }
 
     const orderKey = key(order.rgl_booking_number);
-    const linkRes = await pool.query(
-      `SELECT DISTINCT lower(btrim(c.consignment_number)) AS cn
-         FROM container_assignment_history h
-         JOIN consignments c ON c.id = h.consignment_id
-        WHERE h.order_id = $1`,
-      [orderId],
-    );
-    const linkedCons = linkRes.rows.map((r) => r.cn).filter(Boolean);
 
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
@@ -802,23 +794,23 @@ export const getOrderBilling = async (req, res) => {
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
-           FROM zoho_invoices
+          FROM zoho_invoices
           WHERE lower(btrim(order_number)) = $1
-            AND lower(btrim(consignment_number)) = ANY($2::text[])
           ORDER BY invoice_date, id`,
-        [orderKey, linkedCons],
+        [orderKey],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
-                vendor_name AS vendor, status, currency_code AS currency,
-                total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
-                order_number, consignment_number AS "consignmentNumber",
-                to_char(bill_date, 'YYYY-MM-DD') AS date,
-                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
-           FROM zoho_bills
-          WHERE lower(btrim(bill_number)) = $1
-          ORDER BY bill_date, id`,
-        [orderKey],
+              vendor_name AS vendor, status, currency_code AS currency,
+              total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
+              order_number, consignment_number AS "consignmentNumber",
+              to_char(bill_date, 'YYYY-MM-DD') AS date,
+              to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+              FROM zoho_bills
+           WHERE lower(btrim(bill_number)) = $1
+           AND bill_date >= ($2::timestamptz - INTERVAL '30 days')::date
+         ORDER BY bill_date, id`,
+        [orderKey, order.created_at],
       ),
       pool.query(
         "SELECT id, receiver_name FROM receivers WHERE order_id = $1",
