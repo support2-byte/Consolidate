@@ -114,6 +114,13 @@ const lockPending = async (client, id) => {
 export const addGraceDays = async (req, res) => {
   const client = await pool.connect();
   try {
+    const manualEta = (req.body?.eta || "").trim();
+    if (manualEta && !/^\d{4}-\d{2}-\d{2}$/.test(manualEta)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "eta must be YYYY-MM-DD" });
+    }
+
     await client.query("BEGIN");
     const { n, m, error } = await lockPending(client, req.params.id);
     if (error) {
@@ -128,32 +135,58 @@ export const addGraceDays = async (req, res) => {
       });
     }
 
-    const cfg = await client.query(
-      `SELECT COALESCE(grace_days, 0) AS grace_days FROM statuses WHERE order_status = $1 LIMIT 1`,
-      [n.status],
+    const cur = await client.query(
+      `SELECT id, eta::date::text AS eta,
+              GREATEST(eta::date, CURRENT_DATE)::text AS base,
+              (GREATEST(eta::date, CURRENT_DATE) + 30)::text AS max_eta
+         FROM order_tracking
+        WHERE receiver_id = $1 AND item_ref = $2
+        ORDER BY id DESC LIMIT 1`,
+      [n.receiver_id, n.item_ref],
     );
-    const days = Number(cfg.rows[0]?.grace_days || 0);
-    if (days < 1) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: `No grace days configured for "${n.status}" in ETA Setup.`,
-      });
-    }
-
-    const eta = await client.query(
-      `UPDATE order_tracking SET eta = eta::date + $1::int
-       WHERE id = (SELECT id FROM order_tracking WHERE receiver_id = $2 AND item_ref = $3
-                   ORDER BY id DESC LIMIT 1)
-       RETURNING eta`,
-      [days, n.receiver_id, n.item_ref],
-    );
-    if (!eta.rowCount || !eta.rows[0].eta) {
+    if (!cur.rowCount || !cur.rows[0].eta) {
       await client.query("ROLLBACK");
       return res
         .status(400)
         .json({ success: false, message: "No ETA found for this item." });
     }
+    const t = cur.rows[0];
+
+    let days = 0;
+    let newEta;
+    if (manualEta) {
+      if (manualEta < t.base || manualEta > t.max_eta) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          success: false,
+          message: `ETA must be between ${t.base} and ${t.max_eta}`,
+        });
+      }
+      newEta = manualEta;
+    } else {
+      const cfg = await client.query(
+        `SELECT COALESCE(grace_days, 0) AS grace_days FROM statuses WHERE order_status = $1 LIMIT 1`,
+        [n.status],
+      );
+      days = Number(cfg.rows[0]?.grace_days || 0);
+      if (days < 1) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          success: false,
+          message: `No grace days configured for "${n.status}" in ETA Setup.`,
+        });
+      }
+      const calc = await client.query(
+        `SELECT ($1::date + $2::int)::text AS d`,
+        [t.eta, days],
+      );
+      newEta = calc.rows[0].d;
+    }
+
+    await client.query(
+      `UPDATE order_tracking SET eta = $1::date WHERE id = $2`,
+      [newEta, t.id],
+    );
 
     const used = m.grace_used + 1;
     await client.query(
@@ -172,14 +205,21 @@ export const addGraceDays = async (req, res) => {
         n.order_item_id,
         n.status,
         used,
-        eta.rows[0].eta,
-        `Admin added ${days} grace day(s). Grace ${used}/${MAX_GRACE}.`,
+        newEta,
+        manualEta
+          ? `Admin set ETA manually to ${newEta}. Grace ${used}/${MAX_GRACE}.`
+          : `Admin added ${days} grace day(s). Grace ${used}/${MAX_GRACE}.`,
         actor(req),
       ],
     );
 
     await client.query("COMMIT");
-    return res.json({ success: true, message: `Added ${days} grace day(s).` });
+    return res.json({
+      success: true,
+      message: manualEta
+        ? `ETA updated to ${newEta}.`
+        : `Added ${days} grace day(s).`,
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     return fail(res, err, "eta add grace");
