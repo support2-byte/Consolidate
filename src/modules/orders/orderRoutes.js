@@ -28,6 +28,7 @@ import {
   updateCollectionStatus,
   createGatepass,
   getGatepassesForCollection,
+  updateItemEta,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -473,6 +474,8 @@ router.put(
   requireAuth,
   updateSpecificItemsStatus,
 );
+
+router.put("/:orderId/items/:itemRef/eta", requireAuth, updateItemEta);
 
 /**
  * @swagger
