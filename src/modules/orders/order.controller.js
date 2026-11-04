@@ -794,10 +794,18 @@ export async function updateOrder(req, res) {
     const receiverIdMap = {};
 
     const existingReceiversRes = await client.query(
-      `SELECT id FROM receivers WHERE order_id = $1 ORDER BY id`,
+      `SELECT id, eta::text AS eta, etd::text AS etd
+     FROM receivers WHERE order_id = $1 ORDER BY id`,
       [id],
     );
     const existingReceiverIds = existingReceiversRes.rows.map((r) => r.id);
+    const prevReceiverDates = {};
+    existingReceiversRes.rows.forEach((r) => {
+      prevReceiverDates[r.id] = {
+        eta: String(r.eta || "").slice(0, 10),
+        etd: String(r.etd || "").slice(0, 10),
+      };
+    });
 
     for (let i = 0; i < incomingReceivers.length; i++) {
       const rec = incomingReceivers[i];
@@ -876,49 +884,69 @@ export async function updateOrder(req, res) {
 
       receiverIdMap[String(i)] = receiverId;
 
-      if (etd) {
-        await client.query(
-          `
-          UPDATE order_tracking
-             SET etd = $1
-           WHERE id = (
-             SELECT id
-             FROM order_tracking
-             WHERE order_id = $2
-               AND receiver_id = $3
-             ORDER BY created_time DESC
-             LIMIT 1
-           )
-        `,
-          [etd, id, receiverId],
-        );
-      }
-
       const itemsForThisReceiver = incomingOrderItems.filter(
         (item) =>
           String(item.receiver_index ?? item.receiverIndex) === String(i),
       );
+
+      const prevDates = prevReceiverDates[receiverId] || { eta: "", etd: "" };
+      const etaChanged = !!eta && String(eta).slice(0, 10) !== prevDates.eta;
+      const etdChanged = !!etd && String(etd).slice(0, 10) !== prevDates.etd;
 
       for (const item of itemsForThisReceiver) {
         const containerDetailsJson = item.container_details
           ? JSON.stringify(item.container_details)
           : "[]";
 
-        const itemRef =
+        const existingItemId = item.existing_id || null;
+        let itemRef =
           item.item_ref ||
           `ITEM-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const existingItemId = item.existing_id || null;
+        let handled = false;
 
         if (existingItemId) {
-          const newItemTrackingId = await generateItemTrackingId(
-            client,
-            new Set(),
+          const upd = await client.query(
+            `UPDATE order_items SET
+         receiver_id      = $3,
+         total_number     = COALESCE($4, total_number),
+         weight           = COALESCE($5, weight),
+         total_weight     = COALESCE($6, total_weight),
+         category         = COALESCE($7, category),
+         subcategory      = COALESCE($8, subcategory),
+         type             = COALESCE($9, type),
+         pickup_location  = COALESCE($10, pickup_location),
+         delivery_address = COALESCE($11, delivery_address),
+         shipping_line    = COALESCE($12, shipping_line),
+         updated_at       = NOW()
+       WHERE id = $1 AND order_id = $2
+       RETURNING item_ref`,
+            [
+              existingItemId,
+              id,
+              receiverId,
+              item.total_number || null,
+              item.weight || null,
+              item.total_weight || null,
+              item.category || null,
+              item.subcategory || null,
+              item.type || null,
+              item.pickup_location || null,
+              item.delivery_address || null,
+              item.shipping_line || null,
+            ],
           );
+          if (upd.rowCount > 0) {
+            itemRef = upd.rows[0].item_ref || itemRef;
+            handled = true;
+          }
+        }
+
+        if (!handled) {
           await client.query(
             `INSERT INTO order_items (order_id, receiver_id, total_number, weight, total_weight,
-              container_details, category, subcategory, type, pickup_location, 
-              delivery_address, shipping_line, item_ref, tracking_id, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())`,
+        container_details, category, subcategory, type, pickup_location, 
+        delivery_address, shipping_line, item_ref, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
             [
               id,
               receiverId,
@@ -933,30 +961,22 @@ export async function updateOrder(req, res) {
               item.delivery_address || null,
               item.shipping_line || null,
               itemRef,
-              newItemTrackingId,
             ],
           );
-        } else {
+        }
+
+        if (handled && (etaChanged || etdChanged)) {
           await client.query(
-            `INSERT INTO order_items (order_id, receiver_id, total_number, weight, total_weight,
-              container_details, category, subcategory, type, pickup_location, 
-              delivery_address, shipping_line, item_ref, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())`,
-            [
-              id,
-              receiverId,
-              item.total_number || null,
-              item.weight || null,
-              item.total_weight || null,
-              containerDetailsJson,
-              item.category || null,
-              item.subcategory || null,
-              item.type || null,
-              item.pickup_location || null,
-              item.delivery_address || null,
-              item.shipping_line || null,
-              itemRef,
-            ],
+            `UPDATE order_tracking
+          SET eta = CASE WHEN $3::boolean THEN $4::date ELSE eta END,
+              etd = CASE WHEN $5::boolean THEN $6::date ELSE etd END
+        WHERE id = (
+          SELECT id FROM order_tracking
+           WHERE order_id = $1 AND item_ref = $2
+           ORDER BY created_time DESC
+           LIMIT 1
+        )`,
+            [id, itemRef, etaChanged, eta, etdChanged, etd],
           );
         }
       }
@@ -1577,23 +1597,41 @@ export async function getOrdersConsignments(req, res) {
       )`;
     }
 
+    const assignedRows = `
+      SELECT x.* FROM (
+        SELECT DISTINCT ON (h.cid, h.consignment_id)
+          h.cid, h.consignment_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.detail_id = oi.id
+        ORDER BY h.cid, h.consignment_id, h.id DESC
+      ) x
+      WHERE x.action_type = 'ASSIGN'
+    `;
+
     const containerDetailsSub = `
       COALESCE((
         SELECT json_agg(json_build_object(
           'status', COALESCE(cs.derived_status, 'Created'),
-          'container', json_build_object('cid', (cd_obj->'container'->>'cid')::int, 'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')),
-          'assign_weight',   COALESCE(cd_obj->>'assign_weight',   '0'),
-          'assign_total_box',COALESCE(cd_obj->>'assign_total_box','0')
-        ) ORDER BY COALESCE(cd_obj->'container'->>'container_number', ''))
-        FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
+          'container', json_build_object('cid', ar.cid, 'container_number', COALESCE(cm2.container_number, 'Unknown')),
+          'assign_weight', COALESCE(ar.assigned_weight_kg, 0)::text,
+          'assign_total_box', COALESCE(ar.assigned_qty, 0)::text,
+          'consignment_id', ar.consignment_id
+        ) ORDER BY COALESCE(cm2.container_number, ''))
+        FROM (${assignedRows}) ar
+        LEFT JOIN container_master cm2 ON cm2.cid = ar.cid
         LEFT JOIN LATERAL (
           SELECT availability AS derived_status
           FROM container_status
-          WHERE cid = (cd_obj->'container'->>'cid')::int
+          WHERE cid = ar.cid
           ORDER BY sid DESC NULLS LAST LIMIT 1
         ) cs ON true
-        WHERE (cd_obj->'container'->>'cid') ~ '^[0-9]+$'
-              ), '[]'::json)
+      ), '[]'::json)
+    `;
+
+    const remainingItemsSub = `
+      COALESCE(oi.total_number, 0) - COALESCE((
+        SELECT SUM(ar.assigned_qty) FROM (${assignedRows}) ar
+      ), 0)
     `;
 
     const shippingDetailsSub = consignment_id
@@ -1608,10 +1646,7 @@ export async function getOrdersConsignments(req, res) {
         'totalNumber', COALESCE(oi.total_number, 0),
         'weight', COALESCE(oi.weight, 0),
         'containerDetails',${containerDetailsSub},
-        'remainingItems',  COALESCE(oi.total_number, 0) - COALESCE((
-            SELECT SUM((cd_obj->>'assign_total_box')::int)
-            FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-          ), 0)
+        'remainingItems',  ${remainingItemsSub}
       ) ORDER BY oi.id), '[]'::json)
       FROM order_items oi
       WHERE oi.receiver_id = r.id
@@ -1631,10 +1666,7 @@ export async function getOrdersConsignments(req, res) {
         'totalNumber', COALESCE(oi.total_number, 0),
         'weight', COALESCE(oi.weight, 0),
         'containerDetails',${containerDetailsSub},
-        'remainingItems',  COALESCE(oi.total_number, 0) - COALESCE((
-            SELECT SUM((cd_obj->>'assign_total_box')::int)
-            FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-          ), 0)
+        'remainingItems',  ${remainingItemsSub}
       ) ORDER BY oi.id), '[]'::json)
       FROM order_items oi
       WHERE oi.receiver_id = r.id)
@@ -1786,40 +1818,44 @@ export async function getOrderById(req, res) {
 
     const orderRow = orderResult.rows[0];
 
+    const assignedRows = `
+      SELECT x.* FROM (
+        SELECT DISTINCT ON (h.cid, h.consignment_id)
+          h.cid, h.consignment_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.detail_id = oi.id
+        ORDER BY h.cid, h.consignment_id, h.id DESC
+      ) x
+      WHERE x.action_type = 'ASSIGN'
+    `;
+
     const containerDetailsSub = `
       COALESCE((
         SELECT json_agg(
           jsonb_build_object(
             'status',          COALESCE(cs.derived_status, 'Created'),
             'container',       jsonb_build_object(
-              'cid',           (elem->'container'->>'cid')::int,
-              'container_number', COALESCE(elem->'container'->>'container_number', '')
+              'cid',           ar.cid,
+              'container_number', COALESCE(cm2.container_number, '')
             ),
-            'total_number',    COALESCE((elem->>'total_number')::int, 0),
-            'assign_weight',   COALESCE(elem->>'assign_weight', '0'),
-            'remaining_items', COALESCE((elem->>'remaining_items')::int, 0),
-            'assign_total_box', COALESCE(elem->>'assign_total_box', '0'),
+            'total_number',    COALESCE(oi.total_number, 0)::int,
+            'assign_weight',   COALESCE(ar.assigned_weight_kg, 0)::text,
+            'remaining_items', GREATEST(0, COALESCE(oi.total_number, 0)::int - COALESCE((
+              SELECT SUM(a2.assigned_qty) FROM (${assignedRows}) a2
+            ), 0))::int,
+            'assign_total_box', COALESCE(ar.assigned_qty, 0)::text,
             'consignment_number', cons.consignment_number
-          ) ORDER BY (elem->'container'->>'container_number')
+          ) ORDER BY cm2.container_number
         )
-        FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) elem
+        FROM (${assignedRows}) ar
+        LEFT JOIN container_master cm2 ON cm2.cid = ar.cid
+        LEFT JOIN consignments cons ON cons.id = ar.consignment_id
         LEFT JOIN LATERAL (
           SELECT availability AS derived_status
           FROM container_status
-          WHERE cid = (elem->'container'->>'cid')::int
+          WHERE cid = ar.cid
           ORDER BY sid DESC NULLS LAST LIMIT 1
         ) cs ON true
-        LEFT JOIN LATERAL (
-          SELECT cah.consignment_id
-          FROM container_assignment_history cah
-          WHERE cah.order_id = oi.order_id
-            AND cah.cid = (elem->'container'->>'cid')::int
-            AND cah.detail_id = oi.id
-          ORDER BY cah.id DESC
-          LIMIT 1
-        ) cah ON true
-        LEFT JOIN consignments cons ON cons.id = cah.consignment_id
-        WHERE (elem->'container'->>'cid') ~ '^[0-9]+$'
       ), '[]'::json)
     `;
 
@@ -1868,8 +1904,7 @@ export async function getOrderById(req, res) {
             0,
             COALESCE(oi.total_number, 0)::int -
             COALESCE((
-              SELECT SUM((cd->>'assign_total_box')::int)
-              FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd
+              SELECT SUM(ar.assigned_qty) FROM (${assignedRows}) ar
             ), 0)
           )::int,
 
@@ -3741,6 +3776,88 @@ export async function notifySpecificItemsStatus(req, res) {
       .json({ error: "Failed to queue notifications", details: err.message });
   }
 }
+
+export const updateItemEta = async (req, res) => {
+  const { orderId, itemRef } = req.params;
+  const { eta } = req.body || {};
+
+  if (!eta || !/^\d{4}-\d{2}-\d{2}$/.test(eta)) {
+    return res.status(400).json({
+      success: false,
+      message: "eta is required in YYYY-MM-DD format",
+    });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const cur = await client.query(
+      `SELECT eta::date::text AS eta,
+          GREATEST(eta::date, CURRENT_DATE)::text AS base,
+          (GREATEST(eta::date, CURRENT_DATE) + 30)::text AS max_eta,
+          CURRENT_DATE::text AS today
+     FROM order_tracking
+    WHERE order_id = $1 AND item_ref = $2
+    ORDER BY created_time DESC
+    LIMIT 1`,
+      [Number(orderId), itemRef],
+    );
+    if (cur.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "No tracking record found for this item",
+      });
+    }
+    if (eta < cur.rows[0].today || eta > cur.rows[0].max_eta) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        message: `ETA must be between ${cur.rows[0].today} and ${cur.rows[0].max_eta}`,
+      });
+    }
+
+    const result = await client.query(
+      `UPDATE order_tracking
+          SET eta = $3::date
+        WHERE id = (
+          SELECT id FROM order_tracking
+           WHERE order_id = $1 AND item_ref = $2
+           ORDER BY created_time DESC
+           LIMIT 1
+        )
+        RETURNING id, eta`,
+      [Number(orderId), itemRef, eta],
+    );
+
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "No tracking record found for this item",
+      });
+    }
+
+    await client.query("COMMIT");
+    return res.status(200).json({
+      success: true,
+      message: "ETA updated successfully",
+      eta: result.rows[0].eta,
+    });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    logger.error("updateItemEta error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update ETA",
+      details: err.message,
+    });
+  } finally {
+    if (client) client.release();
+  }
+};
 
 export async function getOrderByItemRef(req, res) {
   const { ref } = req.params;
