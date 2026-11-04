@@ -82,38 +82,15 @@ export const getZohoDueContext = async ({ type, itemRef, customerRef }) => {
             balance::float8 AS balance,
             to_char(invoice_date, 'YYYY-MM-DD') AS date,
             to_char(due_date, 'YYYY-MM-DD') AS due_date
-       FROM zoho_invoices
-      WHERE btrim(order_number) = $1
+      FROM zoho_invoices
+      WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
       ORDER BY invoice_date, id`,
-    [orderNumber],
+    [orderNumber.toLowerCase()],
   );
 
-  const linkRes = await pool.query(
-    `SELECT DISTINCT c.consignment_number
-       FROM container_assignment_history h
-       JOIN consignments c ON c.id = h.consignment_id
-      WHERE h.order_id = $1`,
-    [order.id],
+  const matches = candidates.filter(
+    (m) => normalizeName(m.customer_name) === normalizeName(customerName),
   );
-  const linked = new Set(
-    linkRes.rows.map((r) => normalize(r.consignment_number)),
-  );
-
-  const matches = candidates.filter((m) => {
-    if (normalizeName(m.customer_name) !== normalizeName(customerName)) {
-      return false;
-    }
-    if (!m.consignment_number) return true;
-    const ok = linked.has(normalize(m.consignment_number));
-    if (!ok) {
-      logger.warn("Zoho invoice consignment not linked to order", {
-        orderNumber,
-        zohoInvoice: m.invoice_number,
-        consignmentNumber: m.consignment_number,
-      });
-    }
-    return ok;
-  });
 
   const open = matches.filter((m) => !["paid", "void"].includes(m.status));
   if (open.length) {
