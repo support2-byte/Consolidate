@@ -9,6 +9,8 @@ import {
   withRetry,
   syncInvoicesForConsignment,
   syncInvoicesForOrder,
+  stripConsignmentPrefix,
+  baseOrderNumber,
 } from "./zoho-invoice.controller.js";
 
 const EXCLUDED_STATUSES = ["void", "draft"];
@@ -48,6 +50,26 @@ const BILL_UPSERT_SQL = `
     exchange_rate = COALESCE(EXCLUDED.exchange_rate, zoho_bills.exchange_rate),
     synced_at = NOW()
 `;
+
+const BILL_ORDER_FIELD =
+  process.env.ZOHO_BILL_ORDER_FILTER || "cf_bb_order_number";
+const BILL_CONSIGNMENT_FIELD =
+  process.env.ZOHO_BILL_CONSIGNMENT_FILTER || "cf_bb_consignment_number";
+
+const billCustom = (bill, apiName, label) => {
+  const direct = bill?.[apiName];
+  if (direct != null && String(direct).trim() !== "") {
+    return String(direct).trim();
+  }
+  const f = (bill?.custom_fields || []).find(
+    (c) =>
+      c.api_name === apiName ||
+      (label && c.label?.trim().toLowerCase() === label),
+  );
+  return f?.value != null && String(f.value).trim() !== ""
+    ? String(f.value).trim()
+    : null;
+};
 
 const fetchAllZohoBillList = async (
   token,
@@ -106,7 +128,10 @@ const syncBillRows = async (list, token) => {
 
   await mapWithLimit(changed, 2, async (b) => {
     let rate = b.currency_code === "AED" ? 1 : Number(b.exchange_rate) || null;
-    if (!rate) {
+    let orderNumber = billCustom(b, BILL_ORDER_FIELD, "");
+    let consignmentNumber = billCustom(b, BILL_CONSIGNMENT_FIELD, "");
+
+    if (!rate || !orderNumber || !consignmentNumber) {
       try {
         const r = await withRetry(() =>
           axios.get(`${getBooksBaseUrl()}/bills/${b.bill_id}`, {
@@ -114,7 +139,11 @@ const syncBillRows = async (list, token) => {
             params: zohoParams(),
           }),
         );
-        rate = Number(r.data?.bill?.exchange_rate) || null;
+        const detail = r.data?.bill;
+        rate = rate || Number(detail?.exchange_rate) || null;
+        orderNumber = orderNumber || billCustom(detail, BILL_ORDER_FIELD, "");
+        consignmentNumber =
+          consignmentNumber || billCustom(detail, BILL_CONSIGNMENT_FIELD, "");
       } catch (err) {
         logger.error("Failed to fetch Zoho bill detail", {
           billId: b.bill_id,
@@ -127,6 +156,8 @@ const syncBillRows = async (list, token) => {
       bill: b.bill_number,
       currency: b.currency_code,
       rate,
+      orderNumber,
+      consignmentNumber,
     });
 
     await pool.query(BILL_UPSERT_SQL, [
@@ -141,8 +172,8 @@ const syncBillRows = async (list, token) => {
       b.currency_code,
       b.total ?? 0,
       b.balance ?? 0,
-      b.bill_number,
-      null,
+      orderNumber,
+      stripConsignmentPrefix(consignmentNumber) || null,
       b.last_modified_time || null,
       rate,
     ]);
@@ -166,80 +197,50 @@ export const runZohoBillSync = async () => {
   return { synced, total: list.length };
 };
 
-const syncBillsForConsignment = async (consignmentNumber, token) => {
-  const forms = await getConsignmentFormNumbers(consignmentNumber);
-  logger.info("[BILL] start", { consignmentNumber, forms });
-
-  const counts = await mapWithLimit(forms, 2, async (formNo) => {
-    const wantedForm = key(formNo);
-
-    const attempt = async (label, filters) => {
-      try {
-        const list = await fetchAllZohoBillList(token, filters, 1);
-        const exact = list.filter((b) => key(b.bill_number) === wantedForm);
-        logger.info("[BILL] lookup", {
-          formNo,
-          label,
-          filters,
-          listed: list.length,
-          exact: exact.length,
-          sampleBillNumbers: list.slice(0, 5).map((b) => b.bill_number),
-          sampleReferences: list.slice(0, 5).map((b) => b.reference_number),
-        });
-        return exact;
-      } catch (err) {
-        logger.error("[BILL] lookup failed", {
-          formNo,
-          label,
-          filters,
-          status: err.response?.status,
-          err: err.response?.data || err.message,
-        });
-        return [];
-      }
-    };
-
-    const exact = await attempt("bill_number equals", { bill_number: formNo });
-    if (!exact.length) return 0;
-
-    const synced = await syncBillRows(exact, token);
-    logger.info("[BILL] saved", { formNo, changedRows: synced });
-    return synced;
-  });
-
-  return counts.reduce((s, n) => s + n, 0);
-};
-
 const syncBillsForOrder = async (formNo, token) => {
   const wantedForm = key(formNo);
   if (!wantedForm) return 0;
 
-  const attempt = async (label, filters) => {
-    try {
-      const list = await fetchAllZohoBillList(token, filters, 1);
-      const exact = list.filter((b) => key(b.bill_number) === wantedForm);
-      logger.info("[BILL-ORDER] lookup", {
-        formNo,
-        label,
-        listed: list.length,
-        exact: exact.length,
-      });
-      return exact;
-    } catch (err) {
-      logger.error("[BILL-ORDER] lookup failed", {
-        formNo,
-        label,
-        status: err.response?.status,
-        err: err.response?.data || err.message,
-      });
-      return [];
-    }
-  };
+  try {
+    const list = await fetchAllZohoBillList(
+      token,
+      { [BILL_ORDER_FIELD]: formNo },
+      1,
+    );
 
-  const exact = await attempt("bill_number equals", { bill_number: formNo });
-  if (!exact.length) return 0;
+    const matched = list.filter((b) => {
+      const v = String(b[BILL_ORDER_FIELD] ?? "").trim();
+      return v && baseOrderNumber(v) === wantedForm;
+    });
 
-  return syncBillRows(exact, token);
+    logger.info("[BILL-ORDER] lookup", {
+      formNo,
+      returned: list.length,
+      matched: matched.length,
+      sampleOrderValues: list
+        .slice(0, 3)
+        .map((b) => b[BILL_ORDER_FIELD] ?? null),
+    });
+
+    if (!matched.length) return 0;
+    return await syncBillRows(matched, token);
+  } catch (err) {
+    logger.error("[BILL-ORDER] lookup failed", {
+      formNo,
+      status: err.response?.status,
+      err: err.response?.data || err.message,
+    });
+    return 0;
+  }
+};
+
+const syncBillsForConsignment = async (consignmentNumber, token) => {
+  const forms = await getConsignmentFormNumbers(consignmentNumber);
+  logger.info("[BILL] start", { consignmentNumber, forms });
+  const counts = await mapWithLimit(forms, 2, (formNo) =>
+    syncBillsForOrder(formNo, token),
+  );
+  return counts.reduce((s, n) => s + n, 0);
 };
 
 const CONSIGNMENT_SYNC_TTL_MS = 60_000;
@@ -376,7 +377,7 @@ export const getZohoBillPdf = async (req, res) => {
 
 const groupByOrder = (docs) =>
   docs.reduce((acc, d) => {
-    const k = key(d.order_number);
+    const k = baseOrderNumber(d.order_number);
     (acc[k] = acc[k] || []).push(d);
     return acc;
   }, {});
@@ -439,7 +440,7 @@ export const getReceiverPayments = async (orderId) => {
           `SELECT customer_name AS customer, status,
                   total::float8 AS total, balance::float8 AS balance
              FROM zoho_invoices
-            WHERE lower(btrim(order_number)) = $1`,
+              WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
           [orderKey],
         )
       : { rows: [] },
@@ -709,6 +710,8 @@ export const getConsignmentBilling = async (req, res) => {
     const orderKeys = orders.map((o) => key(o.rgl_booking_number));
     const consKey = key(consignmentNumber);
 
+    const billConsKey = stripConsignmentPrefix(consKey);
+
     const [invRes, billRes] = await Promise.all([
       pool.query(
         `SELECT zoho_invoice_id AS id, invoice_number AS number,
@@ -719,23 +722,23 @@ export const getConsignmentBilling = async (req, res) => {
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
            FROM zoho_invoices
-          WHERE lower(btrim(consignment_number)) = $1
-            AND lower(btrim(order_number)) = ANY($2::text[])
+          WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = ANY($1::text[])
           ORDER BY invoice_date, id`,
-        [consKey, orderKeys],
+        [orderKeys],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
                 vendor_name AS vendor, status, currency_code AS currency,
                 total::float8 AS total, balance::float8 AS balance,
                 exchange_rate::float8 AS "exchangeRate",
-                bill_number AS order_number,
+                order_number,
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
            FROM zoho_bills
-          WHERE lower(btrim(bill_number)) = ANY($1::text[])
+          WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = ANY($1::text[])
+            AND lower(btrim(consignment_number)) = $2
           ORDER BY bill_date, id`,
-        [orderKeys],
+        [orderKeys, billConsKey],
       ),
     ]);
 
@@ -774,7 +777,7 @@ export const getOrderBilling = async (req, res) => {
 
   try {
     const orderRes = await pool.query(
-      "SELECT id, booking_ref, rgl_booking_number, created_at FROM orders WHERE id = $1",
+      "SELECT id, booking_ref, rgl_booking_number FROM orders WHERE id = $1",
       [orderId],
     );
     const order = orderRes.rows[0];
@@ -786,6 +789,17 @@ export const getOrderBilling = async (req, res) => {
 
     const orderKey = key(order.rgl_booking_number);
 
+    const linkRes = await pool.query(
+      `SELECT DISTINCT lower(btrim(c.consignment_number)) AS cn
+         FROM container_assignment_history h
+         JOIN consignments c ON c.id = h.consignment_id
+        WHERE h.order_id = $1`,
+      [orderId],
+    );
+    const linkedCons = linkRes.rows
+      .map((r) => stripConsignmentPrefix(r.cn).toLowerCase())
+      .filter(Boolean);
+
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
         `SELECT zoho_invoice_id AS id, invoice_number AS number,
@@ -794,23 +808,23 @@ export const getOrderBilling = async (req, res) => {
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
-          FROM zoho_invoices
-          WHERE lower(btrim(order_number)) = $1
+           FROM zoho_invoices
+          WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
           ORDER BY invoice_date, id`,
         [orderKey],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
-              vendor_name AS vendor, status, currency_code AS currency,
-              total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
-              order_number, consignment_number AS "consignmentNumber",
-              to_char(bill_date, 'YYYY-MM-DD') AS date,
-              to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
-              FROM zoho_bills
-           WHERE lower(btrim(bill_number)) = $1
-           AND bill_date >= ($2::timestamptz - INTERVAL '30 days')::date
-         ORDER BY bill_date, id`,
-        [orderKey, order.created_at],
+                vendor_name AS vendor, status, currency_code AS currency,
+                total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
+                order_number, consignment_number AS "consignmentNumber",
+                to_char(bill_date, 'YYYY-MM-DD') AS date,
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+           FROM zoho_bills
+          WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
+            AND lower(btrim(consignment_number)) = ANY($2::text[])
+          ORDER BY bill_date, id`,
+        [orderKey, linkedCons],
       ),
       pool.query(
         "SELECT id, receiver_name FROM receivers WHERE order_id = $1",

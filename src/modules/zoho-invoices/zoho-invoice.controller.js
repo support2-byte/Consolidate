@@ -22,6 +22,12 @@ export const stripConsignmentPrefix = (v) =>
 
 export const toZohoConsignment = (v) => `C${stripConsignmentPrefix(v)}`;
 
+export const baseOrderNumber = (v) =>
+  String(v ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[a-z]+$/, "");
+
 export const mapWithLimit = async (items, limit, fn) => {
   const results = new Array(items.length);
   let i = 0;
@@ -363,128 +369,65 @@ export const getConsignmentFormNumbers = async (consignmentNumber) => {
   return rows.map((r) => r.form_no);
 };
 
-export const syncInvoicesForConsignment = async (consignmentNumber, token) => {
+const scanInvoicesForForms = async (token, forms, maxPages = 5) => {
   const orderFilter =
     process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
-  const wanted = stripConsignmentPrefix(consignmentNumber).toLowerCase();
-  const forms = await getConsignmentFormNumbers(consignmentNumber);
+  const wanted = forms
+    .map((f) =>
+      String(f ?? "")
+        .trim()
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+  if (!wanted.length) return [];
 
-  logger.info("[INV] start", {
-    consignmentNumber,
-    zohoConsignment: toZohoConsignment(consignmentNumber),
-    forms,
-    orderFilter,
-  });
-  if (!forms.length) {
-    logger.warn("[INV] no form numbers found in DB for this consignment");
-    return 0;
-  }
-
-  const counts = await mapWithLimit(forms, 2, async (formNo) => {
-    const wantedForm = formNo.trim().toLowerCase();
-
-    const attempt = async (label, filters) => {
-      try {
-        const list = await fetchAllZohoInvoiceList(token, filters, 1);
-        const exact = list.filter(
-          (i) =>
-            String(i[orderFilter] ?? "")
-              .trim()
-              .toLowerCase() === wantedForm,
-        );
-        logger.info("[INV] lookup", {
-          formNo,
-          label,
-          filters,
-          listed: list.length,
-          exact: exact.length,
-          sampleOrderValues: list
-            .slice(0, 5)
-            .map((i) => i[orderFilter] ?? null),
-        });
-        return exact;
-      } catch (err) {
-        logger.error("[INV] lookup failed", {
-          formNo,
-          label,
-          filters,
-          status: err.response?.status,
-          err: err.response?.data || err.message,
-        });
-        return [];
-      }
-    };
-
-    let exact = await attempt("equals", { [orderFilter]: formNo });
-    if (!exact.length) {
-      exact = await attempt("contains", {
-        [`${orderFilter}_contains`]: formNo,
-      });
-    }
-    if (!exact.length) return 0;
-
-    const synced = await syncInvoiceRows(exact, token);
-
-    const { rows } = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM zoho_invoices
-        WHERE lower(btrim(order_number)) = $1
-          AND lower(btrim(consignment_number)) = $2`,
-      [wantedForm, wanted],
+  const found = [];
+  let scanned = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await withRetry(() =>
+      axios.get(`${getBooksBaseUrl()}/invoices`, {
+        headers: { Authorization: `Zoho-oauthtoken ${token}` },
+        params: {
+          organization_id: process.env.ZOHO_BOOKS_ORG_ID,
+          page,
+          per_page: 200,
+          sort_column: "created_time",
+          sort_order: "D",
+        },
+      }),
     );
-    logger.info("[INV] saved", {
-      formNo,
-      changedRows: synced,
-      inDbForThisConsignment: rows[0].n,
-    });
-    return synced;
+    const invoices = r.data.invoices || [];
+    scanned += invoices.length;
+    for (const i of invoices) {
+      const v = String(i[orderFilter] ?? "")
+        .trim()
+        .toLowerCase();
+      if (v && wanted.some((w) => v.startsWith(w))) found.push(i);
+    }
+    if (!r.data.page_context?.has_more_page) break;
+  }
+  logger.info("[INV-SCAN]", {
+    forms: wanted,
+    scanned,
+    found: found.map((i) => `${i.invoice_number}:${i[orderFilter]}`),
   });
-
-  return counts.reduce((s, n) => s + n, 0);
+  return found;
 };
 
 export const syncInvoicesForOrder = async (formNo) => {
   const token = await getZohoAccessToken();
-  const orderFilter =
-    process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
-  const wantedForm = String(formNo ?? "")
-    .trim()
-    .toLowerCase();
-  if (!wantedForm) return 0;
+  const matched = await scanInvoicesForForms(token, [formNo]);
+  return matched.length ? syncInvoiceRows(matched, token) : 0;
+};
 
-  const attempt = async (label, filters) => {
-    try {
-      const list = await fetchAllZohoInvoiceList(token, filters, 1);
-      const exact = list.filter(
-        (i) =>
-          String(i[orderFilter] ?? "")
-            .trim()
-            .toLowerCase() === wantedForm,
-      );
-      logger.info("[INV-ORDER] lookup", {
-        formNo,
-        label,
-        listed: list.length,
-        exact: exact.length,
-      });
-      return exact;
-    } catch (err) {
-      logger.error("[INV-ORDER] lookup failed", {
-        formNo,
-        label,
-        status: err.response?.status,
-        err: err.response?.data || err.message,
-      });
-      return [];
-    }
-  };
+export const syncInvoicesForConsignment = async (consignmentNumber) => {
+  const forms = await getConsignmentFormNumbers(consignmentNumber);
+  logger.info("[INV] start", { consignmentNumber, forms });
+  if (!forms.length) return 0;
 
-  let exact = await attempt("equals", { [orderFilter]: formNo });
-  if (!exact.length) {
-    exact = await attempt("contains", { [`${orderFilter}_contains`]: formNo });
-  }
-  if (!exact.length) return 0;
-
-  return syncInvoiceRows(exact, token);
+  const token = await getZohoAccessToken();
+  const matched = await scanInvoicesForForms(token, forms);
+  return matched.length ? syncInvoiceRows(matched, token) : 0;
 };
 
 export const syncZohoInvoices = async (req, res) => {
