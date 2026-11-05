@@ -3983,6 +3983,60 @@ export async function getOrderByItemRef(req, res) {
 
     const orderMap = {};
 
+    const assignedRows = `
+      SELECT x.* FROM (
+        SELECT DISTINCT ON (h.cid, h.consignment_id)
+          h.cid, h.consignment_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.detail_id = oi.id
+        ORDER BY h.cid, h.consignment_id, h.id DESC
+      ) x
+      WHERE x.action_type = 'ASSIGN'
+    `;
+
+    const itemIds = [...new Set(rows.map((r) => r.item_id).filter(Boolean))];
+    const shipRes = await pool.query(
+      `SELECT oi.id AS item_id,
+              ar.assigned_qty, ar.assigned_weight_kg,
+              cm.container_number,
+              ls.status, ls.eta,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'status', h.status, 'time', h.created_time, 'eta', h.eta
+                ) ORDER BY h.created_time, h.id)
+                FROM order_tracking h
+                WHERE h.order_id = oi.order_id AND h.item_ref = oi.item_ref
+                  AND (h.container_id = ar.cid OR h.container_id IS NULL)
+              ), '[]'::json) AS history
+         FROM order_items oi
+         JOIN LATERAL (${assignedRows}) ar ON true
+         LEFT JOIN container_master cm ON cm.cid = ar.cid
+         LEFT JOIN LATERAL (
+           SELECT t.status, t.eta
+             FROM order_tracking t
+            WHERE t.order_id = oi.order_id AND t.item_ref = oi.item_ref
+              AND (t.container_id = ar.cid OR t.container_id IS NULL)
+            ORDER BY (t.container_id IS NOT NULL) DESC, t.created_time DESC, t.id DESC
+            LIMIT 1
+         ) ls ON true
+        WHERE oi.id = ANY($1::int[])
+        ORDER BY oi.id, ar.cid`,
+      [itemIds],
+    );
+
+    const shipMap = new Map();
+    shipRes.rows.forEach((r) => {
+      if (!shipMap.has(r.item_id)) shipMap.set(r.item_id, []);
+      shipMap.get(r.item_id).push({
+        qty: r.assigned_qty,
+        weight: r.assigned_weight_kg,
+        container: r.container_number,
+        status: r.status,
+        eta: r.eta,
+        history: r.history,
+      });
+    });
+
     rows.forEach((row) => {
       const orderId = row.order_id;
 
@@ -4051,6 +4105,7 @@ export async function getOrderByItemRef(req, res) {
           status: row.item_status || "Created",
           total_number: Number(row.total_number) || 0,
           weight: Number(row.weight) || 0,
+          shipments: shipMap.get(row.item_id) || [],
         };
       }
     });
