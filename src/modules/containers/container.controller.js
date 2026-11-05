@@ -505,19 +505,17 @@ export async function updateContainer(req, res) {
 
     await client.query(
       `UPDATE container_master
-       SET
-         container_number    = $1,
-         container_size      = $2,
-         container_type      = $3,
-         remarks             = $4,
-         available_at        = $5,
-         location            = $6,
-         derived_status      = $7,
-         owner_type          = $8,
+        SET
+         container_size      = $1,
+         container_type      = $2,
+         remarks             = $3,
+         available_at        = $4,
+         location            = $5,
+         derived_status      = $6,
+         owner_type          = $7,
          updated_at          = NOW()
-       WHERE cid = $9`,
+       WHERE cid = $8`,
       [
-        n(updates.container_number),
         n(updates.container_size),
         n(updates.container_type),
         n(updates.remarks),

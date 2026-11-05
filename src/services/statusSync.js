@@ -45,14 +45,13 @@ export async function getAssignedItems(db, level, value) {
   const r = await db.query(
     `SELECT la.id, la.detail_id, la.cid, la.consignment_id, la.status
        FROM (
-         SELECT DISTINCT ON (detail_id) id, detail_id, cid, consignment_id, status
+         SELECT DISTINCT ON (detail_id, cid, consignment_id)
+                id, detail_id, cid, consignment_id, status, action_type
            FROM container_assignment_history
-          WHERE detail_id IN (
-                  SELECT detail_id FROM container_assignment_history WHERE ${col} = $1
-                )
-          ORDER BY detail_id, created_at DESC, id DESC
+          WHERE ${col} = $1
+          ORDER BY detail_id, cid, consignment_id, id DESC
        ) la
-      WHERE la.${col} = $1`,
+      WHERE la.action_type = 'ASSIGN'`,
     [value],
   );
   return r.rows;
@@ -121,28 +120,40 @@ async function syncParents(client, rows, receiverEta) {
   }
 }
 
+export async function countDeliveredSlots(db, assigned) {
+  const r = await db.query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE lt.status = $3)::int AS delivered
+       FROM unnest($1::int[], $2::int[]) AS u(detail_id, cid)
+       JOIN order_items oi ON oi.id = u.detail_id
+       LEFT JOIN LATERAL (
+         SELECT t.status FROM order_tracking t
+          WHERE t.order_id = oi.order_id AND t.item_ref = oi.item_ref
+            AND (t.container_id = u.cid OR t.container_id IS NULL)
+          ORDER BY (t.container_id IS NOT NULL) DESC, t.created_time DESC, t.id DESC
+          LIMIT 1
+       ) lt ON TRUE`,
+    [assigned.map((a) => a.detail_id), assigned.map((a) => a.cid), DELIVERED],
+  );
+  return r.rows[0];
+}
+
 export async function rollupDelivered(client, itemIds) {
   const links = await client.query(
-    `SELECT DISTINCT ON (detail_id) detail_id, cid, consignment_id
-       FROM container_assignment_history
-      WHERE detail_id = ANY($1::int[])
-      ORDER BY detail_id, created_at DESC, id DESC`,
+    `SELECT DISTINCT ON (h.detail_id, h.cid, h.consignment_id)
+            h.cid, h.consignment_id, h.action_type
+       FROM container_assignment_history h
+      WHERE h.detail_id = ANY($1::int[])
+      ORDER BY h.detail_id, h.cid, h.consignment_id, h.id DESC`,
     [itemIds],
   );
+  const active = links.rows.filter((r) => r.action_type === "ASSIGN");
   const consignmentIds = [
-    ...new Set(links.rows.map((r) => r.consignment_id).filter(Boolean)),
+    ...new Set(active.map((r) => r.consignment_id).filter(Boolean)),
   ];
-  const cids = [...new Set(links.rows.map((r) => r.cid).filter(Boolean))];
+  const cids = [...new Set(active.map((r) => r.cid).filter(Boolean))];
 
-  const count = async (assigned) => {
-    const r = await client.query(
-      `SELECT COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE status = $2)::int AS delivered
-         FROM order_items WHERE id = ANY($1::int[])`,
-      [assigned.map((a) => a.detail_id), DELIVERED],
-    );
-    return r.rows[0];
-  };
+  const count = (assigned) => countDeliveredSlots(client, assigned);
 
   for (const consId of consignmentIds) {
     const assigned = await getAssignedItems(client, "consignment", consId);
@@ -236,10 +247,38 @@ export async function queueStatusEmails(
   return r.rowCount;
 }
 
+const SLOTS_CTE = `
+  cur AS (
+    SELECT DISTINCT ON (h.detail_id, h.cid, h.consignment_id)
+           h.detail_id, h.cid, h.consignment_id, h.action_type
+      FROM container_assignment_history h
+     WHERE h.detail_id = ANY($1::int[])
+     ORDER BY h.detail_id, h.cid, h.consignment_id, h.id DESC
+  ),
+  slots AS (
+    SELECT oi.id AS item_id, a.cid, a.consignment_id
+      FROM order_items oi
+      LEFT JOIN cur a
+        ON a.detail_id = oi.id AND a.action_type = 'ASSIGN'
+       AND ($2::int[] IS NULL OR a.cid = ANY($2::int[]))
+     WHERE oi.id = ANY($1::int[])
+  )`;
+
+const SLOT_LATEST = `
+  SELECT t.status
+    FROM order_tracking t
+   WHERE t.order_id = oi.order_id
+     AND t.item_ref = oi.item_ref
+     AND (t.container_id = sl.cid OR t.container_id IS NULL)
+   ORDER BY (t.container_id IS NOT NULL) DESC, t.created_time DESC, t.id DESC
+   LIMIT 1`;
+
 export async function applyItemStatus(
   client,
   {
     itemIds,
+    containerId = null,
+    containerIds = null,
     statusRow,
     eta = null,
     receiverEta = null,
@@ -252,61 +291,101 @@ export async function applyItemStatus(
   const ids = [...new Set((itemIds || []).filter(Boolean))];
   if (!orderStatus || !ids.length) return [];
 
-  const upd = await client.query(
-    `WITH target AS (
-       SELECT id, status AS old_status
-         FROM order_items
-        WHERE id = ANY($1::int[])
-          AND status IS DISTINCT FROM $2::varchar
-          AND ($3::boolean = false OR status IS DISTINCT FROM $4::varchar)
-        FOR UPDATE
+  const cidList = containerIds?.length
+    ? containerIds.map(Number)
+    : containerId
+      ? [Number(containerId)]
+      : null;
+
+  const slotRes = await client.query(
+    `WITH ${SLOTS_CTE}
+     SELECT sl.item_id, sl.cid, sl.consignment_id, oi.order_id, oi.receiver_id,
+            lt.status AS cur_status
+       FROM slots sl
+       JOIN order_items oi ON oi.id = sl.item_id
+       LEFT JOIN LATERAL (${SLOT_LATEST}) lt ON TRUE
+      FOR UPDATE OF oi`,
+    [ids, cidList],
+  );
+
+  const toWrite = slotRes.rows
+    .map((s) => ({
+      ...s,
+      cid: s.cid ?? (cidList?.length === 1 ? cidList[0] : null),
+    }))
+    .filter(
+      (s) =>
+        s.cur_status !== orderStatus &&
+        !(protectDelivered && s.cur_status === DELIVERED),
+    );
+
+  if (toWrite.length) {
+    await client.query(
+      `INSERT INTO order_tracking
+         (order_id, sender_id, sender_ref, receiver_id, receiver_ref, container_id,
+          consignment_id, status, old_status, item_ref, eta, etd, created_by, created_time, module_id)
+       SELECT oi.order_id, oi.sender_id, s.sender_ref, oi.receiver_id, r.receiver_ref,
+              u.cid, u.consignment_id, $2::varchar, COALESCE(u.old_status, 'Created'), oi.item_ref,
+              $3::timestamp, $3::timestamp, $4::varchar, NOW(), $5::int
+         FROM unnest($1::int[], $6::int[], $7::int[], $8::varchar[])
+              AS u(item_id, cid, consignment_id, old_status)
+         JOIN order_items oi ON oi.id = u.item_id
+         LEFT JOIN senders s ON s.id = oi.sender_id
+         LEFT JOIN receivers r ON r.id = oi.receiver_id`,
+      [
+        toWrite.map((s) => s.item_id),
+        orderStatus,
+        eta,
+        createdBy,
+        moduleId,
+        toWrite.map((s) => s.cid),
+        toWrite.map((s) => s.consignment_id),
+        toWrite.map((s) => s.cur_status),
+      ],
+    );
+  }
+
+  // item status = least advanced across ALL its containers (always recomputed)
+  const changed = await client.query(
+    `WITH ${SLOTS_CTE},
+     agg AS (
+       SELECT DISTINCT ON (sl.item_id) sl.item_id, lt.status
+         FROM slots sl
+         JOIN order_items oi ON oi.id = sl.item_id
+         JOIN LATERAL (${SLOT_LATEST}) lt ON TRUE
+         JOIN statuses st ON st.order_status = lt.status AND st.status = true
+        ORDER BY sl.item_id, st.sorting_number ASC
      )
      UPDATE order_items oi
-        SET status = $2::varchar, updated_at = NOW()
-       FROM target t
-      WHERE oi.id = t.id
-  RETURNING oi.id, oi.order_id, oi.sender_id, oi.receiver_id, oi.item_ref, t.old_status`,
-    [ids, orderStatus, protectDelivered, DELIVERED],
+        SET status = agg.status, updated_at = NOW()
+       FROM agg
+      WHERE oi.id = agg.item_id AND oi.status IS DISTINCT FROM agg.status
+  RETURNING oi.id, oi.order_id, oi.receiver_id`,
+    [ids, null],
   );
-  const rows = upd.rows;
+
+  const byId = new Map();
+  toWrite.forEach((s) =>
+    byId.set(s.item_id, {
+      id: s.item_id,
+      order_id: s.order_id,
+      receiver_id: s.receiver_id,
+    }),
+  );
+  changed.rows.forEach((r) => byId.set(r.id, r));
+  const rows = [...byId.values()];
   if (!rows.length) return [];
 
-  await client.query(
-    `INSERT INTO order_tracking
-       (order_id, sender_id, sender_ref, receiver_id, receiver_ref, container_id,
-        consignment_id, status, old_status, item_ref, eta, etd, created_by, created_time, module_id)
-     SELECT oi.order_id, oi.sender_id, s.sender_ref, oi.receiver_id, r.receiver_ref,
-            la.cid, la.consignment_id, $2::varchar, u.old_status, oi.item_ref,
-            $3::timestamp, $3::timestamp, $4::varchar, NOW(), $5::int
-       FROM unnest($1::int[], $6::varchar[]) AS u(id, old_status)
-       JOIN order_items oi ON oi.id = u.id
-       LEFT JOIN senders s ON s.id = oi.sender_id
-       LEFT JOIN receivers r ON r.id = oi.receiver_id
-       LEFT JOIN LATERAL (
-         SELECT cid, consignment_id FROM container_assignment_history
-          WHERE detail_id = oi.id ORDER BY created_at DESC, id DESC LIMIT 1
-       ) la ON TRUE`,
-    [
-      rows.map((r) => r.id),
-      orderStatus,
-      eta,
-      createdBy,
-      moduleId,
-      rows.map((r) => r.old_status),
-    ],
-  );
+  const touched = rows.map((r) => r.id);
 
   if (statusRow.send_email === true) {
-    await queueStatusEmails(client, { itemIds: rows.map((r) => r.id) });
+    await queueStatusEmails(client, { itemIds: touched });
   }
 
   await syncParents(client, rows, receiverEta);
 
   if (orderStatus === DELIVERED) {
-    await rollupDelivered(
-      client,
-      rows.map((r) => r.id),
-    );
+    await rollupDelivered(client, touched);
   }
   return rows;
 }
@@ -338,6 +417,7 @@ export async function applyContainerStatus(
   }
   return applyItemStatus(client, {
     itemIds: assigned.map((a) => a.detail_id),
+    containerId: cid,
     statusRow,
     eta,
     receiverEta: eta,
@@ -382,14 +462,23 @@ export async function applyConsignmentStatus(
 
   let updatedItems = [];
   if (statusRow.order_status && assigned.length) {
-    updatedItems = await applyItemStatus(client, {
-      itemIds: assigned.map((a) => a.detail_id),
-      statusRow,
-      eta,
-      receiverEta: eta,
-      createdBy,
-      moduleId: 6,
-    });
+    const byCid = new Map();
+    for (const a of assigned) {
+      if (!byCid.has(a.cid)) byCid.set(a.cid, []);
+      byCid.get(a.cid).push(a.detail_id);
+    }
+    for (const [cid, detailIds] of byCid) {
+      const rows = await applyItemStatus(client, {
+        itemIds: detailIds,
+        containerId: cid,
+        statusRow,
+        eta,
+        receiverEta: eta,
+        createdBy,
+        moduleId: 6,
+      });
+      updatedItems.push(...rows);
+    }
   } else if (!statusRow.order_status) {
     logger.warn(
       `[statusSync] consignment status "${statusRow.consignment_status}" has no linked order status; items not changed`,
