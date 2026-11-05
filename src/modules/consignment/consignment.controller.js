@@ -7,6 +7,7 @@ import {
   getStatusRow,
   applyConsignmentStatus,
   getActorLabel,
+  countDeliveredSlots,
 } from "../../services/statusSync.js";
 import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
 
@@ -137,8 +138,6 @@ function validateConsignmentFields({
 }) {
   const errors = [];
   if (!consignment_number) errors.push("consignment_number");
-  // if (!status) errors.push('status');
-  // if (!validConsignmentStatuses.includes(status));
   if (!shipper) errors.push("shipper");
   if (!consignee) errors.push("consignee");
   if (!origin) errors.push("origin");
@@ -1628,13 +1627,7 @@ export async function advanceStatus(req, res) {
     let consignmentEta = null;
     if (nextStatus === "Delivered") {
       const assigned = await getAssignedItems(pool, "consignment", numericId);
-      const check = await pool.query(
-        `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status = 'Shipment Delivered')::int AS delivered
-           FROM order_items WHERE id = ANY($1::int[])`,
-        [assigned.map((a) => a.detail_id)],
-      );
-      const { total, delivered } = check.rows[0];
+      const { total, delivered } = await countDeliveredSlots(pool, assigned);
       if (total === 0 || delivered < total) {
         const msg = `Cannot advance to Delivered — ${delivered}/${total} items have "Shipment Delivered" status.`;
         return res
