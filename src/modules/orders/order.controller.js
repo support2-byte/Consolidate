@@ -4647,6 +4647,7 @@ export async function getOrderByOrderId(req, res) {
             SELECT jsonb_agg(jsonb_build_object(
               'qty',         ar.assigned_qty,
               'weight',      ar.assigned_weight_kg,
+              'container',   cmx.container_number,
               'status',      COALESCE(ls.status, 'Created'),
               'eta',         ls.eta,
               'lastUpdated', ls.created_time,
@@ -4663,6 +4664,7 @@ export async function getOrderByOrderId(req, res) {
               ), '[]'::jsonb)
             ) ORDER BY ar.cid)
             FROM (${assignedRows}) ar
+            LEFT JOIN container_master cmx ON cmx.cid = ar.cid
             LEFT JOIN LATERAL (
               SELECT t.status, t.eta, t.created_time
               FROM order_tracking t
