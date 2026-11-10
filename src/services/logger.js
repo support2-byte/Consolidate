@@ -20,16 +20,21 @@ const logger = winston.createLogger({
       format: winston.format.combine(
         winston.format.timestamp(),
         winston.format.colorize({ level: true }),
-        winston.format.printf(({ timestamp, level, message, ...meta }) => {
-          const metaString =
-            Object.keys(meta).length > 0
-              ? chalk.hex("#8B5CF6")(JSON.stringify(meta, null, 2))
+        winston.format.printf(
+          ({ timestamp, level, message, query, ...meta }) => {
+            const metaString =
+              Object.keys(meta).length > 0
+                ? chalk.hex("#8B5CF6")(JSON.stringify(meta, null, 2))
+                : "";
+            const queryString = query
+              ? `\n${chalk.yellow("SQL:")} ${chalk.dim(query)}`
               : "";
 
-          return `${chalk.dim(timestamp)} [${level}] ${chalk.cyan(message)}${
-            metaString ? `\n${metaString}` : ""
-          }`;
-        }),
+            return `${chalk.dim(timestamp)} [${level}] ${chalk.cyan(message)}${queryString}${
+              metaString ? `\n${metaString}` : ""
+            }`;
+          },
+        ),
       ),
     }),
   ],

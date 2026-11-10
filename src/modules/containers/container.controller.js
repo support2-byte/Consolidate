@@ -987,6 +987,7 @@ export async function getUsageHistory(req, res) {
         receiverId: row.receiver_id,
         detailId: row.detail_id,
         itemRef: row.item_ref,
+        actionType: row.action_type,
       };
     });
 
@@ -1012,6 +1013,19 @@ export async function getUsageHistory(req, res) {
 
         groupedByConsignment[key].orders.push(event);
       });
+
+    const compareFormNo = (a, b) => {
+      const x = String(a ?? "");
+      const y = String(b ?? "");
+      const xMissing = !/\d/.test(x);
+      const yMissing = !/\d/.test(y);
+      if (xMissing !== yMissing) return xMissing ? 1 : -1;
+      return x.localeCompare(y, undefined, { numeric: true });
+    };
+
+    Object.values(groupedByConsignment).forEach((g) => {
+      g.orders.sort((a, b) => compareFormNo(a.formNo, b.formNo));
+    });
 
     const formattedStatusHistory = statusHistory.map((row) => ({
       sid: row.sid,

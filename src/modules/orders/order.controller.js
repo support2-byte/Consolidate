@@ -1551,10 +1551,18 @@ export async function getOrdersConsignments(req, res) {
 
         whereClause += ` AND EXISTS (
           SELECT 1 FROM order_items oi
-          JOIN container_assignment_history cah ON cah.detail_id = oi.id
           WHERE oi.order_id = o.id
-            AND cah.cid = ANY($${chContainerParam}::int[])
-            AND cah.consignment_id = $${cidParam}
+            AND EXISTS (
+              SELECT 1 FROM (
+                SELECT DISTINCT ON (h.cid, h.consignment_id) h.cid, h.consignment_id, h.action_type
+                FROM container_assignment_history h
+                WHERE h.detail_id = oi.id
+                ORDER BY h.cid, h.consignment_id, h.id DESC
+              ) x
+              WHERE x.action_type = 'ASSIGN'
+                AND x.cid = ANY($${chContainerParam}::int[])
+                AND x.consignment_id = $${cidParam}
+            )
         )`;
       } else {
         whereClause += ` AND EXISTS (
@@ -1591,9 +1599,17 @@ export async function getOrdersConsignments(req, res) {
 
       whereClause += ` AND EXISTS (
         SELECT 1 FROM order_items oi
-        JOIN container_assignment_history cah ON cah.detail_id = oi.id
         WHERE oi.order_id = o.id
-          AND cah.consignment_id = $${cidParam2}
+          AND EXISTS (
+            SELECT 1 FROM (
+              SELECT DISTINCT ON (h.cid, h.consignment_id) h.cid, h.consignment_id, h.action_type
+              FROM container_assignment_history h
+              WHERE h.detail_id = oi.id
+              ORDER BY h.cid, h.consignment_id, h.id DESC
+            ) x
+            WHERE x.action_type = 'ASSIGN'
+              AND x.consignment_id = $${cidParam2}
+          )
       )`;
     }
 
@@ -1608,6 +1624,21 @@ export async function getOrdersConsignments(req, res) {
       WHERE x.action_type = 'ASSIGN'
     `;
 
+    const consignmentIdInt = consignment_id
+      ? parseInt(consignment_id, 10)
+      : null;
+    const assignedRowsForDetails = `
+      SELECT x.* FROM (
+        SELECT DISTINCT ON (h.cid, h.consignment_id)
+          h.cid, h.consignment_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.detail_id = oi.id
+        ${Number.isInteger(consignmentIdInt) ? `AND h.consignment_id = ${consignmentIdInt}` : ""}
+        ORDER BY h.cid, h.consignment_id, h.id DESC
+      ) x
+      WHERE x.action_type = 'ASSIGN'
+    `;
+
     const containerDetailsSub = `
       COALESCE((
         SELECT json_agg(json_build_object(
@@ -1617,7 +1648,7 @@ export async function getOrdersConsignments(req, res) {
           'assign_total_box', COALESCE(ar.assigned_qty, 0)::text,
           'consignment_id', ar.consignment_id
         ) ORDER BY COALESCE(cm2.container_number, ''))
-        FROM (${assignedRows}) ar
+        FROM (${assignedRowsForDetails}) ar
         LEFT JOIN container_master cm2 ON cm2.cid = ar.cid
         LEFT JOIN LATERAL (
           SELECT availability AS derived_status
@@ -1651,8 +1682,14 @@ export async function getOrdersConsignments(req, res) {
       FROM order_items oi
       WHERE oi.receiver_id = r.id
         AND EXISTS (
-          SELECT 1 FROM container_assignment_history cah
-          WHERE cah.detail_id = oi.id AND cah.consignment_id = ${parseInt(consignment_id, 10)}
+          SELECT 1 FROM (
+            SELECT DISTINCT ON (h.cid, h.consignment_id) h.action_type, h.consignment_id
+            FROM container_assignment_history h
+            WHERE h.detail_id = oi.id
+            ORDER BY h.cid, h.consignment_id, h.id DESC
+          ) x
+          WHERE x.action_type = 'ASSIGN'
+            AND x.consignment_id = ${parseInt(consignment_id, 10)}
         ))
     `
       : `
@@ -1715,7 +1752,10 @@ export async function getOrdersConsignments(req, res) {
       FROM orders o
       ${joins}
       ${whereClause}
-      ORDER BY o.created_at DESC
+      ORDER BY
+        NULLIF(regexp_replace(o.rgl_booking_number::text, '\D', '', 'g'), '')::numeric ASC NULLS LAST,
+        o.rgl_booking_number ASC,
+        o.id ASC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
 
