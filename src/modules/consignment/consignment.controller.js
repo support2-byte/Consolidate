@@ -304,17 +304,21 @@ export async function getConsignmentById(req, res) {
       }
       consignment = consRes.rows[0];
 
-      if (consignment.orders) {
-        let rawOrders =
-          typeof consignment.orders === "string"
-            ? JSON.parse(consignment.orders)
-            : consignment.orders;
-        orderIds = Array.isArray(rawOrders)
-          ? rawOrders
-              .map((o) => parseInt(o, 10))
-              .filter((o) => !isNaN(o) && o > 0)
-          : [];
-      }
+      const activeOrdersRes = await client.query(
+        `
+        SELECT DISTINCT oi.order_id
+        FROM (
+          SELECT DISTINCT ON (h.detail_id, h.cid) h.detail_id, h.action_type
+          FROM container_assignment_history h
+          WHERE h.consignment_id = $1
+          ORDER BY h.detail_id, h.cid, h.id DESC
+        ) a
+        JOIN order_items oi ON oi.id = a.detail_id
+        WHERE a.action_type = 'ASSIGN'
+        `,
+        [numericId],
+      );
+      orderIds = activeOrdersRes.rows.map((r) => r.order_id);
 
       const statusRes = await client.query(
         "SELECT order_status, sorting_number FROM statuses WHERE order_status IS NOT NULL",
@@ -470,9 +474,14 @@ export async function getConsignmentById(req, res) {
     LIMIT 1
   ) cs ON true
   WHERE cm.cid IN (
-    SELECT cah.cid
-    FROM container_assignment_history cah
-    WHERE cah.consignment_id = $1
+    SELECT x.cid
+    FROM (
+      SELECT DISTINCT ON (h.detail_id, h.cid) h.cid, h.action_type
+      FROM container_assignment_history h
+      WHERE h.consignment_id = $1
+      ORDER BY h.detail_id, h.cid, h.id DESC
+    ) x
+    WHERE x.action_type = 'ASSIGN'
   )
   `,
           [numericId],
@@ -764,6 +773,7 @@ export async function getConsignments(req, res) {
         cons.delivered,
         cons.pending,
         COALESCE(item_counts.total_items, 0) AS total_items,
+        COALESCE(item_counts.total_orders, 0) AS total_orders,
         COALESCE(item_counts.delivered_items, 0) AS delivered_items
       FROM consignments cons
       LEFT JOIN third_parties shipper_tp
@@ -772,11 +782,17 @@ export async function getConsignments(req, res) {
         ON cons.consignee_id = consignee_tp.id
       LEFT JOIN LATERAL (
         SELECT
+          COUNT(DISTINCT oi.order_id) AS total_orders,
           COUNT(DISTINCT oi.id) AS total_items,
           COUNT(DISTINCT oi.id) FILTER (WHERE oi.status = 'Shipment Delivered') AS delivered_items
-        FROM container_assignment_history cah
-        JOIN order_items oi ON oi.id = cah.detail_id
-        WHERE cah.consignment_id = cons.id
+        FROM (
+          SELECT DISTINCT ON (h.detail_id, h.cid) h.detail_id, h.action_type
+          FROM container_assignment_history h
+          WHERE h.consignment_id = cons.id
+          ORDER BY h.detail_id, h.cid, h.id DESC
+        ) a
+        JOIN order_items oi ON oi.id = a.detail_id
+        WHERE a.action_type = 'ASSIGN'
       ) item_counts ON true
     `;
     let whereClauses = [];
