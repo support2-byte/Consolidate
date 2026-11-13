@@ -1753,7 +1753,7 @@ export async function getOrdersConsignments(req, res) {
       ${joins}
       ${whereClause}
       ORDER BY
-        NULLIF(regexp_replace(o.rgl_booking_number::text, '\D', '', 'g'), '')::numeric ASC NULLS LAST,
+        NULLIF(regexp_replace(o.rgl_booking_number::text, '\D', '', 'g'), '')::text ASC NULLS LAST,
         o.rgl_booking_number ASC,
         o.id ASC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -1884,6 +1884,7 @@ export async function getOrderById(req, res) {
               SELECT SUM(a2.assigned_qty) FROM (${assignedRows}) a2
             ), 0))::int,
             'assign_total_box', COALESCE(ar.assigned_qty, 0)::text,
+            'consignment_id',  ar.consignment_id,
             'consignment_number', cons.consignment_number,
             'item_status',     COALESCE(ct.status, 'Created'),
             'eta',             TO_CHAR(ct.eta, 'YYYY-MM-DD'),
@@ -4042,11 +4043,16 @@ export async function getOrderByItemRef(req, res) {
               ls.status, ls.eta,
               COALESCE((
                 SELECT json_agg(json_build_object(
-                  'status', h.status, 'time', h.created_time, 'eta', h.eta
-                ) ORDER BY h.created_time, h.id)
-                FROM order_tracking h
-                WHERE h.order_id = oi.order_id AND h.item_ref = oi.item_ref
-                  AND (h.container_id = ar.cid OR h.container_id IS NULL)
+                  'status', d.status, 'time', d.created_time, 'eta', d.eta
+                ) ORDER BY d.created_time, d.id)
+                FROM (
+                  SELECT DISTINCT ON (h.status)
+                    h.id, h.status, h.created_time, h.eta
+                  FROM order_tracking h
+                  WHERE h.order_id = oi.order_id AND h.item_ref = oi.item_ref
+                    AND (h.container_id = ar.cid OR h.container_id IS NULL)
+                  ORDER BY h.status, h.created_time DESC, h.id DESC
+                ) d
               ), '[]'::json) AS history
          FROM order_items oi
          JOIN LATERAL (${assignedRows}) ar ON true
@@ -4119,21 +4125,24 @@ export async function getOrderByItemRef(req, res) {
       const recv = ord.receivers[recvKey];
 
       if (row.ot_tracking_id) {
-        const alreadyExists = recv.status_history.some(
-          (h) => h.tracking_id === row.ot_tracking_id,
+        const existing = recv.status_history.find(
+          (h) => h.status === row.ot_new_status,
         );
+        const entry = {
+          tracking_id: row.ot_tracking_id,
+          old_status: row.ot_old_status || null,
+          status: row.ot_new_status,
+          time: row.ot_timestamp,
+          created_by: row.ot_created_by || null,
+          eta: row.ot_eta || null,
+          etd: row.ot_etd || null,
+          consignment_number: row.ot_consignment_number || null,
+        };
 
-        if (!alreadyExists) {
-          recv.status_history.push({
-            tracking_id: row.ot_tracking_id,
-            old_status: row.ot_old_status || null,
-            status: row.ot_new_status,
-            time: row.ot_timestamp,
-            created_by: row.ot_created_by || null,
-            eta: row.ot_eta || null,
-            etd: row.ot_etd || null,
-            consignment_number: row.ot_consignment_number || null,
-          });
+        if (!existing) {
+          recv.status_history.push(entry);
+        } else if (new Date(entry.time) > new Date(existing.time)) {
+          Object.assign(existing, entry);
         }
       }
 
@@ -4647,8 +4656,7 @@ export async function getOrderByOrderId(req, res) {
           'weight',          ${safeNumericCast("oi.weight")},
           'itemRef',         COALESCE(oi.item_ref, ''),
 
-          -- latest tracking row wins, order_items.status is the fallback
-          'status',          COALESCE(oi.status, 'Created'),
+          'status',          COALESCE(lt.status, oi.status, 'Created'),
           'lastUpdated',     lt.created_time,
           'eta',             lt_eta.eta,
 
@@ -4671,16 +4679,22 @@ export async function getOrderByOrderId(req, res) {
           -- full per-item history (no created_by / emails: this is a public page)
           'status_history', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
-              'status',             ot.status,
-              'time',               ot.created_time,
-              'eta',                ot.eta,
-              'container_number',   cm.container_number,
-              'consignment_number', c.consignment_number
-            ) ORDER BY ot.created_time DESC, ot.id DESC)
-            FROM order_tracking ot
-            LEFT JOIN container_master cm ON cm.cid = ot.container_id
-            LEFT JOIN consignments c ON c.id = ot.consignment_id
-            WHERE ot.item_ref = oi.item_ref AND ot.order_id = o.id
+              'status',             d.status,
+              'time',               d.created_time,
+              'eta',                d.eta,
+              'container_number',   d.container_number,
+              'consignment_number', d.consignment_number
+            ) ORDER BY d.created_time DESC, d.id DESC)
+            FROM (
+              SELECT DISTINCT ON (ot.status)
+                ot.id, ot.status, ot.created_time, ot.eta,
+                cm.container_number, c.consignment_number
+              FROM order_tracking ot
+              LEFT JOIN container_master cm ON cm.cid = ot.container_id
+              LEFT JOIN consignments c ON c.id = ot.consignment_id
+              WHERE ot.item_ref = oi.item_ref AND ot.order_id = o.id
+              ORDER BY ot.status, ot.created_time DESC, ot.id DESC
+            ) d
           ), '[]'::jsonb),
 
                     'shipments', COALESCE((
@@ -4693,14 +4707,19 @@ export async function getOrderByOrderId(req, res) {
               'lastUpdated', ls.created_time,
               'history',     COALESCE((
                 SELECT jsonb_agg(jsonb_build_object(
-                  'status', h.status,
-                  'time',   h.created_time,
-                  'eta',    h.eta
-                ) ORDER BY h.created_time, h.id)
-                FROM order_tracking h
-                WHERE h.order_id = o.id
-                  AND h.item_ref = oi.item_ref
-                  AND (h.container_id = ar.cid OR h.container_id IS NULL)
+                  'status', d.status,
+                  'time',   d.created_time,
+                  'eta',    d.eta
+                ) ORDER BY d.created_time, d.id)
+                FROM (
+                  SELECT DISTINCT ON (h.status)
+                    h.id, h.status, h.created_time, h.eta
+                  FROM order_tracking h
+                  WHERE h.order_id = o.id
+                    AND h.item_ref = oi.item_ref
+                    AND (h.container_id = ar.cid OR h.container_id IS NULL)
+                  ORDER BY h.status, h.created_time DESC, h.id DESC
+                ) d
               ), '[]'::jsonb)
             ) ORDER BY ar.cid)
             FROM (${assignedRows}) ar
@@ -4723,7 +4742,7 @@ export async function getOrderByOrderId(req, res) {
       ), '[]'::jsonb)
       FROM order_items oi
       LEFT JOIN LATERAL (
-        SELECT ot.created_time
+        SELECT ot.created_time, ot.status
         FROM order_tracking ot
         WHERE ot.item_ref = oi.item_ref
           AND ot.order_id = o.id

@@ -2,13 +2,16 @@ import logger from "../services/logger.js";
 
 const SLOW_QUERY_THRESHOLD_MS = 500;
 
+const compactSql = (sql) => sql.replace(/\s+/g, " ").trim();
+
 export function applyQueryMonitoring(pool) {
   const originalQuery = pool.query.bind(pool);
 
   pool.query = async (...args) => {
     const start = Date.now();
-    const queryText =
-      typeof args[0] === "string" ? args[0] : args[0]?.text || "";
+    const queryText = compactSql(
+      typeof args[0] === "string" ? args[0] : args[0]?.text || "",
+    );
     const params = args[1] ? JSON.stringify(args[1]) : null;
 
     try {

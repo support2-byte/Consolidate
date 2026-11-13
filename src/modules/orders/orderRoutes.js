@@ -498,7 +498,7 @@ router.put("/:orderId/items/:itemRef/eta", requireAuth, updateItemEta);
  *       404:
  *         description: Order or item not found
  */
-router.delete("/:orderId/order-items/:itemId", removeOrderItem);
+router.delete("/:orderId/order-items/:itemId", requireAuth, removeOrderItem);
 
 /**
  * @swagger

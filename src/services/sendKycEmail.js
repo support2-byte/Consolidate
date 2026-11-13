@@ -4,6 +4,11 @@ import { buildKycEmailHtmlCas } from "./kycEmailTemplateCas.js";
 import { buildKycEmailHtmlMf } from "./kycEmailTemplateMf.js";
 import logger from "./logger.js";
 
+const KYC_BUILDERS = {
+  MF: buildKycEmailHtmlMf,
+  CAS: buildKycEmailHtmlCas,
+};
+
 export const sendKycFormEmail = async ({
   recipientEmail,
   recipientName,
@@ -11,15 +16,8 @@ export const sendKycFormEmail = async ({
   company,
 }) => {
   try {
-    let emailTemplate;
-
-    if (company === "MF") {
-      emailTemplate = buildKycEmailHtmlMf({ recipientName, formUrl });
-    } else if (company === "CAS") {
-      emailTemplate = buildKycEmailHtmlCas({ recipientName, formUrl });
-    } else {
-      emailTemplate = buildKycEmailHtml({ recipientName, formUrl });
-    }
+    const build = KYC_BUILDERS[company] || buildKycEmailHtml; // default: RGSL
+    const emailTemplate = build({ recipientName, formUrl });
 
     await transporter.sendMail({
       from: "Royal Gulf Shipping & Logistics",

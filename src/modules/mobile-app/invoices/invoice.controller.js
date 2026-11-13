@@ -5,12 +5,29 @@ import {
   getOrderStatus,
 } from "../../../services/ngeniusService.js";
 
+const INVOICE_TABLES = {
+  delivery: "delivery_invoices",
+  storage: "storage_invoices",
+  dropoff: "dropoff_invoices",
+  overstay: "overstay_invoices",
+};
+
+const INVOICES_UNION = `
+  SELECT id, invoice_id, amount, status, created_at, shipment_ref AS shipment_id, customer_ref AS customer_id, ngenius_order_ref, public_ref, 'delivery' AS invoice_type FROM delivery_invoices
+  UNION ALL
+  SELECT id, invoice_id, amount, status, created_at, shipment_ref, customer_ref, ngenius_order_ref, public_ref, 'storage' FROM storage_invoices
+  UNION ALL
+  SELECT id, invoice_id, amount, status, created_at, shipment_ref, customer_ref, ngenius_order_ref, public_ref, 'dropoff' FROM dropoff_invoices
+  UNION ALL
+  SELECT id, invoice_id, amount, status, created_at, shipment_ref, customer_ref, ngenius_order_ref, public_ref, 'overstay' FROM overstay_invoices
+`;
+
 export const getInvoices = async (req, res) => {
   const { id } = req.params;
 
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM invoices WHERE customer_id = $1`,
+      `SELECT * FROM (${INVOICES_UNION}) inv WHERE customer_id = $1 ORDER BY created_at DESC`,
       [id],
     );
 
@@ -48,7 +65,7 @@ export const getInvoiceDetails = async (req, res) => {
 
   try {
     const { rows: invoiceRows } = await pool.query(
-      `SELECT * FROM invoices WHERE id = $1`,
+      `SELECT * FROM (${INVOICES_UNION}) inv WHERE public_ref = $1::uuid`,
       [invoiceId],
     );
 
@@ -65,17 +82,17 @@ export const getInvoiceDetails = async (req, res) => {
 
     if (invoice.invoice_type?.toLowerCase() === "storage") {
       const { rows } = await pool.query(
-        `SELECT id, customer_id, shipment, storage, days, amount, status, created_at
+        `SELECT id, customer_ref AS customer_id, shipment_ref AS shipment, storage, duration_days AS days, amount, status, created_at
          FROM storage_purchase
-         WHERE shipment = $1`,
+         WHERE shipment_ref = $1`,
         [invoice.shipment_id],
       );
       extra = rows[0] ?? null;
-    } else {
+    } else if (invoice.invoice_type === "delivery") {
       const { rows } = await pool.query(
-        `SELECT id, customer_id, shipment, delivery_amount AS amount, status, created_at
-         FROM app_delivery
-         WHERE shipment = $1`,
+        `SELECT id, customer_ref AS customer_id, shipment_ref AS shipment, delivery_amount AS amount, status, created_at
+         FROM delivery_requests
+         WHERE shipment_ref = $1`,
         [invoice.shipment_id],
       );
       extra = rows[0] ?? null;
@@ -110,9 +127,10 @@ export const createNgeniusOrder = async (req, res) => {
   const { invoiceId } = req.params;
 
   try {
-    const { rows } = await pool.query(`SELECT * FROM invoices WHERE id = $1`, [
-      invoiceId,
-    ]);
+    const { rows } = await pool.query(
+      `SELECT * FROM (${INVOICES_UNION}) inv WHERE public_ref = $1::uuid`,
+      [invoiceId],
+    );
 
     if (rows.length === 0) {
       return res
@@ -136,8 +154,8 @@ export const createNgeniusOrder = async (req, res) => {
     });
 
     await pool.query(
-      `UPDATE invoices SET ngenius_order_ref = $1 WHERE id = $2`,
-      [orderReferenceId, invoiceId],
+      `UPDATE ${INVOICE_TABLES[invoice.invoice_type]} SET ngenius_order_ref = $1 WHERE id = $2`,
+      [orderReferenceId, invoice.id],
     );
 
     return res.status(200).json({
@@ -162,10 +180,12 @@ export const confirmNgeniusPayment = async (req, res) => {
   try {
     const { state } = await getOrderStatus(orderReferenceId);
     if (state === "CAPTURED" || state === "PURCHASED") {
-      const result = await pool.query(
-        `UPDATE invoices SET status = 'paid' WHERE ngenius_order_ref = $1`,
-        [orderReferenceId],
-      );
+      for (const table of Object.values(INVOICE_TABLES)) {
+        await pool.query(
+          `UPDATE ${table} SET status = 'paid' WHERE ngenius_order_ref = $1`,
+          [orderReferenceId],
+        );
+      }
     }
 
     return res.status(200).json({ success: true, data: { state } });

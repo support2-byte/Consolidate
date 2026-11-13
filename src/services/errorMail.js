@@ -78,7 +78,7 @@ function buildErrorHtml({
   <div class="header">
     <div class="logo-area">
       <div class="logo-plate">
-        <img src="https://royalgulfshipping.com/wp-content/uploads/2023/08/RGSL-LOGO.png" alt="Royal Gulf Shipping & Logistics" class="logo-img">
+        <img src="https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg" alt="Royal Gulf Shipping & Logistics" class="logo-img">
       </div>
     </div>
     <h2 class="header-title">Error Log Notification</h2>

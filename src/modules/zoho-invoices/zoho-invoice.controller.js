@@ -369,9 +369,15 @@ export const getConsignmentFormNumbers = async (consignmentNumber) => {
   return rows.map((r) => r.form_no);
 };
 
-const scanInvoicesForForms = async (token, forms, maxPages = 5) => {
+const scanInvoicesForForms = async (
+  token,
+  forms,
+  { consignmentNumber = null, maxPages = 5 } = {},
+) => {
   const orderFilter =
     process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
+  const consignmentFilter =
+    process.env.ZOHO_INVOICE_CONSIGNMENT_FILTER || "cf_consignment_number";
   const wanted = forms
     .map((f) =>
       String(f ?? "")
@@ -380,6 +386,10 @@ const scanInvoicesForForms = async (token, forms, maxPages = 5) => {
     )
     .filter(Boolean);
   if (!wanted.length) return [];
+
+  const wantedCons = consignmentNumber
+    ? stripConsignmentPrefix(consignmentNumber).toLowerCase()
+    : null;
 
   const found = [];
   let scanned = 0;
@@ -402,14 +412,23 @@ const scanInvoicesForForms = async (token, forms, maxPages = 5) => {
       const v = String(i[orderFilter] ?? "")
         .trim()
         .toLowerCase();
-      if (v && wanted.some((w) => v.startsWith(w))) found.push(i);
+      if (!v || !wanted.some((w) => v.startsWith(w))) continue;
+
+      if (wantedCons) {
+        const c = stripConsignmentPrefix(i[consignmentFilter]).toLowerCase();
+        if (c !== wantedCons) continue;
+      }
+      found.push(i);
     }
     if (!r.data.page_context?.has_more_page) break;
   }
   logger.info("[INV-SCAN]", {
     forms: wanted,
+    consignment: wantedCons,
     scanned,
-    found: found.map((i) => `${i.invoice_number}:${i[orderFilter]}`),
+    found: found.map(
+      (i) => `${i.invoice_number}:${i[orderFilter]}:${i[consignmentFilter]}`,
+    ),
   });
   return found;
 };
@@ -426,7 +445,9 @@ export const syncInvoicesForConsignment = async (consignmentNumber) => {
   if (!forms.length) return 0;
 
   const token = await getZohoAccessToken();
-  const matched = await scanInvoicesForForms(token, forms);
+  const matched = await scanInvoicesForForms(token, forms, {
+    consignmentNumber,
+  });
   return matched.length ? syncInvoiceRows(matched, token) : 0;
 };
 

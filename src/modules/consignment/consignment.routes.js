@@ -8,6 +8,8 @@ import {
   getStatuses,
   advanceStatus,
   changeConsignmentStatus,
+  logManifestPrint,
+  getManifestPrints,
 } from "../consignment/consignment.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
 
@@ -242,5 +244,8 @@ router.put("/:id/status", requireAuth, changeConsignmentStatus);
  *         description: Consignment not found
  */
 router.delete("/:id", requireAuth, deleteConsignment);
+
+router.post("/:id/manifest-prints", requireAuth, logManifestPrint);
+router.get("/:id/manifest-prints", requireAuth, getManifestPrints);
 
 export default router;

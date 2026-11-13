@@ -1,5 +1,4 @@
 import express from "express";
-import multer from "multer";
 import {
   createCustomer,
   getCustomerById,
@@ -17,12 +16,10 @@ import {
   getAppCustomerStatusMap,
   toggleAppCustomerAccess,
   bulkImportCustomersFromDocs,
-} from "./customer.controller.js"; // Adjust path as needed
+} from "./customer.controller.js";
 import upload from "../../middleware/upload.js";
-import { get } from "http";
 import { requireAuth } from "../auth/auth.middleware.js";
 const router = express.Router();
-// const upload = multer({ storage: multer.memoryStorage() });
 
 /**
  * @swagger
@@ -48,7 +45,23 @@ const router = express.Router();
  *       400:
  *         description: Invalid input
  */
-router.post("/", createCustomer);
+router.post("/", requireAuth, createCustomer);
+
+/**
+ * @swagger
+ * /api/customers/customerpanel:
+ *   get:
+ *     summary: Get customer panel/summary data
+ *     tags: [Customers]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       200:
+ *         description: Customer panel data
+ */
+router.get("/customerpanel", requireAuth, getCustomersPanel);
+
+router.get("/status-map", requireAuth, getAppCustomerStatusMap);
 
 /**
  * @swagger
@@ -73,7 +86,7 @@ router.post("/", createCustomer);
  *       404:
  *         description: Customer not found
  */
-router.get("/:id", getCustomerById);
+router.get("/:id", requireAuth, getCustomerById);
 
 /**
  * @swagger
@@ -93,21 +106,7 @@ router.get("/:id", getCustomerById);
  *               items:
  *                 $ref: '#/components/schemas/Customer'
  */
-router.get("/", getCustomers);
-
-/**
- * @swagger
- * /api/customers/customerpanel:
- *   get:
- *     summary: Get customer panel/summary data
- *     tags: [Customers]
- *     security:
- *       - cookieAuth: []
- *     responses:
- *       200:
- *         description: Customer panel data
- */
-router.get("/customerpanel", getCustomersPanel);
+router.get("/", requireAuth, getCustomers);
 
 /**
  * @swagger
@@ -138,7 +137,7 @@ router.get("/customerpanel", getCustomersPanel);
  *       404:
  *         description: Customer not found
  */
-router.put("/:zoho_id", updateCustomer);
+router.put("/:zoho_id", requireAuth, updateCustomer);
 
 /**
  * @swagger
@@ -159,7 +158,7 @@ router.put("/:zoho_id", updateCustomer);
  *       404:
  *         description: Customer not found
  */
-router.delete("/:zoho_id", deleteCustomer);
+router.delete("/:zoho_id", requireAuth, deleteCustomer);
 
 // Contact routes
 
@@ -194,7 +193,7 @@ router.delete("/:zoho_id", deleteCustomer);
  *       404:
  *         description: Customer not found
  */
-router.post("/:zoho_id/contacts", saveContacts); // POST /api/customers/:zoho_id/contacts
+router.post("/:zoho_id/contacts", requireAuth, saveContacts);
 
 /**
  * @swagger
@@ -219,7 +218,11 @@ router.post("/:zoho_id/contacts", saveContacts); // POST /api/customers/:zoho_id
  *       404:
  *         description: Contact not found
  */
-router.delete("/:zoho_id/contacts/:contact_person_id", deleteContact); // DELETE /api/customers/:zoho_id/contacts/:contact_person_id
+router.delete(
+  "/:zoho_id/contacts/:contact_person_id",
+  requireAuth,
+  deleteContact,
+);
 
 // Document routes
 
@@ -258,16 +261,7 @@ router.delete("/:zoho_id/contacts/:contact_person_id", deleteContact); // DELETE
  *       404:
  *         description: Customer not found
  */
-router.post(
-  "/:zoho_id/documents",
-  (req, res, next) => {
-    console.log("Raw request body fields:", Object.keys(req.body));
-    console.log("Raw request files:", req.file);
-    next();
-  },
-  upload.single("file"),
-  uploadDocument,
-);
+router.post("/:zoho_id/documents", upload.single("file"), uploadDocument);
 
 /**
  * @swagger
@@ -294,7 +288,7 @@ router.post(
  *       404:
  *         description: Customer not found
  */
-router.get("/:zoho_id/documents", getDocuments);
+router.get("/:zoho_id/documents", requireAuth, getDocuments);
 
 /**
  * @swagger
@@ -329,7 +323,7 @@ router.get("/:zoho_id/documents", getDocuments);
  *       404:
  *         description: Document not found
  */
-router.put("/:zoho_id/documents/:document_id", updateDocument);
+router.put("/:zoho_id/documents/:document_id", requireAuth, updateDocument);
 
 /**
  * @swagger
@@ -354,7 +348,7 @@ router.put("/:zoho_id/documents/:document_id", updateDocument);
  *       404:
  *         description: Document not found
  */
-router.delete("/:zoho_id/documents/:document_id", deleteDocument);
+router.delete("/:zoho_id/documents/:document_id", requireAuth, deleteDocument);
 
 /**
  * @swagger
@@ -384,9 +378,12 @@ router.delete("/:zoho_id/documents/:document_id", deleteDocument);
  *       404:
  *         description: Document not found
  */
-router.get("/:zoho_id/documents/:document_id/download", downloadDocument);
+router.get(
+  "/:zoho_id/documents/:document_id/download",
+  requireAuth,
+  downloadDocument,
+);
 
-router.get("/status-map", requireAuth, getAppCustomerStatusMap);
 router.post("/toggle-access", requireAuth, toggleAppCustomerAccess);
 
 router.post("/import-from-doc", requireAuth, bulkImportCustomersFromDocs);
