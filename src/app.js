@@ -37,6 +37,7 @@ import appDashboardRoutes from "./modules/mobile-app/dashboard/dashboard.route.j
 import appShipmentRoutes from "./modules/mobile-app/shipments/shipment.route.js";
 import appInvoiceRoutes from "./modules/mobile-app/invoices/invoice.route.js";
 import appOptionRoutes from "./modules/mobile-app/options/option.route.js";
+import appMapsRoutes from "./modules/mobile-app/maps/maps.route.js";
 import { runEtaMonitor } from "./modules/etaMonitoring/etaMonitor.service.js";
 
 dotenv.config();
@@ -46,24 +47,17 @@ app.use(express.json());
 app.use(cookieParser());
 
 const allowedOrigins = process.env.CLIENT_ORIGINS
-  ? process.env.CLIENT_ORIGINS.split(",").map((o) => o.trim())
+  ? process.env.CLIENT_ORIGINS.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean)
   : [
       "http://localhost:5173",
-      "http://127.0.0.1:5500",
-      "http://localhost:3000",
-      "http://localhost:5000",
-      "http://127.0.0.1:5000",
-      "http://localhost:5500",
-      "http://localhost:8000",
-      "http://192.168.100.160:*",
-      "http://192.168.100.162:*",
-      "http://192.168.1.29:*",
-      "http://192.168.137.1:*",
-      "http://192.168.137.85:*",
-      "https://consolidatetracking.onrender.com",
-      "https://imaginative-pothos-0a1193.netlify.app",
+      "http://localhost:5174",
+      "http://localhost:5175",
+      "http://192.168.100.104:8081",
       "https://orders.royalgulfshipping.com",
       "https://trackorder.royalgulfshipping.com",
+      "https://consolidate-forms.onrender.com",
     ];
 
 function isOriginAllowed(origin) {
@@ -125,6 +119,11 @@ const swaggerSpec = swaggerJsdoc({
   ],
 });
 
+app.use("/", (req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
+
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.get("/api-docs.json", (_req, res) => {
   res.setHeader("Content-Type", "application/json");
@@ -153,13 +152,14 @@ app.use("/api/address", addressRoutes);
 app.use("/api/zoho-invoice", zohoInvoiceRoutes);
 app.use("/api/eta-monitor", etaMonitorRoutes);
 
-app.use("/api/mobile-app/auth", appAuthRoutes);
-app.use("/api/mobile-app/dashboard", appDashboardRoutes);
-app.use("/api/mobile-app/shipments", appShipmentRoutes);
-app.use("/api/mobile-app/invoices", appInvoiceRoutes);
-app.use("/api/mobile-app/options", appOptionRoutes);
+app.use("/api/mobile/auth", appAuthRoutes);
+app.use("/api/mobile/dashboard", appDashboardRoutes);
+app.use("/api/mobile/shipments", appShipmentRoutes);
+app.use("/api/mobile/invoices", appInvoiceRoutes);
+app.use("/api/mobile/options", appOptionRoutes);
+app.use("/api/mobile/maps", appMapsRoutes);
 
-app.get("/api/mobile-app/payments/ngenius/redirect", (req, res) => {
+app.get("/api/mobile/payments/ngenius/redirect", (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>

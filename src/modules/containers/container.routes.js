@@ -41,7 +41,7 @@ const router = express.Router();
  *               type: array
  *               items: { type: string }
  */
-router.get("/statuses", getStatuses);
+router.get("/statuses", requireAuth, getStatuses);
 
 /**
  * @swagger
@@ -60,7 +60,7 @@ router.get("/statuses", getStatuses);
  *               type: array
  *               items: { type: string }
  */
-router.get("/locations", getLocations);
+router.get("/locations", requireAuth, getLocations);
 
 /**
  * @swagger
@@ -79,7 +79,7 @@ router.get("/locations", getLocations);
  *               type: array
  *               items: { type: string }
  */
-router.get("/sizes", getSizes);
+router.get("/sizes", requireAuth, getSizes);
 
 /**
  * @swagger
@@ -98,7 +98,7 @@ router.get("/sizes", getSizes);
  *               type: array
  *               items: { type: string }
  */
-router.get("/types", getTypes);
+router.get("/types", requireAuth, getTypes);
 
 /**
  * @swagger
@@ -117,7 +117,7 @@ router.get("/types", getTypes);
  *               type: array
  *               items: { type: string }
  */
-router.get("/ownership-types", getOwnershipTypes);
+router.get("/ownership-types", requireAuth, getOwnershipTypes);
 
 /**
  * @swagger
@@ -137,7 +137,7 @@ router.get("/ownership-types", getOwnershipTypes);
  *               items:
  *                 $ref: '#/components/schemas/ContainerAssignment'
  */
-router.get("/container-consignments", getContainerAssignments);
+router.get("/container-consignments", requireAuth, getContainerAssignments);
 
 /**
  * @swagger
@@ -162,7 +162,11 @@ router.get("/container-consignments", getContainerAssignments);
  *       404:
  *         description: Assignment not found
  */
-router.put("/container-consignments/:id/release", releaseContainer);
+router.put(
+  "/container-consignments/:id/release",
+  requireAuth,
+  releaseContainer,
+);
 
 /**
  * @swagger
@@ -182,7 +186,7 @@ router.put("/container-consignments/:id/release", releaseContainer);
  *               items:
  *                 $ref: '#/components/schemas/Container'
  */
-router.get("/", getAllContainers);
+router.get("/", requireAuth, getAllContainers);
 
 /**
  * @swagger
@@ -202,7 +206,11 @@ router.get("/", getAllContainers);
  *               items:
  *                 $ref: '#/components/schemas/Container'
  */
-router.get("/consignment-containers", getAllContainersForConsignment);
+router.get(
+  "/consignment-containers",
+  requireAuth,
+  getAllContainersForConsignment,
+);
 
 /**
  * @swagger
@@ -363,7 +371,7 @@ router.put("/status/:cid/", requireAuth, updateContainerStatus);
  *       404:
  *         description: Container not found
  */
-router.delete("/:cid", deleteContainer);
+router.delete("/:cid", requireAuth, deleteContainer);
 
 /**
  * @swagger
@@ -384,7 +392,7 @@ router.delete("/:cid", deleteContainer);
  *       404:
  *         description: Container not found
  */
-router.get("/:cid/unassigned-orders", getUnassignedOrders);
+router.get("/:cid/unassigned-orders", requireAuth, getUnassignedOrders);
 
 router.delete(
   "/:cid/attachments/:attachmentId",

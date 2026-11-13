@@ -2,7 +2,6 @@ import pool from "../../db/pool.js";
 import axios from "axios";
 import fs from "fs";
 import FormData from "form-data";
-import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import path from "path";
 import { getZohoAccessToken } from "../../services/getZohoAccessToken.js";
@@ -169,28 +168,29 @@ export async function getCustomers(req, res) {
 }
 
 export async function deleteCustomer(req, res) {
-  const { zoho_id } = req.params; // we only need zoho_id for contacts
-  const token = await getZohoAccessToken();
+  const { zoho_id } = req.params;
 
   try {
-    // Delete from Zoho
-    const zohoRes = await axios.delete(
-      `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          "Content-Type": "application/json",
+    let zohoData = null;
+    if (!zoho_id.startsWith("LOCAL-")) {
+      const token = await getZohoAccessToken();
+      const zohoRes = await axios.delete(
+        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
+        {
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            "Content-Type": "application/json",
+          },
+          params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
         },
-        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-      },
-    );
+      );
+      zohoData = zohoRes.data;
+    }
 
-    // Delete from local DB
     const { rows } = await pool.query(
       `DELETE FROM customers WHERE zoho_id = $1 RETURNING zoho_id, contact_name, contact_type`,
       [zoho_id],
     );
-
     if (!rows.length) {
       return res.status(404).json({ error: "Customer not found in local DB" });
     }
@@ -198,12 +198,12 @@ export async function deleteCustomer(req, res) {
     res.status(200).json({
       message: "Customer deleted successfully",
       deleted: rows[0],
-      zoho_response: zohoRes.data,
+      zoho_response: zohoData,
     });
   } catch (err) {
-    console.error("Delete contact failed:", err.response?.data || err.message);
+    console.error("Delete customer failed:", err.response?.data || err.message);
     res.status(err.response?.status || 500).json({
-      error: err.response?.data?.message || "Failed to delete contact",
+      error: err.response?.data?.message || "Failed to delete customer",
     });
   }
 }
@@ -229,66 +229,11 @@ export async function saveContacts(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    try {
-      const zohoResponse = await axios.get(
-        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
-        {
-          headers: {
-            Authorization: `Zoho-oauthtoken ${token}`,
-            "Content-Type": "application/json",
-          },
-          params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-        },
-      );
-    } catch (err) {
-      console.error(
-        `Invalid zoho_id: ${zoho_id}`,
-        err.response?.data || err.message,
-      );
-      return res.status(400).json({
-        error: `Invalid zoho_id: ${zoho_id}`,
-        details: err.response?.data || err.message,
-      });
-    }
-
-    // Check if contact persons API is restricted
-    let isApiRestricted = false;
-    try {
-      // Test POST request with minimal payload
-      await axios.post(
-        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}/contactpersons`,
-        { first_name: "test" },
-        {
-          headers: {
-            Authorization: `Zoho-oauthtoken ${token}`,
-            "Content-Type": "application/json",
-          },
-          params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-        },
-      );
-    } catch (testErr) {
-      if (
-        testErr.response?.status === 405 &&
-        testErr.response?.data?.code === 37
-      ) {
-        console.warn(
-          "Contact persons API is restricted",
-          testErr.response.data,
-        );
-        isApiRestricted = true;
-      }
-    }
-
-    if (isApiRestricted) {
-      console.error(
-        "Contact persons API is restricted, likely due to trial account",
-      );
-      return res.status(400).json({
-        error:
-          "Creating or updating contact persons is not allowed, likely due to Zoho Books trial account restrictions",
-        details: { code: 37, message: "Contact persons API is restricted" },
-      });
-    }
+    const headers = {
+      Authorization: `Zoho-oauthtoken ${token}`,
+      "Content-Type": "application/json",
+    };
+    const params = { organization_id: process.env.ZOHO_BOOKS_ORG_ID };
 
     const updatedContacts = [];
     for (const contact of contacts) {
@@ -319,7 +264,6 @@ export async function saveContacts(req, res) {
             );
           } catch (err) {
             if (err.response?.status === 404) {
-              // fallback to create
               response = await axios.post(
                 `https://www.zohoapis.com/books/v3/contacts/${zoho_id}/contactpersons`,
                 payload,
@@ -347,6 +291,12 @@ export async function saveContacts(req, res) {
 
     res.status(200).json(updatedContacts);
   } catch (err) {
+    if (err.response?.status === 405 && err.response?.data?.code === 37) {
+      return res.status(400).json({
+        error:
+          "Creating or updating contact persons is not allowed, likely due to Zoho Books trial account restrictions",
+      });
+    }
     console.error("Save contacts failed:", {
       message: err.message,
       response: err.response?.data,
@@ -414,28 +364,6 @@ export async function uploadDocument(req, res) {
       throw new Error("Failed to retrieve Zoho access token");
     }
 
-    try {
-      const contactResponse = await axios.get(
-        `https://www.zohoapis.com/books/v3/contacts/${zoho_id}`,
-        {
-          headers: {
-            Authorization: `Zoho-oauthtoken ${token}`,
-            "Content-Type": "application/json",
-          },
-          params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-        },
-      );
-    } catch (err) {
-      console.error(
-        `Invalid contact_id: ${zoho_id}`,
-        err.response?.data || err.message,
-      );
-      return res.status(400).json({
-        error: `Invalid contact_id: ${zoho_id}`,
-        details: err.response?.data || err.message,
-      });
-    }
-
     const formData = new FormData();
     const fileBuffer = await fs.promises.readFile(file.path);
     formData.append("document", fileBuffer, {
@@ -466,17 +394,6 @@ export async function uploadDocument(req, res) {
     }
 
     const document = response.data.documents;
-
-    const verifyResponse = await axios.get(
-      `https://www.zohoapis.com/books/v3/documents/${document.document_id}`,
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          "Content-Type": "application/json",
-        },
-        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-      },
-    );
 
     res.status(200).json({
       document_id: document.document_id,
@@ -780,7 +697,7 @@ export async function updateCustomer(req, res) {
             typeof address === "string"
               ? address.startsWith("{")
                 ? JSON.parse(address)
-                : { address1: address }
+                : { address: address }
               : address;
           payload.billing_address = addrObj;
         } catch (e) {
@@ -804,13 +721,10 @@ export async function updateCustomer(req, res) {
           },
         );
 
-        zohoCustomer = { ...currentCustomer, ...zohoRes.data.contact }; // Merge updated fields
-      } else {
+        zohoCustomer = { ...currentCustomer, ...zohoRes.data.contact };
       }
-    } else {
     }
 
-    // Fixed: Check for empty address before stringifying
     let addressStr = null;
     if (
       zohoCustomer.billing_address &&
@@ -826,10 +740,9 @@ export async function updateCustomer(req, res) {
       addressStr =
         typeof address === "string" ? address : JSON.stringify(address);
     } else {
-      addressStr = currentCustomer.address || null; // Preserve existing if meaningful
+      addressStr = currentCustomer.address || null;
     }
 
-    // Timestamps: Pull from Zoho or default
     const createdTime =
       zohoCustomer.created_time || currentCustomer.created_time || null;
     const modifiedTime =
@@ -865,7 +778,7 @@ export async function updateCustomer(req, res) {
           email ||
           currentCustomer.email ||
           null,
-        addressStr, // Now null for empty
+        addressStr,
         zohoCustomer.notes || zoho_notes || currentCustomer.zoho_notes || null,
         associated_by !== undefined
           ? associated_by || null
@@ -885,44 +798,12 @@ export async function updateCustomer(req, res) {
 
     res.json(updatedRows[0]);
   } catch (err) {
-    // ... (fallback and error handling unchanged)
     console.error("Update customer failed:", {
       code: err.response?.data?.code,
       message: err.response?.data?.message || err.message,
       status: err.response?.status,
     });
 
-    if (
-      err.response?.status >= 400 &&
-      (type !== undefined ||
-        associated_by !== undefined ||
-        system_notes !== undefined)
-    ) {
-      try {
-        const { rows: fallbackRows } = await pool.query(
-          `UPDATE customers SET 
-             type = COALESCE($1::text, type),
-             associated_by = COALESCE($2::text, associated_by),
-             system_notes = COALESCE($3::text, system_notes),
-             modified_by = COALESCE($4::text, modified_by),
-             modified_time = NOW()
-           WHERE zoho_id = $5
-           RETURNING *`,
-          [
-            type,
-            associated_by || null,
-            system_notes || null,
-            "System Update",
-            zoho_id,
-          ],
-        );
-        return res.json(fallbackRows[0]);
-      } catch (fallbackErr) {
-        console.error("Fallback DB update failed:", fallbackErr);
-      }
-    }
-
-    const statusCode = err.response?.status || 500;
     res.status(statusCode).json({
       error: `Failed to update customer: ${err.response?.data?.message || err.message}`,
     });
@@ -1020,137 +901,82 @@ export async function getCustomerById(req, res) {
 
   try {
     const { rows } = await pool.query(
-      `SELECT zoho_id, contact_name, email, address, zoho_notes, associated_by, 
-              system_notes, type, contact_type, status, created_by, modified_by 
-       FROM customers WHERE zoho_id = $1`,
+      `SELECT * FROM customers WHERE zoho_id = $1`,
       [id],
     );
-
     if (!rows.length) {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    const customer = rows[0];
-    const token = await getZohoAccessToken();
-    const zohoRes = await axios.get(
-      `https://www.zohoapis.com/books/v3/contacts/${customer.zoho_id}`,
-      {
-        headers: {
-          Authorization: `Zoho-oauthtoken ${token}`,
-          "Content-Type": "application/json",
-        },
-        params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
-      },
-    );
+    let customer = rows[0];
+    let contactPersons = [];
+    let documents = [];
 
-    const zohoCustomer = zohoRes.data.contact;
+    if (!id.startsWith("LOCAL-")) {
+      try {
+        const token = await getZohoAccessToken();
+        const zohoRes = await axios.get(
+          `https://www.zohoapis.com/books/v3/contacts/${id}`,
+          {
+            headers: {
+              Authorization: `Zoho-oauthtoken ${token}`,
+              "Content-Type": "application/json",
+            },
+            params: { organization_id: process.env.ZOHO_BOOKS_ORG_ID },
+          },
+        );
+        const z = zohoRes.data.contact;
 
-    const contactPersons = (zohoCustomer.contact_persons || []).map((cp) => ({
-      id: cp.contact_person_id,
-      name: `${cp.first_name || ""} ${cp.last_name || ""}`.trim() || null,
-      phone: cp.phone || null,
-      email: cp.email || null,
-    }));
+        contactPersons = (z.contact_persons || []).map((cp) => ({
+          id: cp.contact_person_id,
+          name: `${cp.first_name || ""} ${cp.last_name || ""}`.trim() || null,
+          phone: cp.phone || null,
+          email: cp.email || null,
+        }));
+        documents = z.documents || [];
 
-    const { rows: updatedRows } = await pool.query(
-      `
-      INSERT INTO customers 
-      (
-        zoho_id,
-        contact_name,
-        email,
-        phone_number,
-        address,
-        zoho_notes,
-        associated_by,
-        system_notes,
-        type,
-        contact_type,
-        status,
-        created_by,
-        modified_by
-      )
-      VALUES 
-      (
-        $1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11, $12, $13
-      )
-      ON CONFLICT (zoho_id) 
-      DO UPDATE SET
-        contact_name = EXCLUDED.contact_name,
-        email = EXCLUDED.email,
-        phone_number = EXCLUDED.phone_number,
-        address = EXCLUDED.address,
-        zoho_notes = EXCLUDED.zoho_notes,
-        associated_by = COALESCE(
-          EXCLUDED.associated_by,
-          customers.associated_by
-        ),
-        system_notes = COALESCE(
-          EXCLUDED.system_notes,
-          customers.system_notes
-        ),
-        type = COALESCE(
-          EXCLUDED.type,
-          customers.type
-        ),
-        contact_type = EXCLUDED.contact_type,
-        status = EXCLUDED.status,
-        created_by = COALESCE(
-          EXCLUDED.created_by,
-          customers.created_by
-        ),
-        modified_by = COALESCE(
-          EXCLUDED.modified_by,
-          customers.modified_by
-        )
+        const zohoEmail =
+          z.email ||
+          z.contact_persons?.find((cp) => cp.is_primary_contact)?.email ||
+          null;
+        const zohoAddress =
+          z.billing_address && !isEmptyAddress(z.billing_address)
+            ? JSON.stringify(z.billing_address)
+            : null;
 
-      RETURNING 
-        zoho_id,
-        contact_name,
-        email,
-        phone_number,
-        address,
-        zoho_notes,
-        associated_by,
-        system_notes,
-        type,
-        contact_type,
-        status,
-        created_by,
-        modified_by
-      `,
-      [
-        zohoCustomer.contact_id,
-        zohoCustomer.contact_name || null,
-        zohoCustomer.email || null,
-        zohoCustomer.phone || zohoCustomer.mobile || null,
-        zohoCustomer.custom_fields?.cf_address || null,
-        zohoCustomer.notes || null,
-        null,
-        null,
-        null,
-        zohoCustomer.contact_type || "customer",
-        zohoCustomer.status === "active",
-        zohoCustomer.created_by_name || null,
-        zohoCustomer.custom_fields?.cf_updated_by_name ||
-          zohoCustomer.updated_by_name ||
-          null,
-      ],
-    );
-    res.json({
-      ...updatedRows[0],
-      contact_persons: contactPersons,
-      documents: zohoCustomer.documents || [],
-    });
+        const { rows: updated } = await pool.query(
+          `UPDATE customers SET
+             contact_name = COALESCE($2, contact_name),
+             email        = COALESCE($3, email),
+             phone_number = COALESCE($4, phone_number),
+             address      = COALESCE($5, address),
+             zoho_notes   = COALESCE($6, zoho_notes),
+             status       = $7
+           WHERE zoho_id = $1
+           RETURNING *`,
+          [
+            id,
+            z.contact_name || null,
+            zohoEmail,
+            z.phone || z.mobile || null,
+            zohoAddress,
+            z.notes || null,
+            z.status === "active",
+          ],
+        );
+        customer = updated[0] || customer;
+      } catch (zohoErr) {
+        logger.warn("Zoho fetch failed in getCustomerById", {
+          id,
+          message: zohoErr.response?.data?.message || zohoErr.message,
+        });
+      }
+    }
+
+    res.json({ ...customer, contact_persons: contactPersons, documents });
   } catch (err) {
-    console.error(
-      "Fetch customer by ID failed:",
-      err.response?.data || err.message,
-    );
-    res.status(err.response?.status || 500).json({
-      error: err.response?.data?.message || "Failed to fetch customer",
-    });
+    console.error("Fetch customer by ID failed:", err.message);
+    res.status(500).json({ error: "Failed to fetch customer" });
   }
 }
 

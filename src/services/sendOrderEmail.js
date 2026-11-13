@@ -2,7 +2,7 @@ import pool from "../db/pool.js";
 import { transporter } from "../middleware/nodeMailer.js";
 import { escapeHtml } from "./escapeHtml.js";
 import logger from "./logger.js";
-import { renderTemplate } from "./renderTemplate.js";
+import { renderEmail } from "./renderEmail.js";
 
 const KARACHI_TIMEZONE = "Asia/Karachi";
 const FRONTEND_URL = process.env.FORM_BASE_URL || "http://localhost:5174";
@@ -88,7 +88,7 @@ function buildActionLinksHtml(statusLabel, trackingId, recipientType) {
   const cells = config.links
     .map(
       (link) =>
-        `<td style="vertical-align:top;width:${width}%;padding:0 10px 0 0"><p style="margin:0 0 6px;font-size:13px;color:#475569">${escapeHtml(link.description)}</p><a class="cta" style="margin:0" href="${FRONTEND_URL}/${link.path}/${encodeURIComponent(trackingId)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a></td>`,
+        `<td style="vertical-align:top;width:${width}%;padding:0 10px 0 0"><p style="margin:0 0 6px;font-size:13px;color:#475569">${escapeHtml(link.description)}</p><a style="display:inline-block;margin:0;background:#F26B1D;color:#ffffff;font-weight:bold;font-size:13px;padding:11px 20px;border-radius:4px;text-decoration:none" href="${FRONTEND_URL}/${link.path}/${encodeURIComponent(trackingId)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.text)}</a></td>`,
     )
     .join("");
 
@@ -101,7 +101,8 @@ function buildSubject(templateData) {
 
 function buildSubscriptionConfirmationHtml(templateData) {
   const route = `${escapeHtml(templateData.place_of_loading || "—")} &rarr; ${escapeHtml(templateData.place_of_delivery || "—")}`;
-  return renderTemplate("subscription_confirmed.html", {
+  return renderEmail("subscription_confirmed", {
+    recipientName: escapeHtml(templateData.receiverName || "Valued Customer"),
     refId: escapeHtml(templateData.refId || "—"),
     orderId: escapeHtml(templateData.orderId || "—"),
     route,
@@ -110,12 +111,12 @@ function buildSubscriptionConfirmationHtml(templateData) {
       templateData.lastUpdated || formatDateTime(new Date()),
     ),
     trackLink: escapeHtml(templateData.trackLink || `${TRACK_BASE}/`),
-    currentYear: new Date().getFullYear(),
   });
 }
 
 function buildOrderCreatedHtml(templateData) {
-  return renderTemplate("order_created.html", {
+  return renderEmail("order_created", {
+    recipientName: escapeHtml(templateData.receiverName || "Valued Customer"),
     statusLabel: escapeHtml(templateData.statusLabel || "Order Created"),
     statusMsg: escapeHtml(
       templateData.statusMsg ||
@@ -134,12 +135,12 @@ function buildOrderCreatedHtml(templateData) {
       templateData.refId,
       templateData.recipientType,
     ),
-    currentYear: new Date().getFullYear(),
   });
 }
 
 function buildShipmentUpdateHtml(templateData) {
-  return renderTemplate("shipment_update.html", {
+  return renderEmail("shipment_update", {
+    recipientName: escapeHtml(templateData.receiverName || "Valued Customer"),
     statusLabel: escapeHtml(templateData.statusLabel || "Shipment Updated"),
     statusMsg: escapeHtml(
       templateData.statusMsg || "We have an update on your shipment.",
@@ -159,7 +160,6 @@ function buildShipmentUpdateHtml(templateData) {
       templateData.refId,
       templateData.recipientType,
     ),
-    currentYear: new Date().getFullYear(),
   });
 }
 
