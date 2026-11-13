@@ -409,27 +409,34 @@ const normalizeName = (v) =>
     .replace(/^(mr|mrs|ms|miss|dr|eng|sir|madam)\b\s*/, "")
     .trim();
 
-const computeReceiverPayments = (receivers, invoices) => {
+const computeReceiverPayments = (receivers, invoices, senderName = "") => {
   const byCustomer = {};
   for (const inv of invoices) {
     const k = normalizeName(inv.customer);
     (byCustomer[k] = byCustomer[k] || []).push(inv);
   }
+  const senderKey = normalizeName(senderName);
   return Object.fromEntries(
-    receivers.map((r) => [
-      r.id,
-      paymentStatusOf(byCustomer[normalizeName(r.receiver_name)] || []),
-    ]),
+    receivers.map((r) => {
+      const keys = new Set([normalizeName(r.receiver_name)]);
+      if (senderKey) keys.add(senderKey);
+      const docs = [...keys].flatMap((k) => byCustomer[k] || []);
+      return [r.id, paymentStatusOf(docs)];
+    }),
   );
 };
 
 export const getReceiverPayments = async (orderId) => {
   const orderRes = await pool.query(
-    "SELECT rgl_booking_number FROM orders WHERE id = $1",
+    `SELECT o.rgl_booking_number, s.sender_name
+       FROM orders o
+       LEFT JOIN senders s ON s.order_id = o.id
+      WHERE o.id = $1`,
     [orderId],
   );
   if (!orderRes.rows[0]) return null;
   const orderKey = key(orderRes.rows[0].rgl_booking_number);
+  const senderName = orderRes.rows[0].sender_name;
 
   const [recRes, invRes] = await Promise.all([
     pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
@@ -445,7 +452,7 @@ export const getReceiverPayments = async (orderId) => {
         )
       : { rows: [] },
   ]);
-  return computeReceiverPayments(recRes.rows, invRes.rows);
+  return computeReceiverPayments(recRes.rows, invRes.rows, senderName);
 };
 
 export const getReceiverApprovals = async (orderId) => {
@@ -533,9 +540,15 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       });
     }
 
-    const errors = await syncOrderFromZoho(formNo);
-    if (errors.every(Boolean)) {
-      const rateLimited = errors.some((e) => e.response?.status === 429);
+    try {
+      await syncInvoicesForOrder(formNo);
+    } catch (err) {
+      logger.error("Failed to sync order invoices for payment status", {
+        formNo,
+        status: err.response?.status,
+        err: err.response?.data || err.message,
+      });
+      const rateLimited = err.response?.status === 429;
       return res.status(rateLimited ? 429 : 502).json({
         success: false,
         message: rateLimited
@@ -792,17 +805,6 @@ export const getOrderBilling = async (req, res) => {
 
     const orderKey = key(order.rgl_booking_number);
 
-    const linkRes = await pool.query(
-      `SELECT DISTINCT lower(btrim(c.consignment_number)) AS cn
-         FROM container_assignment_history h
-         JOIN consignments c ON c.id = h.consignment_id
-        WHERE h.order_id = $1`,
-      [orderId],
-    );
-    const linkedCons = linkRes.rows
-      .map((r) => stripConsignmentPrefix(r.cn).toLowerCase())
-      .filter(Boolean);
-
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
         `SELECT zoho_invoice_id AS id, invoice_number AS number,
@@ -814,9 +816,8 @@ export const getOrderBilling = async (req, res) => {
                 synced_at
            FROM zoho_invoices
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
-            AND lower(btrim(consignment_number)) = ANY($2::text[])
           ORDER BY invoice_date, id`,
-        [orderKey, linkedCons],
+        [orderKey],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
@@ -828,9 +829,8 @@ export const getOrderBilling = async (req, res) => {
                 synced_at
            FROM zoho_bills
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
-            AND lower(btrim(consignment_number)) = ANY($2::text[])
           ORDER BY bill_date, id`,
-        [orderKey, linkedCons],
+        [orderKey],
       ),
       pool.query(
         "SELECT id, receiver_name FROM receivers WHERE order_id = $1",
@@ -841,7 +841,7 @@ export const getOrderBilling = async (req, res) => {
     return res.json({
       success: true,
       row: buildBillingRow(order, invRes.rows, billRes.rows),
-      receiverPayments: await getReceiverPayments(orderId),
+      receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
       receiverApprovals: await getReceiverApprovals(orderId),
     });
   } catch (err) {
