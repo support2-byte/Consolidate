@@ -898,7 +898,9 @@ export const toggleSendEmail = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Email Notification enabled!",
+      message: send_email
+        ? "Email notification enabled!"
+        : "Email notification disabled!",
       status: updatedStatus.rows[0],
     });
   } catch (err) {
