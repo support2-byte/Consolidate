@@ -1,6 +1,12 @@
 import pool from "../../../db/pool.js";
 import logger from "../../../services/logger.js";
 
+const ADDON_PRICES = {
+  "Offloading Support": 80,
+  "Marking Required": 20,
+  "Express Delivery": 70,
+};
+
 export const getShipments = async (req, res) => {
   const { id } = req.params;
 
@@ -12,6 +18,10 @@ export const getShipments = async (req, res) => {
           o.rgl_booking_number,
           oi.id AS order_item_id,
           oi.item_ref,
+          oi.tracking_id AS item_tracking_id,
+          o.tracking_id AS order_tracking_id,
+          oi.category,
+          oi.subcategory,
           oi.status,
           oi.total_number,
           oi.weight,
@@ -76,6 +86,64 @@ export const getShipments = async (req, res) => {
   }
 };
 
+const roleOf = (isReceiver, isSender) =>
+  isReceiver && isSender
+    ? "both"
+    : isReceiver
+      ? "receiver"
+      : isSender
+        ? "sender"
+        : null;
+
+export const getShipmentRoles = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `
+        SELECT
+          o.rgl_booking_number,
+          EXISTS (
+            SELECT 1 FROM receivers r
+            WHERE r.order_id = o.id AND r.receiver_ref = $1
+          ) AS is_receiver,
+          EXISTS (
+            SELECT 1 FROM senders s
+            WHERE s.order_id = o.id AND s.sender_ref = $1
+          ) AS is_sender
+        FROM orders o
+        WHERE EXISTS (
+                SELECT 1 FROM receivers r
+                WHERE r.order_id = o.id AND r.receiver_ref = $1
+              )
+           OR EXISTS (
+                SELECT 1 FROM senders s
+                WHERE s.order_id = o.id AND s.sender_ref = $1
+              )
+      `,
+      [id],
+    );
+
+    const roles = {};
+    rows.forEach((row) => {
+      const role = roleOf(row.is_receiver, row.is_sender);
+      if (role && row.rgl_booking_number) roles[row.rgl_booking_number] = role;
+    });
+
+    return res.status(200).json({ success: true, roles });
+  } catch (error) {
+    logger.error("getShipmentRoles: query failed", {
+      customer_id: id,
+      error: { message: error.message, code: error.code },
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong.",
+    });
+  }
+};
+
 export const getShipment = async (req, res) => {
   const { id } = req.params;
   const { customer_id } = req.query;
@@ -90,6 +158,15 @@ export const getShipment = async (req, res) => {
           pl.name AS loading_place_name,
           pd.name AS destination_place_name,
 
+          EXISTS (
+            SELECT 1 FROM receivers rr
+            WHERE rr.order_id = o.id AND rr.receiver_ref = $2
+          ) AS is_receiver,
+          EXISTS (
+            SELECT 1 FROM senders ss
+            WHERE ss.order_id = o.id AND ss.sender_ref = $2
+          ) AS is_sender,
+
           r.receiver_name,
           r.receiver_contact,
           r.receiver_address,
@@ -100,6 +177,8 @@ export const getShipment = async (req, res) => {
 
           oi.id AS order_item_id,
           oi.item_ref,
+          oi.tracking_id AS item_tracking_id,
+          o.tracking_id AS order_tracking_id,
           oi.status,
           oi.category,
           oi.subcategory,
@@ -127,13 +206,17 @@ export const getShipment = async (req, res) => {
           asp.id AS storage_purchase_id,
           asp.status AS storage_status,
           asp.storage,
-          asp.days,
+          asp.duration_days AS days,
           asp.amount AS storage_amount
 
         FROM orders o
-        JOIN receivers r
-          ON r.order_id = o.id
-         AND r.receiver_ref = $2
+        LEFT JOIN LATERAL (
+          SELECT r2.*
+          FROM receivers r2
+          WHERE r2.order_id = o.id
+          ORDER BY (r2.receiver_ref = $2) DESC, r2.id ASC
+          LIMIT 1
+        ) r ON true
         JOIN order_items oi
           ON oi.order_id = o.id
         LEFT JOIN senders s
@@ -156,9 +239,9 @@ export const getShipment = async (req, res) => {
 
         LEFT JOIN LATERAL (
           SELECT ad.*
-          FROM app_delivery ad
-          WHERE ad.shipment = oi.item_ref
-            AND ad.customer_id = $2
+          FROM delivery_requests ad
+          WHERE ad.shipment_ref = oi.item_ref
+            AND ad.customer_ref = $2
           ORDER BY ad.created_at DESC
           LIMIT 1
         ) ad ON true
@@ -166,13 +249,22 @@ export const getShipment = async (req, res) => {
         LEFT JOIN LATERAL (
           SELECT asp.*
           FROM storage_purchase asp
-          WHERE asp.shipment = oi.item_ref
-            AND asp.customer_id = $2
+          WHERE asp.shipment_ref = oi.item_ref
+            AND asp.customer_ref = $2
           ORDER BY asp.created_at DESC
           LIMIT 1
         ) asp ON true
 
         WHERE o.rgl_booking_number = $1
+          AND (
+            -- receiver: sees the whole order (as before)
+            EXISTS (
+              SELECT 1 FROM receivers rr
+              WHERE rr.order_id = o.id AND rr.receiver_ref = $2
+            )
+            -- sender: only the items they sent
+            OR s.sender_ref = $2
+          )
 
         ORDER BY oi.id ASC
       `,
@@ -198,10 +290,12 @@ export const getShipment = async (req, res) => {
     }
 
     const first = rows[0];
+    const role = roleOf(first.is_receiver, first.is_sender);
 
     const items = rows.map((row) => ({
       order_item_id: row.order_item_id,
       item_ref: row.item_ref,
+      tracking_id: row.item_tracking_id,
       status: row.status,
       category: row.category,
       subcategory: row.subcategory,
@@ -226,6 +320,7 @@ export const getShipment = async (req, res) => {
       .map((row) => ({
         id: row.delivery_id,
         item_ref: row.item_ref,
+        tracking_id: row.item_tracking_id,
         status: row.delivery_status,
         delivery_amount: row.delivery_amount,
         delivery_address: row.app_delivery_address,
@@ -236,6 +331,7 @@ export const getShipment = async (req, res) => {
       .map((row) => ({
         id: row.storage_purchase_id,
         item_ref: row.item_ref,
+        tracking_id: row.item_tracking_id,
         status: row.storage_status,
         storage: row.storage,
         days: row.days,
@@ -243,8 +339,10 @@ export const getShipment = async (req, res) => {
       }));
 
     const data = {
+      role,
       order_id: first.order_id,
       rgl_booking_number: first.rgl_booking_number,
+      tracking_id: first.order_tracking_id,
       created_at: first.created_at,
       loading_place_name: first.loading_place_name,
       destination_place_name: first.destination_place_name,
@@ -256,17 +354,18 @@ export const getShipment = async (req, res) => {
           first.receiver_customer_address || first.receiver_address,
         status: first.receiver_status,
       },
-      delivery,
-      storage,
+      delivery: role === "sender" ? [] : delivery,
+      storage: role === "sender" ? [] : storage,
       items,
     };
 
     logger.info("getShipment: success", {
       rgl_booking_number: id,
       customer_id,
+      role,
       itemCount: items.length,
-      deliveryCount: delivery.length,
-      storageCount: storage.length,
+      deliveryCount: data.delivery.length,
+      storageCount: data.storage.length,
     });
 
     return res.status(200).json({
@@ -294,15 +393,58 @@ export const getShipment = async (req, res) => {
 
 export const purchaseStorage = async (req, res) => {
   const { id } = req.params;
-  const { days, totalCost, cartons, selectedShipment } = req.body;
+  const {
+    days,
+    totalCost,
+    cartons,
+    selectedShipment,
+    sizeValue,
+    sizeUnit,
+    requiredFrom,
+    notes,
+  } = req.body;
   try {
-    const shipmentValue = Array.isArray(selectedShipment)
-      ? selectedShipment.join(", ")
-      : selectedShipment;
+    if (typeof selectedShipment !== "string" || !selectedShipment) {
+      return res.status(400).json({
+        success: false,
+        message: "A single shipment item is required.",
+      });
+    }
+
+    const { rows: itemRows } = await pool.query(
+      "SELECT total_number, category, subcategory FROM order_items WHERE item_ref = $1",
+      [selectedShipment],
+    );
+
+    if (
+      itemRows.length === 0 ||
+      !Number.isInteger(Number(cartons)) ||
+      Number(cartons) < 1 ||
+      Number(cartons) > Number(itemRows[0].total_number) ||
+      Number(days) < 1 ||
+      Number(days) > 30
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid storage request.",
+      });
+    }
 
     const { rows } = await pool.query(
-      "INSERT INTO storage_purchase (customer_id, shipment, storage, days, amount) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-      [id, shipmentValue, cartons, days, totalCost],
+      "INSERT INTO storage_purchase (customer_ref, shipment_ref, storage, duration_days, amount, size_value, size_unit, category, subcategory, required_from, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+      [
+        id,
+        selectedShipment,
+        cartons,
+        days,
+        totalCost,
+        sizeValue,
+        sizeUnit,
+        itemRows[0].category ?? "",
+        itemRows[0].subcategory ?? "",
+        requiredFrom,
+        notes ?? "",
+      ],
     );
 
     if (rows.length) {
@@ -333,20 +475,30 @@ export const purchaseStorage = async (req, res) => {
 
 export const createDelivery = async (req, res) => {
   const { id } = req.params;
-  const {
-    name,
-    contact_number,
-    delivery_address,
-    addons,
-    totalAmount,
-    selectedShipment,
-  } = req.body;
+  const { name, contact_number, delivery_address, addons, selectedShipment } =
+    req.body;
 
   try {
-    const deliveryOptionsJson = JSON.stringify(addons ?? []);
+    if (typeof selectedShipment !== "string" || !selectedShipment) {
+      return res.status(400).json({
+        success: false,
+        message: "A single shipment item is required.",
+      });
+    }
+
+    const { rows: rateRows } = await pool.query(
+      `SELECT value FROM system_settings WHERE category = 'Rates' AND key = 'delivery_rate'`,
+    );
+    const selectedAddons = (Array.isArray(addons) ? addons : [])
+      .filter((a) => ADDON_PRICES[a?.label] !== undefined)
+      .map((a) => ({ label: a.label, price: ADDON_PRICES[a.label] }));
+    const totalAmount =
+      Number(rateRows[0]?.value ?? 0) +
+      selectedAddons.reduce((sum, a) => sum + a.price, 0);
+    const deliveryOptionsJson = JSON.stringify(selectedAddons);
 
     const checkDelivery = await pool.query(
-      "SELECT customer_id, shipment, status FROM app_delivery WHERE customer_id = $1 AND shipment = $2",
+      "SELECT customer_ref, shipment_ref, status FROM delivery_requests WHERE customer_ref = $1 AND shipment_ref = $2",
       [id, selectedShipment],
     );
 
@@ -362,7 +514,7 @@ export const createDelivery = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "INSERT INTO app_delivery (customer_id, shipment, recevier_name, delivery_contact_number, delivery_address, delivery_options, delivery_amount) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+      "INSERT INTO delivery_requests (customer_ref, shipment_ref, recevier_name, delivery_contact_number, delivery_address, delivery_options, delivery_amount) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
       [
         id,
         selectedShipment,
@@ -417,6 +569,8 @@ export const getGatepasses = async (req, res) => {
          g.mimetype,
          g.uploaded_at,
          oi.item_ref,
+         oi.tracking_id AS item_tracking_id,
+         o.tracking_id AS order_tracking_id,
          oi.category,
          oi.subcategory,
          oi.status,
@@ -442,6 +596,96 @@ export const getGatepasses = async (req, res) => {
       error: { message: error.message },
     });
 
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong.",
+    });
+  }
+};
+
+export const createDropOff = async (req, res) => {
+  const { id } = req.params;
+  const {
+    customerName,
+    contactNumber,
+    pickupAddress,
+    pickupDate,
+    zone,
+    selectedShipment,
+  } = req.body;
+
+  try {
+    if (
+      !customerName?.trim() ||
+      !contactNumber?.trim() ||
+      !pickupAddress?.trim() ||
+      !zone ||
+      typeof selectedShipment !== "string" ||
+      !selectedShipment ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(String(pickupDate))
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing required fields." });
+    }
+
+    const { rows: zoneRows } = await pool.query(
+      `SELECT label, value FROM system_settings WHERE category = 'Pickup Zone' AND key = $1`,
+      [zone],
+    );
+    if (zoneRows.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid pickup zone." });
+    }
+
+    const { rows: itemRows } = await pool.query(
+      "SELECT 1 FROM order_items WHERE item_ref = $1",
+      [selectedShipment],
+    );
+    if (itemRows.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid shipment item." });
+    }
+
+    const { rows: pendingRows } = await pool.query(
+      "SELECT 1 FROM drop_off_requests WHERE customer_ref = $1 AND shipment_ref = $2 AND status = 'pending'",
+      [id, selectedShipment],
+    );
+    if (pendingRows.length > 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Drop-off request already created for this shipment!",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO drop_off_requests
+        (customer_ref, shipment_ref, pickup_address, customer_name, contact_number, pickup_amount, pickup_date, zone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        id,
+        selectedShipment,
+        pickupAddress.trim(),
+        customerName.trim(),
+        contactNumber.trim(),
+        Number(zoneRows[0].value),
+        pickupDate,
+        zoneRows[0].label,
+      ],
+    );
+
+    logger.info("Drop-off request has been created!", rows[0].id);
+    return res.status(200).json({
+      success: true,
+      message: "Drop-off request has been created!",
+    });
+  } catch (error) {
+    logger.error("Failed to create drop-off request", {
+      error: { message: error.message },
+    });
     return res.status(500).json({
       success: false,
       message: "Something went wrong.",

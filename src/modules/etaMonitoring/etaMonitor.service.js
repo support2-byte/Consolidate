@@ -1,4 +1,6 @@
 import pool from "../../db/pool.js";
+import logger from "../../services/logger.js";
+import { sendStaleItemsEmail } from "./etaMonitor.email.js";
 
 export const MAX_GRACE = 2;
 export const FINAL_STATUSES = ["Shipment Delivered", "Rejected", "Cancelled"];
@@ -7,7 +9,7 @@ export const IDLE_SQL = `(CURRENT_DATE - GREATEST(m.status_since, COALESCE(m.las
 
 export const CHECK_AFTER_SQL = `eta_check_after(m.order_item_id)`;
 
-export const runEtaMonitor = async () => {
+const runChecks = async () => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -103,4 +105,33 @@ export const runEtaMonitor = async () => {
   } finally {
     client.release();
   }
+};
+
+const notifyStaleItems = async () => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT n.id, n.status, ${IDLE_SQL} AS idle_days,
+              oi.item_ref, r.receiver_name, o.booking_ref, o.rgl_booking_number,
+              eta_latest(n.order_item_id) AS eta
+       FROM eta_notifications n
+       JOIN eta_monitor m ON m.order_item_id = n.order_item_id
+       JOIN order_items oi ON oi.id = n.order_item_id
+       JOIN receivers r ON r.id = oi.receiver_id
+       JOIN orders o ON o.id = r.order_id
+       WHERE n.state = 'pending' AND m.grace_used < $1::int
+       ORDER BY ${IDLE_SQL} DESC, o.rgl_booking_number, o.booking_ref, oi.item_ref`,
+      [MAX_GRACE],
+    );
+    if (!rows.length) return { sent: false, count: 0 };
+    return await sendStaleItemsEmail(rows);
+  } catch (err) {
+    logger.error("ETA stale email failed", { error: err.message });
+    return { sent: false, error: err.message };
+  }
+};
+
+export const runEtaMonitor = async () => {
+  const summary = await runChecks();
+  summary.email = await notifyStaleItems();
+  return summary;
 };

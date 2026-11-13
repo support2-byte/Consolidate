@@ -300,7 +300,7 @@ export async function applyItemStatus(
   const slotRes = await client.query(
     `WITH ${SLOTS_CTE}
      SELECT sl.item_id, sl.cid, sl.consignment_id, oi.order_id, oi.receiver_id,
-            lt.status AS cur_status
+            oi.item_ref, lt.status AS cur_status
        FROM slots sl
        JOIN order_items oi ON oi.id = sl.item_id
        LEFT JOIN LATERAL (${SLOT_LATEST}) lt ON TRUE
@@ -319,18 +319,27 @@ export async function applyItemStatus(
         !(protectDelivered && s.cur_status === DELIVERED),
     );
 
-  if (toWrite.length) {
+  const insertRows = [
+    ...new Map(
+      toWrite.map((s) => [`${s.order_id}|${s.item_ref}|${s.cid ?? ""}`, s]),
+    ).values(),
+  ];
+
+  if (insertRows.length) {
     await client.query(
       `INSERT INTO order_tracking
          (order_id, sender_id, sender_ref, receiver_id, receiver_ref, container_id,
           consignment_id, status, old_status, item_ref, eta, etd, created_by, created_time, module_id)
-       SELECT oi.order_id, oi.sender_id, s.sender_ref, oi.receiver_id, r.receiver_ref,
+       SELECT oi.order_id, s.id, s.sender_ref, oi.receiver_id, r.receiver_ref,
               u.cid, u.consignment_id, $2::varchar, COALESCE(u.old_status, 'Created'), oi.item_ref,
               $3::timestamp, $3::timestamp, $4::varchar, NOW(), $5::int
          FROM unnest($1::int[], $6::int[], $7::int[], $8::varchar[])
               AS u(item_id, cid, consignment_id, old_status)
          JOIN order_items oi ON oi.id = u.item_id
-         LEFT JOIN senders s ON s.id = oi.sender_id
+         LEFT JOIN senders s ON s.id = COALESCE(
+           oi.sender_id,
+           (SELECT MIN(id) FROM senders WHERE order_id = oi.order_id)
+         )
          LEFT JOIN receivers r ON r.id = oi.receiver_id`,
       [
         toWrite.map((s) => s.item_id),

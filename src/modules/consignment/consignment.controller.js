@@ -1797,3 +1797,68 @@ export async function changeConsignmentStatus(req, res) {
     });
   }
 }
+
+export async function logManifestPrint(req, res) {
+  if (!req.user) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Authentication required" });
+  }
+  const consignmentId = parseInt(req.params.id, 10);
+  if (isNaN(consignmentId) || consignmentId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid consignment ID." });
+  }
+  const documentType = String(req.body?.document_type || "")
+    .trim()
+    .substring(0, 100);
+  if (!documentType) {
+    return res
+      .status(400)
+      .json({ success: false, message: "document_type is required" });
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO manifest_print_logs (consignment_id, user_id, user_email, document_type)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, printed_at`,
+      [consignmentId, req.user.id ?? null, req.user.email, documentType],
+    );
+    return res.status(201).json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error("Error in logManifestPrint:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+}
+
+export async function getManifestPrints(req, res) {
+  if (!req.user) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Authentication required" });
+  }
+  const consignmentId = parseInt(req.params.id, 10);
+  if (isNaN(consignmentId) || consignmentId <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid consignment ID." });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, user_id, user_email, document_type, printed_at
+       FROM manifest_print_logs
+       WHERE consignment_id = $1
+       ORDER BY printed_at DESC, id DESC`,
+      [consignmentId],
+    );
+    return res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error("Error in getManifestPrints:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Something went wrong!" });
+  }
+}

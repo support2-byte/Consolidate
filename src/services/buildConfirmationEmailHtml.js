@@ -13,7 +13,7 @@ export const buildConfirmationEmailHtml = ({
   const safeCompany = companyName?.trim() || "Royal Gulf Shipping & Logistics";
   const safeLogo =
     companyLogo ||
-    "https://royalgulfshipping.com/wp-content/uploads/2023/08/RGSL-LOGO.png";
+    "https://royalgulfshipping.com/wp-content/uploads/2025/09/royalgulflogo-1.jpeg";
 
   return `<!DOCTYPE html>
 <html lang="en">

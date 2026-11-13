@@ -720,11 +720,13 @@ export const getConsignmentBilling = async (req, res) => {
                 exchange_rate::float8 AS "exchangeRate",
                 order_number,
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
-                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
+                synced_at
            FROM zoho_invoices
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = ANY($1::text[])
+            AND lower(btrim(consignment_number)) = $2
           ORDER BY invoice_date, id`,
-        [orderKeys],
+        [orderKeys, billConsKey],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
@@ -733,7 +735,8 @@ export const getConsignmentBilling = async (req, res) => {
                 exchange_rate::float8 AS "exchangeRate",
                 order_number,
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
-                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
+                synced_at
            FROM zoho_bills
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = ANY($1::text[])
             AND lower(btrim(consignment_number)) = $2
@@ -807,11 +810,13 @@ export const getOrderBilling = async (req, res) => {
                 total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
-                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
+                synced_at
            FROM zoho_invoices
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
+            AND lower(btrim(consignment_number)) = ANY($2::text[])
           ORDER BY invoice_date, id`,
-        [orderKey],
+        [orderKey, linkedCons],
       ),
       pool.query(
         `SELECT zoho_bill_id AS id, bill_number AS number,
@@ -819,7 +824,8 @@ export const getOrderBilling = async (req, res) => {
                 total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
                 order_number, consignment_number AS "consignmentNumber",
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
-                to_char(due_date, 'YYYY-MM-DD') AS "dueDate"
+                to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
+                synced_at
            FROM zoho_bills
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
             AND lower(btrim(consignment_number)) = ANY($2::text[])
@@ -835,7 +841,7 @@ export const getOrderBilling = async (req, res) => {
     return res.json({
       success: true,
       row: buildBillingRow(order, invRes.rows, billRes.rows),
-      receiverPayments: computeReceiverPayments(recRes.rows, invRes.rows),
+      receiverPayments: await getReceiverPayments(orderId),
       receiverApprovals: await getReceiverApprovals(orderId),
     });
   } catch (err) {
