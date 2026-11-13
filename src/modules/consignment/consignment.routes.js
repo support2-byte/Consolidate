@@ -10,8 +10,11 @@ import {
   changeConsignmentStatus,
   logManifestPrint,
   getManifestPrints,
+  uploadConsignmentAttachments,
+  deleteConsignmentAttachment,
 } from "../consignment/consignment.controller.js";
 import { requireAuth } from "../auth/auth.middleware.js";
+import { consignmentUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
 
@@ -247,5 +250,22 @@ router.delete("/:id", requireAuth, deleteConsignment);
 
 router.post("/:id/manifest-prints", requireAuth, logManifestPrint);
 router.get("/:id/manifest-prints", requireAuth, getManifestPrints);
+
+router.post(
+  "/:id/attachments",
+  requireAuth,
+  (req, res, next) =>
+    consignmentUpload(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    }),
+  uploadConsignmentAttachments,
+);
+
+router.delete(
+  "/:id/attachments/:attachmentId",
+  requireAuth,
+  deleteConsignmentAttachment,
+);
 
 export default router;
