@@ -3741,7 +3741,6 @@ export async function updateSpecificItemsStatus(req, res) {
     const eta =
       (await calculateETA(client, statusRow.order_status))?.eta ?? null;
 
-    // body cid only makes sense for a single item; bulk updates resolve per item
     const bodyCid = itemRefs.length === 1 ? cid : null;
     const updated = [];
     for (const row of found.rows) {
