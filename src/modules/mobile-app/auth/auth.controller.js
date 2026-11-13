@@ -21,7 +21,7 @@ export const signup = async (req, res) => {
         .json({ success: false, message: "All fields are required." });
     }
 
-    const ALLOWED_ACCOUNT_TYPES = ["receiver", "shipper"];
+    const ALLOWED_ACCOUNT_TYPES = ["receiver", "sender", "both"];
     const normalizedAccountType = (accountType || "receiver")
       .trim()
       .toLowerCase();
@@ -477,7 +477,7 @@ export const refresh = async (req, res) => {
 
 export const logout = async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    const { refreshToken } = req.body ?? {};
 
     if (refreshToken) {
       await pool.query(`DELETE FROM app_refresh_token WHERE token = $1`, [
@@ -490,7 +490,10 @@ export const logout = async (req, res) => {
       message: "Logged out successfully.",
     });
   } catch (error) {
-    logger.error("Failed to logout app-user", { error });
+    logger.error("Failed to logout app-user", {
+      message: error.message,
+      stack: error.stack,
+    });
     return res.status(500).json({
       success: false,
       message: "Something went wrong.",

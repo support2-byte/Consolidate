@@ -13,6 +13,8 @@ export const getDashboardData = async (req, res) => {
           ot.eta,
           oi.status,
           oi.item_ref,
+          oi.tracking_id AS item_tracking_id,
+          o.tracking_id AS order_tracking_id,
           pl.name AS loading_place_name,
           pd.name AS destination_place_name,
           o.created_at
@@ -48,13 +50,22 @@ export const getDashboardData = async (req, res) => {
 
       recent_invoices AS (
         SELECT
-          i.id,
-          i.invoice_id AS invoice_id,
+          i.public_ref AS id,
+          i.invoice_id,
           i.created_at,
           i.status,
-          i.amount
-        FROM invoices i
-        WHERE i.customer_id = $1
+          i.amount,
+          i.invoice_type
+        FROM (
+          SELECT public_ref, invoice_id, created_at, status, amount, customer_ref, 'delivery' AS invoice_type FROM delivery_invoices
+          UNION ALL
+          SELECT public_ref, invoice_id, created_at, status, amount, customer_ref, 'storage' FROM storage_invoices
+          UNION ALL
+          SELECT public_ref, invoice_id, created_at, status, amount, customer_ref, 'dropoff' FROM dropoff_invoices
+          UNION ALL
+          SELECT public_ref, invoice_id, created_at, status, amount, customer_ref, 'overstay' FROM overstay_invoices
+        ) i
+        WHERE i.customer_ref = $1
         ORDER BY i.created_at DESC
         LIMIT 3
       )
@@ -97,17 +108,31 @@ export const getDashboardData = async (req, res) => {
 export const getRates = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT delivery_rate, storage_rate FROM rates",
+      `SELECT key, label, value, category
+       FROM system_settings
+       WHERE category IN ('Rates', 'Storage Type', 'Storage Size')
+       ORDER BY sort_order, id`,
     );
 
-    const rates = rows.map((row) => ({
-      delivery_rate: Number(row.delivery_rate),
-      storage_rate: Number(row.storage_rate),
-    }));
+    const rate = (key) =>
+      Number(
+        rows.find((r) => r.category === "Rates" && r.key === key)?.value ?? 0,
+      );
+
+    const options = (category) =>
+      rows
+        .filter((r) => r.category === category)
+        .map((r) => ({ key: r.key, label: r.label, value: Number(r.value) }));
 
     return res.status(200).json({
       success: true,
-      rates: rates[0],
+      rates: {
+        delivery_rate: rate("delivery_rate"),
+        storage_rate: rate("storage_rate"),
+        tax: rate("tax"),
+        storage_types: options("Storage Type"),
+        storage_sizes: options("Storage Size"),
+      },
     });
   } catch (error) {
     logger.error("Failed to get receiver dashboard data", { error });
