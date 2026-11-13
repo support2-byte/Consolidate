@@ -10,6 +10,7 @@ import {
   countDeliveredSlots,
 } from "../../services/statusSync.js";
 import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
+import { v2 as cloudinary } from "cloudinary";
 
 function safeParseJsonArray(val) {
   if (!val) return [];
@@ -105,6 +106,19 @@ async function updateLinkedContainersStatus(
       err.message,
     );
   }
+}
+
+function withViewUrl(row) {
+  const view_url =
+    row.delivery_type === "authenticated"
+      ? cloudinary.url(row.public_id, {
+          resource_type: row.resource_type,
+          type: "authenticated",
+          sign_url: true,
+          secure: true,
+        })
+      : row.url;
+  return { ...row, view_url };
 }
 
 function isValidDate(dateString) {
@@ -456,34 +470,34 @@ export async function getConsignmentById(req, res) {
 
         const containerRes = await containerClient.query(
           `
-  SELECT 
-    cm.cid AS id,
-    cm.container_size          AS size,
-    cm.container_number        AS "containerNo",
-    cm.container_type          AS "containerType",
-    cm.owner_type               AS ownership,
-    cm.status                   AS assignment_status,
-    cs.location AS location,
-    COALESCE(cs.availability, cm.derived_status, 'Available') AS derived_status
-  FROM container_master cm
-  LEFT JOIN LATERAL (
-    SELECT location, availability
-    FROM container_status
-    WHERE cid = cm.cid
-    ORDER BY created_time DESC
-    LIMIT 1
-  ) cs ON true
-  WHERE cm.cid IN (
-    SELECT x.cid
-    FROM (
-      SELECT DISTINCT ON (h.detail_id, h.cid) h.cid, h.action_type
-      FROM container_assignment_history h
-      WHERE h.consignment_id = $1
-      ORDER BY h.detail_id, h.cid, h.id DESC
-    ) x
-    WHERE x.action_type = 'ASSIGN'
-  )
-  `,
+            SELECT 
+              cm.cid AS id,
+              cm.container_size          AS size,
+              cm.container_number        AS "containerNo",
+              cm.container_type          AS "containerType",
+              cm.owner_type               AS ownership,
+              cm.status                   AS assignment_status,
+              cs.location AS location,
+              COALESCE(cs.availability, cm.derived_status, 'Available') AS derived_status
+            FROM container_master cm
+            LEFT JOIN LATERAL (
+              SELECT location, availability
+              FROM container_status
+              WHERE cid = cm.cid
+              ORDER BY created_time DESC
+              LIMIT 1
+            ) cs ON true
+            WHERE cm.cid IN (
+              SELECT x.cid
+              FROM (
+                SELECT DISTINCT ON (h.detail_id, h.cid) h.cid, h.action_type
+                FROM container_assignment_history h
+                WHERE h.consignment_id = $1
+                ORDER BY h.detail_id, h.cid, h.id DESC
+              ) x
+              WHERE x.action_type = 'ASSIGN'
+            )
+            `,
           [numericId],
         );
 
@@ -514,7 +528,7 @@ export async function getConsignmentById(req, res) {
           containerErr.message,
           containerErr.stack,
         );
-        containers = []; // safe fallback
+        containers = [];
       } finally {
         containerClient.release();
       }
@@ -522,6 +536,22 @@ export async function getConsignmentById(req, res) {
       console.log(
         `No order IDs → skipping containers for consignment ${numericId}`,
       );
+    }
+
+    try {
+      const attRes = await pool.query(
+        `SELECT * FROM consignment_attachment
+         WHERE consignment_id = $1
+         ORDER BY created_at DESC`,
+        [numericId],
+      );
+      consignment.attachments = attRes.rows.map(withViewUrl);
+    } catch (attErr) {
+      console.error(
+        `Failed to fetch attachments for consignment ${numericId}:`,
+        attErr.message,
+      );
+      consignment.attachments = [];
     }
 
     consignment.containers = containers;
@@ -1860,5 +1890,103 @@ export async function getManifestPrints(req, res) {
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
+  }
+}
+
+export async function uploadConsignmentAttachments(req, res) {
+  const files = req.files || [];
+  try {
+    const consignmentId = parseInt(req.params.id, 10);
+    if (isNaN(consignmentId) || consignmentId <= 0) {
+      return res.status(400).json({ error: "Invalid consignment ID." });
+    }
+    if (files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded." });
+    }
+
+    const exists = await pool.query(
+      "SELECT 1 FROM consignments WHERE id = $1",
+      [consignmentId],
+    );
+    if (exists.rowCount === 0) {
+      throw new Error("Consignment not found");
+    }
+
+    const createdBy = String(req.user?.id ?? req.user?.email ?? "unknown");
+    const params = [];
+    const tuples = files.map((f, i) => {
+      const isImage = f.mimetype.startsWith("image/");
+      const o = i * 7;
+      params.push(
+        consignmentId,
+        f.path,
+        f.filename,
+        isImage ? "image" : "raw",
+        isImage ? "upload" : "authenticated",
+        createdBy,
+        f.originalname,
+      );
+      return `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, NOW(), $${o + 6}, $${o + 7})`;
+    });
+
+    const result = await pool.query(
+      `INSERT INTO consignment_attachment
+         (consignment_id, url, public_id, resource_type, delivery_type, created_at, created_by, original_name)
+       VALUES ${tuples.join(",")}
+       RETURNING *`,
+      params,
+    );
+
+    res.status(201).json({
+      message: "Files uploaded successfully",
+      data: result.rows.map(withViewUrl),
+    });
+  } catch (err) {
+    await Promise.all(
+      files.map((f) =>
+        cloudinary.uploader
+          .destroy(f.filename, {
+            resource_type: f.mimetype.startsWith("image/") ? "image" : "raw",
+            type: f.mimetype.startsWith("image/") ? "upload" : "authenticated",
+          })
+          .catch(() => {}),
+      ),
+    );
+    console.error("uploadConsignmentAttachments error:", err);
+    res.status(500).json({ error: err.message || "Failed to upload files" });
+  }
+}
+
+export async function deleteConsignmentAttachment(req, res) {
+  try {
+    const consignmentId = parseInt(req.params.id, 10);
+    const attachmentId = parseInt(req.params.attachmentId, 10);
+    if (!consignmentId || !attachmentId) {
+      return res.status(400).json({ error: "Invalid ID." });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT * FROM consignment_attachment WHERE id = $1 AND consignment_id = $2`,
+      [attachmentId, consignmentId],
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+    const att = rows[0];
+
+    await cloudinary.uploader
+      .destroy(att.public_id, {
+        resource_type: att.resource_type,
+        type: att.delivery_type,
+      })
+      .catch((e) => console.warn("Cloudinary delete failed:", e.message));
+
+    await pool.query(`DELETE FROM consignment_attachment WHERE id = $1`, [
+      attachmentId,
+    ]);
+    res.json({ message: "Attachment deleted" });
+  } catch (err) {
+    console.error("deleteConsignmentAttachment error:", err);
+    res.status(500).json({ error: "Failed to delete attachment" });
   }
 }
