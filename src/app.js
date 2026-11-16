@@ -55,7 +55,7 @@ app.set("trust proxy", 1);
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 30,
+  limit: 100,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: {
