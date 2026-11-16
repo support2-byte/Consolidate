@@ -775,9 +775,9 @@ export async function adminForceResetPassword(req, res) {
       });
 
       await transporter.sendMail({
-        from: `"RGSL Portal" <${process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER}>`,
+        from: `"Consolidate" <${process.env.GMAIL_USER}>`,
         to: updatedUser.email,
-        subject: "Your RGSL Portal Password Has Been Reset",
+        subject: "Your Consolidate Password Has Been Reset",
         html: htmlContent,
       });
 
