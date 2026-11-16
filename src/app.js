@@ -4,8 +4,10 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import cron from "node-cron";
+import rateLimit from "express-rate-limit";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
+
 import authRoutes from "./modules/auth/auth.routes.js";
 import customerRoutes from "./modules/customers/customer.routes.js";
 import vendorRoutes from "./modules/vendors/vendorRoutes.js";
@@ -25,8 +27,12 @@ import dropOffRoutes from "./modules/drop-offs/drop-off.route.js";
 import addressRoutes from "./modules/address/address.route.js";
 import zohoInvoiceRoutes from "./modules/zoho-invoices/zoho-invoice.routes.js";
 import etaMonitorRoutes from "./modules/etaMonitoring/etaMonitor.routes.js";
+
+import { validateRequestParams } from "./middleware/securityValidator.js";
+
 import { getCustomersPanel } from "./modules/customers/customer.controller.js";
 import webhook from "./modules/customers/webhook.js";
+
 import {
   globalErrorHandler,
   notFoundHandler,
@@ -38,13 +44,36 @@ import appShipmentRoutes from "./modules/mobile-app/shipments/shipment.route.js"
 import appInvoiceRoutes from "./modules/mobile-app/invoices/invoice.route.js";
 import appOptionRoutes from "./modules/mobile-app/options/option.route.js";
 import appMapsRoutes from "./modules/mobile-app/maps/maps.route.js";
+
 import { runEtaMonitor } from "./modules/etaMonitoring/etaMonitor.service.js";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
-app.use(cookieParser());
+
+app.set("trust proxy", 1);
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 200,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many requests. Please try again later.",
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many authentication attempts. Please try again later.",
+  },
+});
 
 const allowedOrigins = process.env.CLIENT_ORIGINS
   ? process.env.CLIENT_ORIGINS.split(",")
@@ -62,11 +91,13 @@ const allowedOrigins = process.env.CLIENT_ORIGINS
 
 function isOriginAllowed(origin) {
   if (!origin || origin === "null") return true;
+
   return allowedOrigins.some((pattern) => {
     if (pattern.endsWith(":*")) {
       const base = pattern.slice(0, -2);
       return origin.startsWith(base + ":") || origin === base;
     }
+
     return origin === pattern;
   });
 }
@@ -87,6 +118,20 @@ app.use(
   }),
 );
 
+app.use("/auth", authLimiter);
+
+app.use("/api/mobile/auth", authLimiter);
+
+app.use("/api", globalLimiter);
+
+app.use(express.json());
+app.use(cookieParser());
+
+app.use("/", (req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
+
 const swaggerSpec = swaggerJsdoc({
   definition: {
     openapi: "3.0.0",
@@ -96,7 +141,10 @@ const swaggerSpec = swaggerJsdoc({
       description: "API documentation for the Consolidate Dashboard backend",
     },
     servers: [
-      { url: "http://localhost:5000", description: "Local dev server" },
+      {
+        url: "http://localhost:5000",
+        description: "Local dev server",
+      },
       {
         url: "https://consolidate.onrender.com",
         description: "Production server",
@@ -119,16 +167,14 @@ const swaggerSpec = swaggerJsdoc({
   ],
 });
 
-app.use("/", (req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
-
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
 app.get("/api-docs.json", (_req, res) => {
   res.setHeader("Content-Type", "application/json");
   res.send(swaggerSpec);
 });
+
+app.use(validateRequestParams);
 
 app.use("/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
@@ -152,12 +198,20 @@ app.use("/api/address", addressRoutes);
 app.use("/api/zoho-invoice", zohoInvoiceRoutes);
 app.use("/api/eta-monitor", etaMonitorRoutes);
 
+// ==========================================
+// MOBILE APP ROUTES
+// ==========================================
+
 app.use("/api/mobile/auth", appAuthRoutes);
 app.use("/api/mobile/dashboard", appDashboardRoutes);
 app.use("/api/mobile/shipments", appShipmentRoutes);
 app.use("/api/mobile/invoices", appInvoiceRoutes);
 app.use("/api/mobile/options", appOptionRoutes);
 app.use("/api/mobile/maps", appMapsRoutes);
+
+// ==========================================
+// N-GENIUS PAYMENT REDIRECT
+// ==========================================
 
 app.get("/api/mobile/payments/ngenius/redirect", (req, res) => {
   res.send(`
@@ -237,8 +291,12 @@ app.get("/api/mobile/payments/ngenius/redirect", (req, res) => {
 });
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", time: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    time: new Date().toISOString(),
+  });
 });
 
 app.use(notFoundHandler);
@@ -248,6 +306,7 @@ cron.schedule(
   "0 0 * * *",
   async () => {
     console.log("[CRON] ETA monitor triggered:", new Date().toISOString());
+
     try {
       await runEtaMonitor();
       console.log("[CRON] ETA monitor completed successfully");
@@ -255,7 +314,9 @@ cron.schedule(
       console.error("[CRON] ETA monitor failed:", e);
     }
   },
-  { timezone: "Asia/Karachi" },
+  {
+    timezone: "Asia/Karachi",
+  },
 );
 
 console.log("[CRON] ETA monitor scheduler registered");
