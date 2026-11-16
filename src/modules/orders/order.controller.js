@@ -2171,9 +2171,7 @@ export async function getOrderById(req, res) {
         typeof orderRow.gatepass === "string"
           ? JSON.parse(orderRow.gatepass)
           : orderRow.gatepass || [];
-    } catch (e) {
-      // ignore malformed gatepass
-    }
+    } catch (e) {}
 
     const formattedOrderRow = {
       ...orderRow,
@@ -4210,13 +4208,14 @@ export async function getOrderByTrackingId(req, res) {
   const consNumber = id.trim().toUpperCase();
 
   try {
+    // 1) Consignment header
     const consRes = await pool.query(
       `
-      SELECT 
-        c.id AS consignment_id,
+      SELECT
+        c.id,
         c.consignment_number,
-        c.status AS consignment_status,
-        c.eta AS consignment_eta,
+        c.status,
+        c.eta,
         c.origin,
         c.destination,
         c.shipping_line,
@@ -4227,11 +4226,10 @@ export async function getOrderByTrackingId(req, res) {
         c.gross_weight,
         c.consignment_value,
         c.currency_code,
-        c.containers,
-        c.orders
+        c.containers
       FROM consignments c
       WHERE c.consignment_number = $1
-    `,
+      `,
       [consNumber],
     );
 
@@ -4253,261 +4251,284 @@ export async function getOrderByTrackingId(req, res) {
       console.warn("Invalid consignment containers JSON:", e);
     }
 
-    let orderIds = [];
-    try {
-      const rawOrders =
-        typeof cons.orders === "string"
-          ? JSON.parse(cons.orders)
-          : cons.orders || [];
-      orderIds = rawOrders
-        .map((v) => parseInt(v, 10))
-        .filter((n) => !isNaN(n) && n > 0);
-    } catch (e) {
-      console.warn("Invalid orders array in consignment:", e);
+    // 2) Everything currently ASSIGNED to this consignment (one row per item + container)
+    const { rows } = await pool.query(
+      `
+      SELECT
+        o.id                  AS order_id,
+        o.tracking_id         AS order_tracking_id,
+        o.booking_ref,
+        o.rgl_booking_number,
+        o.created_at,
+        s.sender_name,
+        t.transport_type,
+        t.collection_scope,
+
+        r.id                  AS receiver_id,
+        r.receiver_name,
+        r.receiver_address,
+        r.receiver_email,
+
+        oi.id                 AS item_id,
+        oi.tracking_id        AS item_tracking_id,
+        oi.item_ref,
+        oi.category,
+        oi.subcategory,
+        oi.type,
+        COALESCE(oi.total_number, 0) AS total_number,
+        COALESCE(oi.weight, 0)       AS weight,
+
+        ar.cid,
+        ar.assigned_qty,
+        ar.assigned_weight_kg,
+        cm.container_number,
+
+        ls.status             AS ship_status,
+        ls.eta                AS ship_eta,
+        ls.created_time       AS ship_last_updated,
+
+        COALESCE((
+          SELECT json_agg(json_build_object(
+            'status', d.status, 'time', d.created_time, 'eta', d.eta
+          ) ORDER BY d.created_time, d.id)
+          FROM (
+            SELECT DISTINCT ON (h.status)
+              h.id, h.status, h.created_time, h.eta
+            FROM order_tracking h
+            WHERE h.order_id = oi.order_id AND h.item_ref = oi.item_ref
+              AND (h.container_id = ar.cid OR h.container_id IS NULL)
+            ORDER BY h.status, h.created_time DESC, h.id DESC
+          ) d
+        ), '[]'::json) AS history,
+
+        -- assigned across ALL consignments (for a correct "remaining")
+        COALESCE((
+          SELECT SUM(a2.assigned_qty)
+          FROM (
+            SELECT DISTINCT ON (h2.cid, h2.consignment_id)
+              h2.assigned_qty, h2.action_type
+            FROM container_assignment_history h2
+            WHERE h2.detail_id = oi.id
+            ORDER BY h2.cid, h2.consignment_id, h2.id DESC
+          ) a2
+          WHERE a2.action_type = 'ASSIGN'
+        ), 0)::int AS total_assigned_all
+
+      FROM (
+        SELECT DISTINCT ON (h.cid, h.detail_id)
+          h.cid, h.detail_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.consignment_id = $1
+        ORDER BY h.cid, h.detail_id, h.id DESC
+      ) ar
+      JOIN order_items oi ON oi.id = ar.detail_id
+      JOIN orders o ON o.id = oi.order_id
+      LEFT JOIN receivers r ON r.id = oi.receiver_id
+      LEFT JOIN senders s ON s.order_id = o.id
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN container_master cm ON cm.cid = ar.cid
+      LEFT JOIN LATERAL (
+        SELECT tr.status, tr.eta, tr.created_time
+        FROM order_tracking tr
+        WHERE tr.order_id = oi.order_id
+          AND tr.item_ref = oi.item_ref
+          AND (tr.container_id = ar.cid OR tr.container_id IS NULL)
+        ORDER BY (tr.container_id IS NOT NULL) DESC, tr.created_time DESC, tr.id DESC
+        LIMIT 1
+      ) ls ON true
+      WHERE ar.action_type = 'ASSIGN'
+      ORDER BY o.created_at DESC, o.id, r.id, oi.id, cm.container_number
+      `,
+      [cons.id],
+    );
+
+    // 3) Drop-off details for the receivers involved
+    const receiverIds = [
+      ...new Set(rows.map((r) => r.receiver_id).filter(Boolean)),
+    ];
+    const dropMap = new Map();
+    if (receiverIds.length > 0) {
+      const dropRes = await pool.query(
+        `
+        SELECT receiver_id, drop_method, dropoff_name, drop_off_mobile,
+               plate_no, TO_CHAR(drop_date, 'YYYY-MM-DD') AS drop_date
+        FROM drop_off_details
+        WHERE receiver_id = ANY($1::int[])
+        ORDER BY id
+        `,
+        [receiverIds],
+      );
+      dropRes.rows.forEach((d) => {
+        if (!dropMap.has(d.receiver_id)) dropMap.set(d.receiver_id, []);
+        dropMap.get(d.receiver_id).push({
+          drop_method: d.drop_method,
+          dropoff_name: d.dropoff_name,
+          drop_off_mobile: d.drop_off_mobile,
+          plate_no: d.plate_no,
+          drop_date: d.drop_date,
+        });
+      });
     }
 
-    let orders = [];
-    let summary = {
-      order_count: 0,
-      total_assigned: 0,
-      total_items: 0,
-      progress_percent: 0,
-      active_containers: [],
-      latest_activity: null,
-    };
-
+    // 3b) ALL items of the involved orders with their latest status
+    //     (same rule as getOrderByOrderId), so overall progress isn't
+    //     limited to the items assigned to this consignment
+    const orderIds = [...new Set(rows.map((r) => r.order_id))];
+    const receiverItemsMap = new Map();
     if (orderIds.length > 0) {
-      const safeIntCast = (val) => `COALESCE(${val}, 0)`;
-      const safeNumericCast = (val) => `COALESCE(${val}, 0)`;
-
-      const containerDetailsSub = `
-        COALESCE((
-          SELECT jsonb_agg(
-            jsonb_build_object(
-              'status',      COALESCE(cs.availability, 'Created'),
-              'container', jsonb_build_object(
-                'cid',              (cd_obj->'container'->>'cid')::int,
-                'container_number', COALESCE(cd_obj->'container'->>'container_number', 'Unknown')
-              ),
-              'total_number',    ${safeIntCast("(cd_obj->>'total_number')::int")},
-              'assign_weight',   COALESCE(cd_obj->>'assign_weight', '0')::text,
-              'remaining_items', COALESCE(cd_obj->>'remaining_items', '0')::text,
-              'assign_total_box',COALESCE(cd_obj->>'assign_total_box', '0')::text
-            ) ORDER BY (cd_obj->'container'->>'container_number')
-          )
-          FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-          LEFT JOIN LATERAL (
-            SELECT availability
-            FROM container_status
-            WHERE cid = (cd_obj->'container'->>'cid')::int
-            ORDER BY sid DESC LIMIT 1
-          ) cs ON true
-          WHERE (cd_obj->'container'->>'cid') ~ '^[0-9]+$'
-        ), '[]'::jsonb)
-      `;
-
-      const shippingDetailsAgg = `
-        (SELECT COALESCE(jsonb_agg(
-          jsonb_build_object(
-            'id',              oi.id,
-            'orderId',         oi.order_id,
-            'senderId',        oi.sender_id,
-            'category',        COALESCE(oi.category, ''),
-            'subcategory',     COALESCE(oi.subcategory, ''),
-            'type',            COALESCE(oi.type, ''),
-            'pickupLocation',  COALESCE(oi.pickup_location, ''),
-            'deliveryAddress', COALESCE(oi.delivery_address, ''),
-            'totalNumber',     ${safeIntCast("oi.total_number")},
-            'weight',          ${safeNumericCast("oi.weight")},
-            'totalWeight',     0,
-            'itemRef',         COALESCE(oi.item_ref, ''),
-            'consignmentStatus', COALESCE(oi.consignment_status, 'Created'),
-            'shippingLine',    COALESCE(oi.shipping_line, ''),
-            'containerDetails', ${containerDetailsSub},
-            'remainingItems',  ${safeIntCast(`
-              oi.total_number - (
-                SELECT COALESCE(SUM((cd_obj->>'assign_total_box')::int), 0)
-                FROM jsonb_array_elements(COALESCE(oi.container_details, '[]'::jsonb)) cd_obj
-              )
-            `)}
-          ) ORDER BY oi.id
-        ), '[]'::jsonb)
-        FROM order_items oi 
-        WHERE oi.receiver_id = r.id AND oi.order_id = o.id)
-      `;
-
-      const ordersRes = await pool.query(
+      const allItemsRes = await pool.query(
         `
-        SELECT 
-          o.id AS order_id,
-          o.booking_ref,
-          o.created_at,
-          o.status,
-          o.eta,
-          o.etd,
-          o.total_assigned_qty,
-          s.sender_name,
-          s.sender_contact,
-          s.sender_email,
-          t.transport_type,
-          t.collection_scope,
-
-          (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb) 
-           FROM (
-             SELECT 
-               r.id,
-               r.order_id                    AS "orderId",
-               r.receiver_name               AS "receiverName",
-               r.receiver_contact            AS "receiverContact",
-               r.receiver_address            AS "receiverAddress",
-               r.receiver_email              AS "receiverEmail",
-               ${safeIntCast("r.total_number")}       AS "totalNumber",
-               ${safeNumericCast("r.total_weight")}   AS "totalWeight",
-               r.receiver_ref                AS "receiverRef",
-               r.remarks,
-               r.containers,
-               r.status,
-               r.eta                         AS eta,
-               r.etd                         AS etd,
-               r.shipping_line               AS "shippingLine",
-               r.consignment_vessel          AS "consignmentVessel",
-               r.consignment_number          AS "consignmentNumber",
-               r.consignment_marks           AS "consignmentMarks",
-               r.consignment_voyage          AS "consignmentVoyage",
-               r.full_partial                AS "fullPartial",
-               ${safeIntCast("r.qty_delivered")}      AS "qtyDelivered",
-               ${shippingDetailsAgg}                  AS "shippingDetails",
-               ${shippingDetailsAgg.replace('"shippingDetails"', '"shippingdetails"')} AS "shippingdetails",
-               COALESCE((
-                 SELECT jsonb_agg(
-                   jsonb_build_object(
-                     'drop_method',    dod.drop_method,
-                     'dropoff_name',   dod.dropoff_name,
-                     'drop_off_cnic',  dod.drop_off_cnic,
-                     'drop_off_mobile',dod.drop_off_mobile,
-                     'plate_no',       dod.plate_no,
-                     'drop_date',      TO_CHAR(dod.drop_date, 'YYYY-MM-DD')
-                   ) ORDER BY dod.id
-                 ) FROM drop_off_details dod 
-                 WHERE dod.receiver_id = r.id
-               ), '[]'::jsonb) AS "dropOffDetails"
-             FROM receivers r
-             WHERE r.order_id = o.id
-           ) r_full) AS receivers
-        FROM orders o
-        LEFT JOIN senders s ON s.order_id = o.id
-        LEFT JOIN transport_details t ON t.order_id = o.id
-        WHERE o.id = ANY($1::int[])
-        ORDER BY o.created_at DESC
-      `,
+        SELECT
+          oi.id,
+          oi.receiver_id,
+          oi.tracking_id,
+          COALESCE(lt.status, oi.status, 'Created') AS status
+        FROM order_items oi
+        LEFT JOIN LATERAL (
+          SELECT ot.status
+          FROM order_tracking ot
+          WHERE ot.item_ref = oi.item_ref AND ot.order_id = oi.order_id
+          ORDER BY ot.created_time DESC, ot.id DESC
+          LIMIT 1
+        ) lt ON true
+        WHERE oi.order_id = ANY($1::int[])
+        ORDER BY oi.id
+        `,
         [orderIds],
       );
-
-      const orderMap = {};
-      const allContainers = new Set();
-
-      ordersRes.rows.forEach((row) => {
-        let receivers = row.receivers || "[]";
-        if (typeof receivers === "string") {
-          try {
-            receivers = JSON.parse(receivers);
-          } catch {
-            receivers = [];
-          }
-        }
-
-        const order = {
-          order_id: row.order_id,
-          booking_ref: row.booking_ref,
-          created_at: row.created_at,
-          status: row.status,
-          eta: row.eta,
-          etd: row.etd,
-          collection_scope: row.collection_scope || "—",
-          total_assigned_qty: row.total_assigned_qty || 0,
-          sender: {
-            name: row.sender_name || "—",
-            contact: row.sender_contact || "—",
-            email: row.sender_email || "—",
-          },
-          transport: {
-            type: row.transport_type || "—",
-            collection_scope: row.collection_scope || "Partial",
-          },
-          receivers,
-          summary: {
-            total_items: 0,
-            total_weight: 0,
-            total_assigned: 0,
-            active_containers: new Set(),
-          },
-        };
-
-        // Calculate per-order summary from shippingDetails
-        receivers.forEach((r) => {
-          (r.shippingDetails || []).forEach((item) => {
-            const qty = Number(item.totalNumber || 0);
-            const assigned = (item.containerDetails || []).reduce((sum, cd) => {
-              return sum + Number(cd.assign_total_box || 0);
-            }, 0);
-
-            order.summary.total_items += qty;
-            order.summary.total_weight += Number(item.weight || 0);
-            order.summary.total_assigned += assigned;
-
-            (item.containerDetails || []).forEach((cd) => {
-              const cn = cd.container?.container_number;
-              if (cn && cn !== "Unknown") {
-                order.summary.active_containers.add(cn);
-                allContainers.add(cn);
-              }
-            });
-          });
+      allItemsRes.rows.forEach((it) => {
+        if (!receiverItemsMap.has(it.receiver_id))
+          receiverItemsMap.set(it.receiver_id, []);
+        receiverItemsMap.get(it.receiver_id).push({
+          id: it.id,
+          trackingId: it.tracking_id,
+          status: it.status,
         });
-
-        orderMap[row.order_id] = order;
       });
-
-      orders = Object.values(orderMap);
-
-      // Overall summary
-      let grandTotalItems = 0;
-      let grandTotalAssigned = 0;
-
-      orders.forEach((o) => {
-        grandTotalItems += o.summary.total_items;
-        grandTotalAssigned += o.summary.total_assigned;
-        if (
-          !summary.latest_activity ||
-          o.created_at > summary.latest_activity
-        ) {
-          summary.latest_activity = o.created_at;
-        }
-      });
-
-      summary = {
-        order_count: orders.length,
-        total_assigned: grandTotalAssigned,
-        total_items: grandTotalItems,
-        progress_percent:
-          grandTotalItems > 0
-            ? Math.round((grandTotalAssigned / grandTotalItems) * 100)
-            : 0,
-        active_containers: Array.from(allContainers),
-        latest_activity: summary.latest_activity
-          ? summary.latest_activity.toISOString()
-          : null,
-      };
     }
+
+    // 4) Group: order -> receiver -> item -> shipments (one per container)
+    const orderMap = new Map();
+    const itemSet = new Set();
+    const containerSet = new Set();
+    let totalAssigned = 0;
+    let totalWeight = 0;
+    let shipmentCount = 0;
+    let latestActivity = null;
+
+    rows.forEach((row) => {
+      if (!orderMap.has(row.order_id)) {
+        orderMap.set(row.order_id, {
+          order_id: row.order_id,
+          tracking_id: row.order_tracking_id,
+          booking_ref: row.booking_ref,
+          rgl_booking_number: row.rgl_booking_number || row.booking_ref,
+          created_at: row.created_at,
+          sender_name: row.sender_name || null,
+          transport_type: row.transport_type || null,
+          collection_scope: row.collection_scope || "Partial",
+          receivers: new Map(),
+        });
+      }
+      const ord = orderMap.get(row.order_id);
+
+      const recvKey = row.receiver_id || `no_receiver_${row.order_id}`;
+      if (!ord.receivers.has(recvKey)) {
+        ord.receivers.set(recvKey, {
+          id: row.receiver_id || recvKey,
+          receiverName: row.receiver_name || null,
+          receiverAddress: row.receiver_address || null,
+          receiverEmail: row.receiver_email || null,
+          dropOffDetails: dropMap.get(row.receiver_id) || [],
+          allItems: receiverItemsMap.get(row.receiver_id) || [],
+          items: new Map(),
+        });
+      }
+      const recv = ord.receivers.get(recvKey);
+
+      if (!recv.items.has(row.item_id)) {
+        const total = Number(row.total_number) || 0;
+        recv.items.set(row.item_id, {
+          id: row.item_id,
+          trackingId: row.item_tracking_id,
+          itemRef: row.item_ref || "",
+          category: row.category || "",
+          subcategory: row.subcategory || "",
+          type: row.type || "",
+          totalNumber: total,
+          weight: Number(row.weight) || 0,
+          assignedHere: 0,
+          assignedWeightHere: 0,
+          remainingItems: Math.max(0, total - (row.total_assigned_all || 0)),
+          shipments: [],
+        });
+      }
+      const item = recv.items.get(row.item_id);
+
+      const qty = Number(row.assigned_qty) || 0;
+      const itemTotal = Number(row.total_number) || 0;
+      // use the stored assigned weight; if it's missing, prorate the item weight by qty
+      const wt =
+        row.assigned_weight_kg != null
+          ? Number(row.assigned_weight_kg) || 0
+          : itemTotal > 0
+            ? Math.round(((Number(row.weight) || 0) * qty * 100) / itemTotal) /
+              100
+            : 0;
+
+      item.assignedHere += qty;
+      item.assignedWeightHere += wt;
+      item.shipments.push({
+        qty,
+        weight: wt,
+        container: row.container_number || null,
+        status: row.ship_status || "Created",
+        eta: row.ship_eta || null,
+        lastUpdated: row.ship_last_updated || null,
+        history: row.history || [],
+      });
+
+      itemSet.add(row.item_id);
+      if (row.container_number) containerSet.add(row.container_number);
+      totalAssigned += qty;
+      totalWeight += wt;
+      shipmentCount += 1;
+
+      if (
+        row.ship_last_updated &&
+        (!latestActivity || new Date(row.ship_last_updated) > latestActivity)
+      ) {
+        latestActivity = new Date(row.ship_last_updated);
+      }
+    });
+
+    const orders = [...orderMap.values()].map((o) => ({
+      ...o,
+      receivers: [...o.receivers.values()].map((r) => ({
+        ...r,
+        shippingDetails: [...r.items.values()],
+        items: undefined,
+      })),
+    }));
+
+    const summary = {
+      order_count: orders.length,
+      item_count: itemSet.size,
+      shipment_count: shipmentCount,
+      total_assigned: totalAssigned,
+      total_weight_kg: Math.round(totalWeight * 100) / 100,
+      active_containers: [...containerSet],
+      latest_activity: latestActivity ? latestActivity.toISOString() : null,
+    };
 
     res.json({
       success: true,
       data: {
         consignment: {
-          id: cons.consignment_id,
+          id: cons.id,
           number: cons.consignment_number,
-          status: cons.consignment_status,
-          eta: cons.consignment_eta,
+          status: cons.status,
+          eta: cons.eta,
           origin: cons.origin,
           destination: cons.destination,
           shipping_line: cons.shipping_line,
@@ -5424,7 +5445,16 @@ export async function getPdfData(req, res) {
       LEFT JOIN third_parties tp_shipper ON tp_shipper.id = c.shipper_id
       LEFT JOIN third_parties tp_consignee ON tp_consignee.id = c.consignee_id
       LEFT JOIN vessels v ON v.id = c.vessel
-      WHERE c.orders @> to_jsonb($1::int)
+      WHERE c.id IN (
+        SELECT consignment_id FROM (
+          SELECT DISTINCT ON (detail_id, cid, consignment_id)
+            consignment_id, action_type
+          FROM container_assignment_history
+          WHERE order_id = $1 AND consignment_id IS NOT NULL
+          ORDER BY detail_id, cid, consignment_id, id DESC
+        ) x
+        WHERE action_type = 'ASSIGN'
+      )
       ORDER BY c.id
     `;
     client = await pool.connect();
@@ -5463,11 +5493,26 @@ export async function getPdfData(req, res) {
     }
     const orderRow = orderResult.rows[0];
 
-    const [receiversResult, dropOffResult, consignmentResult] =
+    const [receiversResult, dropOffResult, consignmentResult, mblIdsResult] =
       await Promise.all([
         client.query(RECEIVERS_QUERY, [orderId]),
         client.query(DROPOFF_QUERY, [orderId]),
         client.query(CONSIGNMENT_QUERY, [orderId]),
+        client.query(
+          `
+          SELECT DISTINCT consignment_id
+          FROM (
+            SELECT DISTINCT ON (detail_id, cid, consignment_id)
+              consignment_id, action_type
+            FROM container_assignment_history
+            WHERE order_id = $1 AND consignment_id IS NOT NULL
+            ORDER BY detail_id, cid, consignment_id, id DESC
+          ) x
+          WHERE action_type = 'ASSIGN'
+          ORDER BY consignment_id
+          `,
+          [orderId],
+        ),
       ]);
 
     const dropOffMap = new Map(
@@ -5553,11 +5598,154 @@ export async function getPdfData(req, res) {
       receivers,
       consignment,
       consignments,
+      mbl_consignment_ids: mblIdsResult.rows.map((r) => r.consignment_id),
     });
   } catch (err) {
     console.error("Error in getPdfData:", err);
     res.status(500).json({
       error: "Failed to fetch PDF data",
+      details: err.message,
+    });
+  } finally {
+    if (client) client.release();
+  }
+}
+
+export async function getMblData(req, res) {
+  const id = parseInt(req.params.consignmentId, 10);
+  if (isNaN(id) || id <= 0) {
+    return res.status(400).json({ error: "Invalid consignment ID" });
+  }
+  let client;
+  try {
+    client = await pool.connect();
+
+    const latest = `
+      SELECT DISTINCT ON (h.detail_id, h.cid)
+        h.detail_id, h.cid, h.assigned_qty, h.assigned_weight_kg, h.action_type
+      FROM container_assignment_history h
+      WHERE h.consignment_id = $1
+      ORDER BY h.detail_id, h.cid, h.id DESC
+    `;
+
+    const consignmentRes = await client.query(
+      `
+      SELECT
+        c.id, c.consignment_number, c.status, c.eform,
+        TO_CHAR(c.eform_date, 'YYYY-MM-DD') AS eform_date,
+        c.origin, c.destination, c.voyage, c.shipping_line_name, c.seal_no,
+        c.payment_type, c.customs_crn, c.gross_weight, c.net_weight,
+        c.shipper, c.shipper_address, c.consignee, c.consignee_address,
+        v.name AS vessel_name,
+        tps.contact_phone AS shipper_contact,
+        tpc.contact_phone AS consignee_contact
+      FROM consignments c
+      LEFT JOIN vessels v ON v.id = c.vessel
+      LEFT JOIN third_parties tps ON tps.id = c.shipper_id
+      LEFT JOIN third_parties tpc ON tpc.id = c.consignee_id
+      WHERE c.id = $1
+      `,
+      [id],
+    );
+    if (consignmentRes.rowCount === 0) {
+      return res.status(404).json({ error: "Consignment not found" });
+    }
+
+    const [linesRes, ordersRes] = await Promise.all([
+      client.query(
+        `
+        WITH latest AS (${latest})
+        SELECT
+          cm.cid, cm.container_number, cm.container_size, cm.container_type,
+          oi.category, oi.subcategory, oi.type,
+          SUM(l.assigned_qty)::int AS pkgs,
+          SUM(l.assigned_weight_kg)::numeric AS weight
+        FROM latest l
+        JOIN order_items oi ON oi.id = l.detail_id
+        JOIN container_master cm ON cm.cid = l.cid
+        WHERE l.action_type = 'ASSIGN'
+        GROUP BY cm.cid, cm.container_number, cm.container_size, cm.container_type,
+                 oi.category, oi.subcategory, oi.type
+        ORDER BY cm.container_number, oi.category, oi.subcategory
+        `,
+        [id],
+      ),
+      client.query(
+        `
+        WITH latest AS (${latest})
+        SELECT DISTINCT o.id, o.booking_ref, o.rgl_booking_number
+        FROM latest l
+        JOIN order_items oi ON oi.id = l.detail_id
+        JOIN orders o ON o.id = oi.order_id
+        WHERE l.action_type = 'ASSIGN'
+        ORDER BY o.id
+        `,
+        [id],
+      ),
+    ]);
+
+    const orderIds = ordersRes.rows.map((o) => o.id);
+    const etdRes = orderIds.length
+      ? await client.query(
+          `SELECT TO_CHAR(MIN(t.etd), 'YYYY-MM-DD') AS etd
+           FROM order_tracking t WHERE t.order_id = ANY($1::int[])`,
+          [orderIds],
+        )
+      : { rows: [{ etd: null }] };
+    const trucksRes = orderIds.length
+      ? await client.query(
+          `SELECT DISTINCT plate_no FROM drop_off_details
+           WHERE order_id = ANY($1::int[]) AND plate_no IS NOT NULL AND plate_no <> ''
+           ORDER BY plate_no`,
+          [orderIds],
+        )
+      : { rows: [] };
+
+    const containerMap = new Map();
+    linesRes.rows.forEach((r) => {
+      if (!containerMap.has(r.cid)) {
+        containerMap.set(r.cid, {
+          cid: r.cid,
+          container_number: r.container_number,
+          size: r.container_size || "",
+          type: r.container_type || "",
+          pkgs: 0,
+          weight: 0,
+          items: [],
+        });
+      }
+      const c = containerMap.get(r.cid);
+      const pkgs = Number(r.pkgs) || 0;
+      const weight = Number(r.weight) || 0;
+      c.pkgs += pkgs;
+      c.weight += weight;
+      c.items.push({
+        category: r.category || "",
+        subcategory: r.subcategory || "",
+        type: r.type || "",
+        pkgs,
+        weight,
+      });
+    });
+
+    const containers = [...containerMap.values()];
+
+    res.json({
+      consignment: consignmentRes.rows[0],
+      containers,
+      orders: ordersRes.rows,
+      totals: {
+        containers: containers.length,
+        pkgs: containers.reduce((s, c) => s + c.pkgs, 0),
+        weight: containers.reduce((s, c) => s + c.weight, 0),
+      },
+      shipped_on_board: etdRes.rows[0]?.etd || "",
+      trucks: trucksRes.rows.map((r) => r.plate_no),
+    });
+  } catch (err) {
+    console.error("Error in getMblData:", err);
+    res.status(500).json({
+      error: "Failed to fetch MBL data",
       details: err.message,
     });
   } finally {

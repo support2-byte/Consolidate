@@ -29,6 +29,7 @@ import {
   createGatepass,
   getGatepassesForCollection,
   updateItemEta,
+  getMblData,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -547,6 +548,8 @@ router.delete("/:orderId/receivers/:receiverId", requireAuth, removeReceiver);
  *         description: Order not found
  */
 router.get("/pdf-data/:orderId", requireAuth, getPdfData);
+
+router.get("/consignment-mbl/:consignmentId", requireAuth, getMblData);
 
 /**
  * @swagger
