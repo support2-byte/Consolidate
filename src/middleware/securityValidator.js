@@ -1,14 +1,12 @@
-const MAX_PARAM_LENGTH = 20;
+const MAX_PARAM_LENGTH = 40;
 
 export const validateRequestParams = (req, res, next) => {
   try {
-    // Remove query string and split URL into path segments
     const pathname = req.path;
 
     const segments = pathname.split("/").filter(Boolean);
 
     for (const segment of segments) {
-      // Decode URL-encoded parameter values
       let decodedSegment;
 
       try {
