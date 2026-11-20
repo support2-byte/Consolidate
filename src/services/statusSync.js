@@ -236,7 +236,7 @@ export async function queueStatusEmails(
      UNION ALL
      SELECT DISTINCT i.order_id, r.id, 'receiver', r.receiver_email, r.receiver_name,
             $2::varchar, 'pending',
-            CASE WHEN rc.n > 1 THEN i.item_tracking_id ELSE o.tracking_id END
+            CASE WHEN rc.n > 1 THEN COALESCE(r.tracking_id, i.item_tracking_id) ELSE o.tracking_id END
        FROM items i
        JOIN orders o    ON o.id = i.order_id
        JOIN receivers r ON r.id = i.receiver_id

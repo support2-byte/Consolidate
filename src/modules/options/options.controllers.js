@@ -728,12 +728,6 @@ export async function getShippingLines(req, res) {
     const { rows } = await pool.query(
       "SELECT id, name FROM shipping_lines ORDER BY name ASC",
     );
-    if (rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No Sipping Lines Found!",
-      });
-    }
     const options = formatOptions(rows, "id", "name");
     return res.json({ success: true, shippingLineOptions: options });
   } catch (err) {
@@ -1887,7 +1881,7 @@ export const getDriverTrucks = async (req, res) => {
         dt.total_deliveries,
         d.name AS driver_name,
         d.driver_id AS driver_code
-      FROM driver_trucks dt
+      FROM driver_tracks dt
       LEFT JOIN drivers d ON d.id = dt.driver_id
       ORDER BY dt.id DESC
     `);
@@ -1926,7 +1920,7 @@ export const createDriverTruck = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO driver_trucks (driver_id, plate_no, total_deliveries, created_by)
+      `INSERT INTO driver_tracks (driver_id, plate_no, total_deliveries, created_by)
        VALUES ($1, $2, $3, $4)
        RETURNING *`,
       [driver_id, plate_no, Number(total_deliveries) || 0, userEmail],
@@ -1951,7 +1945,7 @@ export const updateDriverTruck = async (req, res) => {
     const { driver_id, plate_no, total_deliveries } = req.body;
 
     const { rows } = await pool.query(
-      `UPDATE driver_trucks
+      `UPDATE driver_tracks
        SET driver_id = $1, plate_no = $2, total_deliveries = $3
        WHERE id = $4
        RETURNING *`,
@@ -1983,7 +1977,7 @@ export const deleteDriverTruck = async (req, res) => {
     const { id } = req.params;
 
     const { rows } = await pool.query(
-      `DELETE FROM driver_trucks WHERE id = $1 RETURNING id`,
+      `DELETE FROM driver_tracks WHERE id = $1 RETURNING id`,
       [id],
     );
 

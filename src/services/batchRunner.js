@@ -185,14 +185,31 @@ const recoverStaleRows = async () => {
           rowCount,
         });
     } catch (err) {
-      // one bad table must never block sending
       logger.error("Stale recovery failed", { queue: key, error: err.message });
     }
   }
 };
 
+let timer = null;
+
+const scheduleNext = async () => {
+  if (shuttingDown) return;
+  try {
+    const { rows } = await pool.query(
+      "SELECT MIN(next_run_at) AS next FROM email_batch_jobs WHERE status='running'",
+    );
+    if (!rows[0]?.next) return;
+    const wait = Math.max(new Date(rows[0].next) - Date.now(), TICK_MS);
+    timer = setTimeout(tick, wait);
+  } catch (err) {
+    logger.error("Scheduler reschedule failed", { error: err.message });
+    timer = setTimeout(tick, TICK_MS);
+  }
+};
+
 let ticking = false;
 const tick = async () => {
+  clearTimeout(timer);
   if (ticking || shuttingDown) return;
   ticking = true;
   try {
@@ -219,16 +236,17 @@ const tick = async () => {
     logger.error("Scheduler tick failed", { error: err.message });
   } finally {
     ticking = false;
+    await scheduleNext();
   }
 };
 
-// Called from startBatch so sending begins immediately instead of waiting up to 30s
 export const triggerBatchTick = () => {
   setImmediate(tick);
 };
 
 export const startBatchScheduler = () => {
-  tick(); // run immediately on boot (resumes any running jobs)
+  tick();
+  recoverStaleRows().finally(tick);
   setInterval(tick, TICK_MS);
   logger.info("Batch email scheduler started");
 };

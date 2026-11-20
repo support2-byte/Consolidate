@@ -30,6 +30,7 @@ import {
   getGatepassesForCollection,
   updateItemEta,
   getMblData,
+  getPublicOrderTracking,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -53,7 +54,7 @@ const router = express.Router();
  */
 router.get("/consignmentsOrders", requireAuth, getOrdersConsignments);
 
-router.get("/trackingHistory", getOrderTracking);
+router.get("/trackingHistory", requireAuth, getOrderTracking);
 
 /**
  * @swagger
@@ -76,7 +77,7 @@ router.get("/trackingHistory", getOrderTracking);
  *       404:
  *         description: Order not found
  */
-router.get("/track/item/:ref", getOrderByItemRef);
+router.get("/track/item/:ref", requireAuth, getOrderByItemRef);
 
 /**
  * @swagger
@@ -99,7 +100,9 @@ router.get("/track/item/:ref", getOrderByItemRef);
  *       404:
  *         description: Order not found
  */
-router.get("/track/order/:ref", getOrderByOrderId);
+router.get("/track/order/:ref", requireAuth, getOrderByOrderId);
+
+router.get("/track/public/orders/:ref", getPublicOrderTracking);
 
 /**
  * @swagger
@@ -122,7 +125,7 @@ router.get("/track/order/:ref", getOrderByOrderId);
  *       404:
  *         description: Order not found
  */
-router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
+router.get("/track/rgl/:rglBookingNo", requireAuth, getOrderByRglBookingNo);
 
 /**
  * @swagger
@@ -145,7 +148,7 @@ router.get("/track/rgl/:rglBookingNo", getOrderByRglBookingNo);
  *       404:
  *         description: Order not found
  */
-router.get("/track/consignment_no/:id", getOrderByTrackingId);
+router.get("/track/consignment_no/:id", requireAuth, getOrderByTrackingId);
 
 /**
  * @swagger

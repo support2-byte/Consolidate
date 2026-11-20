@@ -237,7 +237,7 @@ export const UPSERT_SQL = `
     synced_at = NOW()
 `;
 
-const syncInvoiceRows = async (list, token) => {
+const syncInvoiceRows = async (list, token, syncedBy = null) => {
   if (!list.length) return 0;
 
   const existing = await pool.query(
@@ -338,6 +338,14 @@ const syncInvoiceRows = async (list, token) => {
     }
   });
 
+  if (syncedBy) {
+    await pool.query(
+      `UPDATE zoho_invoices SET synced_by = $1, synced_at = NOW()
+        WHERE zoho_invoice_id = ANY($2::text[])`,
+      [syncedBy, list.map((i) => i.invoice_id)],
+    );
+  }
+
   return changed.length;
 };
 
@@ -433,22 +441,45 @@ const scanInvoicesForForms = async (
   return found;
 };
 
-export const syncInvoicesForOrder = async (formNo) => {
-  const token = await getZohoAccessToken();
-  const matched = await scanInvoicesForForms(token, [formNo]);
-  return matched.length ? syncInvoiceRows(matched, token) : 0;
+const scanInvoicesByConsignment = async (token, consignmentNumber) => {
+  const consignmentFilter =
+    process.env.ZOHO_INVOICE_CONSIGNMENT_FILTER || "cf_consignment_number";
+  const wanted = stripConsignmentPrefix(consignmentNumber).toLowerCase();
+  if (!wanted) return [];
+
+  // ONE filtered request (max 2 pages as a safety guard) instead of scanning 5 pages
+  const list = await fetchAllZohoInvoiceList(
+    token,
+    { [consignmentFilter]: toZohoConsignment(consignmentNumber) },
+    2,
+  );
+
+  const found = list.filter(
+    (i) =>
+      stripConsignmentPrefix(i[consignmentFilter]).toLowerCase() === wanted,
+  );
+  logger.info("[INV-BY-CONS]", {
+    consignment: wanted,
+    returned: list.length,
+    found: found.length,
+  });
+  return found;
 };
 
-export const syncInvoicesForConsignment = async (consignmentNumber) => {
-  const forms = await getConsignmentFormNumbers(consignmentNumber);
-  logger.info("[INV] start", { consignmentNumber, forms });
-  if (!forms.length) return 0;
-
+export const syncInvoicesForOrder = async (formNo, syncedBy = null) => {
   const token = await getZohoAccessToken();
-  const matched = await scanInvoicesForForms(token, forms, {
-    consignmentNumber,
-  });
-  return matched.length ? syncInvoiceRows(matched, token) : 0;
+  const matched = await scanInvoicesForForms(token, [formNo]);
+  return matched.length ? syncInvoiceRows(matched, token, syncedBy) : 0;
+};
+
+export const syncInvoicesForConsignment = async (
+  consignmentNumber,
+  token,
+  syncedBy = null,
+) => {
+  token = token || (await getZohoAccessToken());
+  const matched = await scanInvoicesByConsignment(token, consignmentNumber);
+  return matched.length ? syncInvoiceRows(matched, token, syncedBy) : 0;
 };
 
 export const syncZohoInvoices = async (req, res) => {
