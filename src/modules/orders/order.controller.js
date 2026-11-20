@@ -21,6 +21,7 @@ import crypto from "crypto";
 
 const ORDER_TRACKING_PREFIX = "RGSL-ORD-";
 const ITEM_TRACKING_PREFIX = "RGSL-ITM-";
+const RECEIVER_TRACKING_PREFIX = "RGSL-RCV-";
 const TRACKING_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const randomTrackingSuffix = () =>
@@ -51,6 +52,22 @@ const generateItemTrackingId = async (client, used) => {
     if (used.has(id)) continue;
     const { rowCount } = await client.query(
       `SELECT 1 FROM order_items WHERE tracking_id = $1`,
+      [id],
+    );
+    if (rowCount === 0) {
+      used.add(id);
+      return id;
+    }
+  }
+  throw new Error("Failed to generate unique tracking id");
+};
+
+const generateReceiverTrackingId = async (client, used) => {
+  for (let i = 0; i < 10; i++) {
+    const id = `${RECEIVER_TRACKING_PREFIX}${randomTrackingSuffix()}`;
+    if (used.has(id)) continue;
+    const { rowCount } = await client.query(
+      `SELECT 1 FROM receivers WHERE tracking_id = $1`,
       [id],
     );
     if (rowCount === 0) {
@@ -344,6 +361,11 @@ export async function createOrder(req, res) {
         .filter(Boolean)
         .join(",");
 
+      const receiverTrackingId = await generateReceiverTrackingId(
+        client,
+        usedTrackingIds,
+      );
+
       const recResult = await withUserAudit(
         req,
         client,
@@ -351,8 +373,8 @@ export async function createOrder(req, res) {
           order_id, receiver_name, receiver_contact, receiver_address, receiver_email,
           receiver_marks_and_number, eta, etd, shipping_line,
           consignment_vessel, consignment_number, consignment_marks, consignment_voyage,
-          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered, item_ref, receiver_ref
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+          total_number, total_weight, remarks, containers, status, full_partial, qty_delivered, item_ref, receiver_ref, tracking_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22, $23)
         RETURNING id`,
         [
           orderId,
@@ -383,6 +405,7 @@ export async function createOrder(req, res) {
           p.qty_delivered ? parseInt(p.qty_delivered) : null,
           receiverItemRefs,
           p[`${partyPrefix}_ref`] || p.receiver_ref || p.sender_ref || "",
+          receiverTrackingId,
         ],
       );
 
@@ -436,6 +459,7 @@ export async function createOrder(req, res) {
         name: partyName,
         wants: wantsEmail,
         status: partyStatus,
+        trackingId: receiverTrackingId,
         itemRefs: items
           .map((it) => it.item_ref || it.itemRef || "")
           .filter(Boolean),
@@ -557,28 +581,17 @@ export async function createOrder(req, res) {
         trackingId: orderTrackingId,
       });
     }
+
     const multiReceiver = shippingParties.length > 1;
     for (const plan of receiverEmailPlans) {
       if (!plan.wants || !plan.email) continue;
-      if (!multiReceiver) {
-        emailTargets.push({
-          id: plan.id,
-          type: "receiver",
-          email: plan.email,
-          name: plan.name,
-          trackingId: orderTrackingId,
-        });
-      } else {
-        for (const ref of plan.itemRefs) {
-          emailTargets.push({
-            id: plan.id,
-            type: "receiver",
-            email: plan.email,
-            name: plan.name,
-            trackingId: itemTrackingByRef[ref],
-          });
-        }
-      }
+      emailTargets.push({
+        id: plan.id,
+        type: "receiver",
+        email: plan.email,
+        name: plan.name,
+        trackingId: multiReceiver ? plan.trackingId : orderTrackingId,
+      });
     }
 
     await withUserAudit(
@@ -679,6 +692,7 @@ export async function updateOrder(req, res) {
     const { id } = req.params;
     const updates = req.body || {};
     const files = req.files || {};
+    const usedTrackingIds = new Set();
 
     let hasAnyChange = false;
     let hasAttachmentChange = false;
@@ -823,21 +837,25 @@ export async function updateOrder(req, res) {
       const qtyDelivered = rec.qty_delivered || null;
       const shippingLine = rec.shipping_line || "";
 
+      const receiverRef = rec.receiver_ref || rec.sender_ref || "";
+
       let containersJson = "[]";
       if (rec.containers) containersJson = JSON.stringify(rec.containers);
 
-      const existingId = rec.id || existingReceiverIds[i] || null;
+      const existingId = rec.id || null;
       let receiverId;
 
       if (existingId) {
         await client.query(
           `UPDATE receivers SET 
-            receiver_name = $2, receiver_contact = $3, receiver_address = $4,
-            receiver_email = $5, receiver_marks_and_number = $6,
-            eta = $7, etd = $8, status = $9, remarks = $10,
-            full_partial = $11, qty_delivered = $12, shipping_line = $13,
-            containers = $14, updated_at = NOW()
-           WHERE id = $1`,
+          receiver_name = $2, receiver_contact = $3, receiver_address = $4,
+          receiver_email = $5, receiver_marks_and_number = $6,
+          eta = $7, etd = $8, status = $9, remarks = $10,
+          full_partial = $11, qty_delivered = $12, shipping_line = $13,
+          containers = $14,
+          receiver_ref = COALESCE(NULLIF($15, ''), receiver_ref),
+          updated_at = NOW()
+        WHERE id = $1`,
           [
             existingId,
             name,
@@ -853,15 +871,29 @@ export async function updateOrder(req, res) {
             qtyDelivered,
             shippingLine,
             containersJson,
+            receiverRef,
           ],
         );
+
+        if (receiverRef) {
+          await client.query(
+            `UPDATE order_tracking
+          SET receiver_ref = $1
+        WHERE receiver_id = $2 AND receiver_ref IS DISTINCT FROM $1`,
+            [receiverRef, existingId],
+          );
+        }
         receiverId = existingId;
       } else {
+        const receiverTrackingId = await generateReceiverTrackingId(
+          client,
+          usedTrackingIds,
+        );
         const insertRes = await client.query(
           `INSERT INTO receivers (order_id, receiver_name, receiver_contact, receiver_address, 
-            receiver_email, receiver_marks_and_number, eta, etd, status, remarks, 
-            full_partial, qty_delivered, shipping_line, containers, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW()) RETURNING id`,
+      receiver_email, receiver_marks_and_number, eta, etd, status, remarks, 
+      full_partial, qty_delivered, shipping_line, containers, tracking_id, receiver_ref, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW(),NOW()) RETURNING id`,
           [
             id,
             name,
@@ -877,6 +909,8 @@ export async function updateOrder(req, res) {
             qtyDelivered,
             shippingLine,
             containersJson,
+            receiverTrackingId,
+            receiverRef,
           ],
         );
         receiverId = insertRes.rows[0].id;
@@ -1248,6 +1282,7 @@ export const getOrders = async (req, res) => {
       where.push(`
         (
           o.booking_ref ILIKE $${params.length}
+          OR o.tracking_id ILIKE $${params.length}
           OR o.rgl_booking_number ILIKE $${params.length}
           OR s.sender_name ILIKE $${params.length}
           OR EXISTS (
@@ -1278,6 +1313,7 @@ export const getOrders = async (req, res) => {
     const query = `
       SELECT
         o.id,
+        o.tracking_id,
         o.booking_ref,
         o.rgl_booking_number,
         o.status,
@@ -1341,10 +1377,10 @@ export const getOrders = async (req, res) => {
                               'status', cah.status,
 
                               'assign_total_box',
-                              COALESCE(oi.assigned_boxes::text, '0'),
+                              COALESCE(asg.assigned_qty, 0)::text,
 
                               'assign_weight',
-                              COALESCE(oi.assigned_weight_kg::text, '0'),
+                              COALESCE(asg.assigned_weight_kg, 0)::text,
 
                               'remaining_items',
                               COALESCE((COALESCE(oi.total_number,0) - COALESCE(oi.assigned_boxes,0))::text, '0'),
@@ -1370,8 +1406,23 @@ export const getOrders = async (req, res) => {
                             ORDER BY cah.created_at DESC, cah.id DESC
                             LIMIT 1
                           ) cah ON true
-
+                          LEFT JOIN LATERAL (
+                            SELECT
+                              COALESCE(SUM(x.assigned_qty), 0) AS assigned_qty,
+                              COALESCE(SUM(x.assigned_weight_kg), 0) AS assigned_weight_kg
+                            FROM (
+                              SELECT DISTINCT ON (h.consignment_id)
+                                h.assigned_qty, h.assigned_weight_kg, h.action_type
+                              FROM container_assignment_history h
+                              WHERE h.order_id = o.id
+                                AND h.cid = cm.cid
+                                AND h.detail_id = oi.id
+                              ORDER BY h.consignment_id, h.id DESC
+                            ) x
+                            WHERE x.action_type = 'ASSIGN'
+                          ) asg ON true
                           WHERE r2.id = oi.receiver_id
+                          AND COALESCE(asg.assigned_qty, 0) > 0
                         ),
                         '[]'::jsonb
                       )
@@ -1919,7 +1970,7 @@ export async function getOrderById(req, res) {
         r.receiver_marks_and_number AS "marksAndNumber",
         COALESCE(r.total_number, 0)::int    AS total_number,
         COALESCE(r.total_weight, 0)::numeric AS total_weight,
-        r.receiver_ref, r.remarks, r.containers,
+        r.receiver_ref, r.remarks, r.containers, r.tracking_id,
         r.status,
         TO_CHAR(r.eta, 'YYYY-MM-DD') AS eta,
         TO_CHAR(r.etd, 'YYYY-MM-DD') AS etd,
@@ -4370,9 +4421,6 @@ export async function getOrderByTrackingId(req, res) {
       });
     }
 
-    // 3b) ALL items of the involved orders with their latest status
-    //     (same rule as getOrderByOrderId), so overall progress isn't
-    //     limited to the items assigned to this consignment
     const orderIds = [...new Set(rows.map((r) => r.order_id))];
     const receiverItemsMap = new Map();
     if (orderIds.length > 0) {
@@ -5657,16 +5705,20 @@ export async function getMblData(req, res) {
         WITH latest AS (${latest})
         SELECT
           cm.cid, cm.container_number, cm.container_size, cm.container_type,
+          oi.id AS item_id,
+          o.id AS order_id, o.rgl_booking_number, o.booking_ref,
           oi.category, oi.subcategory, oi.type,
           SUM(l.assigned_qty)::int AS pkgs,
           SUM(l.assigned_weight_kg)::numeric AS weight
         FROM latest l
         JOIN order_items oi ON oi.id = l.detail_id
+        JOIN orders o ON o.id = oi.order_id
         JOIN container_master cm ON cm.cid = l.cid
         WHERE l.action_type = 'ASSIGN'
         GROUP BY cm.cid, cm.container_number, cm.container_size, cm.container_type,
+                 oi.id, o.id, o.rgl_booking_number, o.booking_ref,
                  oi.category, oi.subcategory, oi.type
-        ORDER BY cm.container_number, oi.category, oi.subcategory
+        ORDER BY cm.container_number, o.id, oi.id
         `,
         [id],
       ),
@@ -5720,6 +5772,9 @@ export async function getMblData(req, res) {
       c.pkgs += pkgs;
       c.weight += weight;
       c.items.push({
+        item_id: r.item_id,
+        order_id: r.order_id,
+        order_no: r.rgl_booking_number || r.booking_ref || "",
         category: r.category || "",
         subcategory: r.subcategory || "",
         type: r.type || "",
@@ -5999,6 +6054,16 @@ export async function createOrderCollections(req, res) {
             error: `Order item not found: orderItemId=${it.orderItemId} (itemRef: ${it.itemRef})`,
           });
         }
+      }
+
+      if (c.driverId && c.plateNo?.trim()) {
+        await client.query(
+          `UPDATE driver_tracks
+        SET total_deliveries = total_deliveries + 1
+      WHERE driver_id = $1
+        AND lower(btrim(plate_no)) = lower(btrim($2))`,
+          [c.driverId, c.plateNo],
+        );
       }
 
       insertedCollections.push({ id: collectionId, ...c });
@@ -6285,3 +6350,175 @@ export const getGatepassesForCollection = async (req, res) => {
     if (client) client.release();
   }
 };
+
+export async function getPublicOrderTracking(req, res) {
+  const { ref } = req.params;
+
+  if (!ref || typeof ref !== "string" || ref.trim() === "") {
+    return res.status(400).json({
+      success: false,
+      message: "Tracking ID is required",
+    });
+  }
+
+  const trackingId = ref.trim().toUpperCase();
+
+  try {
+    const resolved = await resolveOrderByTrackingId(trackingId);
+    if (!resolved) {
+      return res.status(404).json({
+        success: false,
+        message: `No order found for tracking ID "${trackingId}"`,
+      });
+    }
+
+    const assignedRows = `
+      SELECT x.* FROM (
+        SELECT DISTINCT ON (h.cid, h.consignment_id)
+          h.cid, h.consignment_id, h.assigned_qty, h.assigned_weight_kg, h.action_type
+        FROM container_assignment_history h
+        WHERE h.detail_id = oi.id
+        ORDER BY h.cid, h.consignment_id, h.id DESC
+      ) x
+      WHERE x.action_type = 'ASSIGN'
+    `;
+
+    const shippingDetailsAgg = `
+      (SELECT COALESCE(jsonb_agg(
+        jsonb_build_object(
+          'id',            oi.id,
+          'totalNumber',   COALESCE(oi.total_number, 0),
+          'weight',        COALESCE(oi.weight, 0),
+          'status',        COALESCE(lt.status, oi.status, 'Created'),
+          'lastUpdated',   lt.created_time,
+          'eta',           lt_eta.eta,
+          'status_history', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+              'status', d.status,
+              'time',   d.created_time
+            ) ORDER BY d.created_time DESC, d.id DESC)
+            FROM (
+              SELECT DISTINCT ON (ot.status)
+                ot.id, ot.status, ot.created_time
+              FROM order_tracking ot
+              WHERE ot.item_ref = oi.item_ref AND ot.order_id = o.id
+              ORDER BY ot.status, ot.created_time DESC, ot.id DESC
+            ) d
+          ), '[]'::jsonb),
+          'shipments', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+              'qty',     ar.assigned_qty,
+              'weight',  ar.assigned_weight_kg,
+              'status',  COALESCE(ls.status, 'Created'),
+              'eta',     ls.eta,
+              'history', COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                  'status', d.status,
+                  'time',   d.created_time
+                ) ORDER BY d.created_time, d.id)
+                FROM (
+                  SELECT DISTINCT ON (h.status)
+                    h.id, h.status, h.created_time
+                  FROM order_tracking h
+                  WHERE h.order_id = o.id
+                    AND h.item_ref = oi.item_ref
+                    AND (h.container_id = ar.cid OR h.container_id IS NULL)
+                  ORDER BY h.status, h.created_time DESC, h.id DESC
+                ) d
+              ), '[]'::jsonb)
+            ) ORDER BY ar.cid)
+            FROM (${assignedRows}) ar
+            LEFT JOIN LATERAL (
+              SELECT t.status, t.eta
+              FROM order_tracking t
+              WHERE t.order_id = o.id
+                AND t.item_ref = oi.item_ref
+                AND (t.container_id = ar.cid OR t.container_id IS NULL)
+              ORDER BY (t.container_id IS NOT NULL) DESC, t.created_time DESC, t.id DESC
+              LIMIT 1
+            ) ls ON true
+          ), '[]'::jsonb)
+        ) ORDER BY oi.id
+      ), '[]'::jsonb)
+      FROM order_items oi
+      LEFT JOIN LATERAL (
+        SELECT ot.created_time, ot.status
+        FROM order_tracking ot
+        WHERE ot.item_ref = oi.item_ref AND ot.order_id = o.id
+        ORDER BY ot.created_time DESC, ot.id DESC
+        LIMIT 1
+      ) lt ON true
+      LEFT JOIN LATERAL (
+        SELECT ot.eta
+        FROM order_tracking ot
+        WHERE ot.item_ref = oi.item_ref AND ot.order_id = o.id AND ot.eta IS NOT NULL
+        ORDER BY ot.created_time DESC, ot.id DESC
+        LIMIT 1
+      ) lt_eta ON true
+      WHERE oi.receiver_id = r.id
+        AND oi.order_id = o.id)
+    `;
+
+    const query = `
+      SELECT
+        o.id AS order_id,
+        o.tracking_id,
+        o.booking_ref,
+        o.rgl_booking_number,
+        o.created_at,
+        pol.name AS place_of_loading_name,
+        pod.name AS place_of_delivery_name,
+        t.transport_type,
+        (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb)
+         FROM (
+           SELECT
+             r.id,
+             r.receiver_name    AS "receiverName",
+             r.receiver_address AS "receiverAddress",
+             ${shippingDetailsAgg} AS "shippingDetails"
+           FROM receivers r
+           WHERE r.order_id = o.id
+         ) r_full) AS receivers
+      FROM orders o
+      LEFT JOIN transport_details t ON t.order_id = o.id
+      LEFT JOIN places pol ON pol.id = o.place_of_loading
+      LEFT JOIN places pod ON pod.id = o.place_of_delivery
+      WHERE o.id = $1
+      LIMIT 1
+    `;
+
+    const { rows } = await pool.query(query, [resolved.orderId]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No order found for tracking ID "${trackingId}"`,
+      });
+    }
+
+    const row = rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        id: row.order_id,
+        tracking_id: row.tracking_id,
+        booking_ref: row.booking_ref,
+        rgl_booking_number: row.rgl_booking_number || row.booking_ref,
+        created_at: row.created_at,
+        place_of_loading: row.place_of_loading_name || null,
+        place_of_delivery: row.place_of_delivery_name || null,
+        transport_type: row.transport_type || null,
+        receivers: row.receivers || [],
+        lookup: { via: resolved.via, sheetPart: resolved.sheetPart },
+      },
+    });
+  } catch (err) {
+    console.error("getPublicOrderTracking error:", err.stack || err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch order details",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
+    });
+  }
+}
