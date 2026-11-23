@@ -1694,7 +1694,12 @@ export async function getOrdersConsignments(req, res) {
       COALESCE((
         SELECT json_agg(json_build_object(
           'status', COALESCE(cs.derived_status, 'Created'),
-          'container', json_build_object('cid', ar.cid, 'container_number', COALESCE(cm2.container_number, 'Unknown')),
+          'container', json_build_object(
+            'cid', ar.cid,
+            'container_number', COALESCE(cm2.container_number, 'Unknown'),
+            'size', cm2.container_size,
+            'containerType', cm2.container_type
+          ),
           'assign_weight', COALESCE(ar.assigned_weight_kg, 0)::text,
           'assign_total_box', COALESCE(ar.assigned_qty, 0)::text,
           'consignment_id', ar.consignment_id
@@ -1766,6 +1771,7 @@ export async function getOrdersConsignments(req, res) {
         r.id,
         r.receiver_name  AS receivername,
         r.containers,
+        r.receiver_marks_and_number,
         r.receiver_marks_and_number AS marksAndNumber,
         ${shippingDetailsSub} AS shippingdetails,
           COALESCE((
@@ -1927,7 +1933,9 @@ export async function getOrderById(req, res) {
             'status',          COALESCE(cs.derived_status, 'Created'),
             'container',       jsonb_build_object(
               'cid',           ar.cid,
-              'container_number', COALESCE(cm2.container_number, '')
+              'container_number', COALESCE(cm2.container_number, ''),
+              'size',          cm2.container_size,
+              'containerType', cm2.container_type
             ),
             'total_number',    COALESCE(oi.total_number, 0)::int,
             'assign_weight',   COALESCE(ar.assigned_weight_kg, 0)::text,
@@ -5323,6 +5331,7 @@ function normalizeReceiver(row) {
       ? row.receiver_kyc_email
       : row.receiver_customer_email || row.receiver_email || "",
     receiverMarksAndNumber: row.receiver_marks_and_number,
+    receiver_marks_and_number: row.receiver_marks_and_number || "",
     kycApproved,
     emiratesId: row.receiver_emirates_id || "",
     passportNumber: row.receiver_passport_number || "",
@@ -5384,7 +5393,7 @@ export async function getPdfData(req, res) {
     const RECEIVERS_QUERY = `
       SELECT
         r.id, r.order_id,
-        r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, r.receiver_marks_and_number,
+        r.receiver_name, r.receiver_contact, r.receiver_address, r.receiver_email, r.receiver_marks_and_number as marksAndNumber, r.receiver_marks_and_number,
         r.receiver_ref,
         r.containers,
         sd_full.shippingdetails,
@@ -5429,7 +5438,7 @@ export async function getPdfData(req, res) {
           SELECT
             json_agg(
               json_build_object(
-                'container_number', cah.container_number,
+                'container_number', COALESCE(cm.container_number, cah.container_number, ''),
                 'cid', cah.cid,
                 'assigned_qty', COALESCE(cah.assigned_qty, 0)::int,
                 'assigned_weight_kg', COALESCE(cah.assigned_weight_kg, 0)::numeric,
@@ -5441,7 +5450,10 @@ export async function getPdfData(req, res) {
             json_agg(
               json_build_object(
                 'container', json_build_object(
-                  'container_number', COALESCE(cah.container_number, '')
+                  'cid', cah.cid,
+                  'container_number', COALESCE(cm.container_number, cah.container_number, ''),
+                  'size', cm.container_size,
+                  'containerType', cm.container_type
                 ),
                 'total_number', COALESCE(cah.assigned_qty, 0)::int,
                 'assign_weight', COALESCE(cah.assigned_weight_kg, 0)::text,
@@ -5450,6 +5462,7 @@ export async function getPdfData(req, res) {
               ) ORDER BY cah.id
             ) AS legacy_shape
           FROM container_assignment_history cah
+          LEFT JOIN container_master cm ON cm.cid = cah.cid
           WHERE cah.detail_id = oi.id
             AND cah.action_type = 'ASSIGN'
         ) cah_agg ON TRUE
@@ -5708,16 +5721,19 @@ export async function getMblData(req, res) {
           oi.id AS item_id,
           o.id AS order_id, o.rgl_booking_number, o.booking_ref,
           oi.category, oi.subcategory, oi.type,
+          r.receiver_marks_and_number AS marks,
           SUM(l.assigned_qty)::int AS pkgs,
           SUM(l.assigned_weight_kg)::numeric AS weight
         FROM latest l
         JOIN order_items oi ON oi.id = l.detail_id
+        LEFT JOIN receivers r ON r.id = oi.receiver_id
         JOIN orders o ON o.id = oi.order_id
         JOIN container_master cm ON cm.cid = l.cid
         WHERE l.action_type = 'ASSIGN'
         GROUP BY cm.cid, cm.container_number, cm.container_size, cm.container_type,
                  oi.id, o.id, o.rgl_booking_number, o.booking_ref,
-                 oi.category, oi.subcategory, oi.type
+                 oi.category, oi.subcategory, oi.type,
+                 r.receiver_marks_and_number
         ORDER BY cm.container_number, o.id, oi.id
         `,
         [id],
@@ -5778,6 +5794,7 @@ export async function getMblData(req, res) {
         category: r.category || "",
         subcategory: r.subcategory || "",
         type: r.type || "",
+        marks: r.marks || "",
         pkgs,
         weight,
       });
