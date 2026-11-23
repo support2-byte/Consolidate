@@ -246,7 +246,5 @@ export const triggerBatchTick = () => {
 
 export const startBatchScheduler = () => {
   tick();
-  recoverStaleRows().finally(tick);
-  setInterval(tick, TICK_MS);
   logger.info("Batch email scheduler started");
 };
