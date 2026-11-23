@@ -13,7 +13,7 @@ const formatOptions = (rows, valueField = "id", labelField = "name") => {
 export async function getThirdParties(req, res) {
   try {
     const result = await pool.query(
-      "SELECT * FROM third_parties ORDER BY company_name ASC",
+      `SELECT id, company_name, contact_name, contact_email, contact_phone, address, type, is_active FROM third_parties ORDER BY company_name ASC`,
     );
     if (result.rowCount === 0) {
       return res.status(404).json({
@@ -96,12 +96,20 @@ export async function updateThirdParty(req, res) {
   }
 }
 
-export async function deleteThirdParty(req, res) {
+export async function setThirdPartyStatus(req, res) {
   try {
     const { id } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "is_active must be true or false" });
+    }
+
     const result = await pool.query(
-      "DELETE FROM third_parties WHERE id = $1 RETURNING *",
-      [id],
+      "UPDATE third_parties SET is_active = $1 WHERE id = $2 RETURNING *",
+      [is_active, id],
     );
     if (result.rowCount === 0) {
       return res
@@ -110,18 +118,18 @@ export async function deleteThirdParty(req, res) {
     }
     return res.json({
       success: true,
-      message: "Third party deleted successfully",
+      message: is_active
+        ? "Third party activated successfully"
+        : "Third party deactivated successfully",
       third_party: result.rows[0],
     });
   } catch (err) {
-    logger.error("Error deleting third party:", { error: err.message });
+    logger.error("Error updating third party status:", { error: err.message });
     return res
       .status(500)
       .json({ success: false, message: "Something went wrong!" });
   }
 }
-
-// --- PLACES ---
 
 export async function getPlaces(req, res) {
   try {
