@@ -25,7 +25,6 @@ import {
   deletePlace,
   getThirdParties,
   createThirdParty,
-  deleteThirdParty,
   updateThirdParty,
   createBank,
   updateBank,
@@ -59,6 +58,7 @@ import {
   deleteSystemSetting,
   updateSystemSetting,
   getSystemSettings,
+  setThirdPartyStatus,
 } from "./options.controllers.js";
 import { bugReportUpload, companyUpload } from "../../middleware/upload.js";
 import { requireAuth } from "../../modules/auth/auth.middleware.js";
@@ -98,7 +98,7 @@ router.delete("/places/:id", requireAuth, deletePlace);
 router.get("/thirdParty/crud", requireAuth, getThirdParties);
 router.post("/thirdParty", requireAuth, createThirdParty);
 router.put("/thirdParty/:id", requireAuth, updateThirdParty);
-router.delete("/thirdParty/:id", requireAuth, deleteThirdParty);
+router.patch("/thirdParty/:id/status", requireAuth, setThirdPartyStatus);
 
 router.get("/banks/crud", requireAuth, getBanks);
 router.post("/banks", requireAuth, createBank);
