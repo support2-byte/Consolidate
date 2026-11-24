@@ -12,6 +12,68 @@ import {
 import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
 import { v2 as cloudinary } from "cloudinary";
 
+const isAdminLevel = (user) =>
+  ["admin", "super admin"].includes(String(user?.roleName || "").toLowerCase());
+
+const canEditConsignmentRow = (user, row) =>
+  isAdminLevel(user) ||
+  (row?.edit_access_to != null &&
+    String(row.edit_access_to) === String(user?.id));
+
+export async function getEditAccessUsers(req, res) {
+  try {
+    // ADJUST table/column names to your users table
+    const { rows } = await pool.query(
+      `SELECT id, name, email FROM users WHERE id <> $1 ORDER BY name`,
+      [req.user.id],
+    );
+    res.json({ data: rows });
+  } catch (err) {
+    console.error("Error fetching users for edit access:", err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+}
+
+export async function setConsignmentEditAccess(req, res) {
+  try {
+    const numericId = parseInt(req.params.id, 10);
+    if (isNaN(numericId) || numericId <= 0) {
+      return res.status(400).json({ error: "Invalid consignment ID." });
+    }
+
+    const { userId } = req.body;
+    const grant = userId !== null && userId !== undefined && userId !== "";
+
+    const { rows } = grant
+      ? await pool.query(
+          `UPDATE consignments
+           SET edit_access_to = $1, edit_access_by = $2, edit_access_at = NOW()
+           WHERE id = $3
+           RETURNING id, edit_access_to, edit_access_by, edit_access_at`,
+          [String(userId), String(req.user.id), numericId],
+        )
+      : await pool.query(
+          `UPDATE consignments
+           SET edit_access_to = NULL, edit_access_by = NULL, edit_access_at = NULL
+           WHERE id = $1
+           RETURNING id, edit_access_to, edit_access_by, edit_access_at`,
+          [numericId],
+        );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Consignment not found" });
+    }
+
+    res.json({
+      message: grant ? "Edit access granted" : "Edit access revoked",
+      data: rows[0],
+    });
+  } catch (err) {
+    console.error("Error updating edit access:", err);
+    res.status(500).json({ error: "Failed to update edit access" });
+  }
+}
+
 function safeParseJsonArray(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val;
@@ -414,7 +476,7 @@ export async function getConsignmentById(req, res) {
         consignment.orders = linkedOrders;
       }
 
-      if (minReceiverEta) {
+      if (!consignment.eta && minReceiverEta) {
         consignment.eta = minReceiverEta.toISOString().split("T")[0];
       }
 
@@ -554,6 +616,7 @@ export async function getConsignmentById(req, res) {
       consignment.attachments = [];
     }
 
+    consignment.can_edit = canEditConsignmentRow(req.user, consignment);
     consignment.containers = containers;
     res.json({ data: consignment });
   } catch (err) {
@@ -802,6 +865,9 @@ export async function getConsignments(req, res) {
         cons.orders,
         cons.delivered,
         cons.pending,
+        cons.edit_access_to,
+        cons.edit_access_at,
+        cons.edit_access_by,
         COALESCE(item_counts.total_items, 0) AS total_items,
         COALESCE(item_counts.total_orders, 0) AS total_orders,
         COALESCE(item_counts.delivered_items, 0) AS delivered_items
@@ -872,7 +938,11 @@ export async function getConsignments(req, res) {
     const countResult = await pool.query(countQuery, queryParams.slice(0, -2));
     const total = parseInt(countResult.rows[0].total);
 
-    res.json({ data: rows, total });
+    const data = rows.map((r) => ({
+      ...r,
+      can_edit: canEditConsignmentRow(req.user, r),
+    }));
+    res.json({ data, total });
   } catch (err) {
     console.error("Error fetching consignments:", err);
     res.status(500).json({ error: "Failed to fetch consignments" });
@@ -1204,6 +1274,19 @@ export async function createConsignment(req, res) {
 export async function updateConsignment(req, res) {
   const { id } = req.params;
   try {
+    const accessRes = await pool.query(
+      "SELECT id, edit_access_to FROM consignments WHERE id = $1",
+      [id],
+    );
+    if (accessRes.rowCount === 0) {
+      return res.status(404).json({ error: "Consignment not found" });
+    }
+    if (!canEditConsignmentRow(req.user, accessRes.rows[0])) {
+      return res
+        .status(403)
+        .json({ error: "You don't have edit access to this consignment" });
+    }
+
     const data = req.body;
 
     logger.info(`[updateConsignment] Request received`, {
@@ -1358,7 +1441,7 @@ export async function updateConsignment(req, res) {
     const containerDiffSummary = { released: [], added: [] };
 
     await withTransaction(async (client) => {
-      if (!computedETA || data.status !== undefined) {
+      if (!computedETA) {
         const statusRow = await client.query(
           `SELECT order_status FROM statuses WHERE consignment_status = $1 AND status = true LIMIT 1`,
           [input.status || data.status],
@@ -1376,6 +1459,15 @@ export async function updateConsignment(req, res) {
 
         const etaIndex = updateFields.indexOf("eta");
         if (etaIndex !== -1) values[etaIndex + 1] = normalizeDate(computedETA);
+      }
+
+      let etaChanged = false;
+      if (computedETA) {
+        const etaCheck = await client.query(
+          `SELECT eta IS DISTINCT FROM $2::date AS changed FROM consignments WHERE id = $1`,
+          [id, normalizeDate(computedETA)],
+        );
+        etaChanged = etaCheck.rows[0]?.changed === true;
       }
 
       const updateResult = await withUserAudit(req, client, query, values);
@@ -1520,6 +1612,13 @@ export async function updateConsignment(req, res) {
       } else {
         logger.info(`[updateConsignment] No cleared_item_ids provided`, {
           consignment_id: id,
+        });
+      }
+
+      if (etaChanged) {
+        await applyConsignmentEta(client, {
+          consignmentId: Number(id),
+          eta: normalizeDate(computedETA),
         });
       }
 
