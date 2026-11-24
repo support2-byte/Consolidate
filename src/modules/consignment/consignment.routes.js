@@ -12,11 +12,20 @@ import {
   getManifestPrints,
   uploadConsignmentAttachments,
   deleteConsignmentAttachment,
+  getEditAccessUsers,
+  setConsignmentEditAccess,
 } from "../consignment/consignment.controller.js";
-import { requireAuth } from "../auth/auth.middleware.js";
+import { requireAuth, requireRole } from "../auth/auth.middleware.js";
 import { consignmentUpload } from "../../middleware/upload.js";
 
 const router = express.Router();
+
+router.get(
+  "/edit-access/users",
+  requireAuth,
+  requireRole("admin", "super admin"),
+  getEditAccessUsers,
+);
 
 /**
  * @swagger
@@ -108,6 +117,13 @@ router.get("/:id", requireAuth, getConsignmentById);
  *         description: Invalid input
  */
 router.post("/", requireAuth, createConsignment);
+
+router.put(
+  "/:id/edit-access",
+  requireAuth,
+  requireRole("admin", "super admin"),
+  setConsignmentEditAccess,
+);
 
 /**
  * @swagger
