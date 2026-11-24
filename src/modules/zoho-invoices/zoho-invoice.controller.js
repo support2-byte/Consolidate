@@ -241,7 +241,7 @@ const syncInvoiceRows = async (list, token, syncedBy = null) => {
   if (!list.length) return 0;
 
   const existing = await pool.query(
-    "SELECT zoho_invoice_id, last_modified_time, exchange_rate FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
+    "SELECT zoho_invoice_id, last_modified_time, exchange_rate, last_payment_date FROM zoho_invoices WHERE zoho_invoice_id = ANY($1::text[])",
     [list.map((i) => i.invoice_id)],
   );
   const known = new Map(existing.rows.map((r) => [r.zoho_invoice_id, r]));
@@ -250,7 +250,8 @@ const syncInvoiceRows = async (list, token, syncedBy = null) => {
     return (
       !k ||
       k.last_modified_time !== i.last_modified_time ||
-      k.exchange_rate == null
+      k.exchange_rate == null ||
+      (["paid", "partially_paid"].includes(i.status) && !k.last_payment_date)
     );
   });
 
@@ -261,6 +262,7 @@ const syncInvoiceRows = async (list, token, syncedBy = null) => {
     let consignmentNumber = null;
     let paymentMode = null;
     let exchangeRate = null;
+    let lastPaymentDate = null;
     let lastModified = i.last_modified_time || null;
     try {
       const detail = await getInvoiceDetailCached(i.invoice_id, token);
@@ -300,6 +302,13 @@ const syncInvoiceRows = async (list, token, syncedBy = null) => {
             (payments || []).map((p) => p.payment_mode).filter(Boolean),
           ),
         ].join(", ") || null;
+
+      lastPaymentDate =
+        (payments || [])
+          .map((p) => p.date)
+          .filter(Boolean)
+          .sort()
+          .pop() || null;
     } catch (err) {
       if (err.response?.status === 429) rateLimited = true;
       lastModified = null;
@@ -334,6 +343,12 @@ const syncInvoiceRows = async (list, token, syncedBy = null) => {
       await pool.query(
         `UPDATE zoho_invoices SET exchange_rate = $1 WHERE zoho_invoice_id = $2`,
         [exchangeRate, i.invoice_id],
+      );
+    }
+    if (lastPaymentDate) {
+      await pool.query(
+        `UPDATE zoho_invoices SET last_payment_date = $1 WHERE zoho_invoice_id = $2`,
+        [lastPaymentDate, i.invoice_id],
       );
     }
   });

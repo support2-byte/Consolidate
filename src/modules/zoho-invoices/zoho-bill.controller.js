@@ -538,6 +538,111 @@ export const getReceiverApprovals = async (orderId) => {
   );
 };
 
+const countPaid = (map) =>
+  Object.values(map || {}).filter((s) => s === "paid").length;
+
+export const getReceiverPaymentMeta = async (orderId) => {
+  const orderRes = await pool.query(
+    `SELECT o.rgl_booking_number, s.sender_name
+       FROM orders o
+       LEFT JOIN senders s ON s.order_id = o.id
+      WHERE o.id = $1`,
+    [orderId],
+  );
+  if (!orderRes.rows[0]) return {};
+  const orderKey = key(orderRes.rows[0].rgl_booking_number);
+  const senderKey = normalizeName(orderRes.rows[0].sender_name);
+
+  const [recRes, invRes] = await Promise.all([
+    pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
+      orderId,
+    ]),
+    orderKey
+      ? pool.query(
+          `SELECT customer_name AS customer, status,
+                  total::float8 AS total, balance::float8 AS balance,
+                  to_char(last_payment_date, 'YYYY-MM-DD') AS "paidDate"
+             FROM zoho_invoices
+            WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
+          [orderKey],
+        )
+      : { rows: [] },
+  ]);
+
+  const byCustomer = {};
+  for (const inv of invRes.rows) {
+    const k = normalizeName(inv.customer);
+    (byCustomer[k] = byCustomer[k] || []).push(inv);
+  }
+
+  return Object.fromEntries(
+    recRes.rows.map((r) => {
+      const keys = new Set([normalizeName(r.receiver_name)]);
+      if (senderKey) keys.add(senderKey);
+      const docs = [...keys].flatMap((k) => byCustomer[k] || []);
+      const live = docs.filter((d) => !EXCLUDED_STATUSES.includes(d.status));
+      const status = paymentStatusOf(docs);
+      const paidDates = live
+        .map((d) => d.paidDate)
+        .filter(Boolean)
+        .sort();
+      return [
+        r.id,
+        {
+          status,
+          invoiceCount: live.length,
+          total: sum(live),
+          balance: Number(live.reduce((s, d) => s + d.balance, 0).toFixed(2)),
+          paidDate: status === "paid" ? paidDates.pop() || null : null,
+        },
+      ];
+    }),
+  );
+};
+
+export const getLastPaymentSync = async (orderId) => {
+  const { rows } = await pool.query(
+    `SELECT synced_by_email AS "syncedByEmail", status, message,
+            invoices_found AS "invoicesFound", invoices_updated AS "invoicesUpdated",
+            paid_before AS "paidBefore", paid_after AS "paidAfter",
+            receivers_total AS "receiversTotal", synced_at AS "syncedAt"
+       FROM order_payment_sync_log
+      WHERE order_id = $1
+      ORDER BY id DESC
+      LIMIT 1`,
+    [orderId],
+  );
+  return rows[0] || null;
+};
+
+const logPaymentSync = async (orderId, user, d) => {
+  try {
+    await pool.query(
+      `INSERT INTO order_payment_sync_log
+         (order_id, synced_by_id, synced_by_email, status, message,
+          invoices_found, invoices_updated, paid_before, paid_after, receivers_total)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        orderId,
+        user?.id ?? null,
+        user?.email ?? null,
+        d.status,
+        d.message,
+        d.found ?? 0,
+        d.updated ?? 0,
+        d.paidBefore ?? 0,
+        d.paidAfter ?? 0,
+        d.total ?? 0,
+      ],
+    );
+  } catch (err) {
+    logger.error("Failed to write payment sync log", {
+      err: err.message,
+      orderId,
+    });
+  }
+};
+
 export const getUnreleasedReceivers = async (orderId, receiverIds) => {
   const [payments, approvals] = await Promise.all([
     getReceiverPayments(orderId),
@@ -557,16 +662,25 @@ export const getOrderPaymentStatus = async (req, res) => {
       .json({ success: false, message: "Invalid order ID" });
   }
   try {
-    const [receiverPayments, receiverApprovals] = await Promise.all([
-      getReceiverPayments(orderId),
-      getReceiverApprovals(orderId),
-    ]);
+    const [receiverPayments, receiverApprovals, receiverPaymentMeta, lastSync] =
+      await Promise.all([
+        getReceiverPayments(orderId),
+        getReceiverApprovals(orderId),
+        getReceiverPaymentMeta(orderId),
+        getLastPaymentSync(orderId),
+      ]);
     if (!receiverPayments) {
       return res
         .status(404)
         .json({ success: false, message: "Order not found" });
     }
-    return res.json({ success: true, receiverPayments, receiverApprovals });
+    return res.json({
+      success: true,
+      receiverPayments,
+      receiverApprovals,
+      receiverPaymentMeta,
+      lastSync,
+    });
   } catch (err) {
     logger.error("Failed to build order payment status", {
       err: err.response?.data || err.message,
@@ -604,8 +718,11 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       });
     }
 
+    const paidBefore = countPaid(await getReceiverPayments(orderId));
+
+    let updated = 0;
     try {
-      await syncInvoicesForOrder(formNo);
+      updated = await syncInvoicesForOrder(formNo, req.user?.email ?? null);
     } catch (err) {
       logger.error("Failed to sync order invoices for payment status", {
         formNo,
@@ -613,19 +730,62 @@ export const refreshOrderPaymentStatus = async (req, res) => {
         err: err.response?.data || err.message,
       });
       const rateLimited = err.response?.status === 429;
+      const message = rateLimited
+        ? "Zoho rate limit reached, please try again shortly"
+        : "Could not reach Zoho. Check your network connection and try again.";
+      await logPaymentSync(orderId, req.user, {
+        status: rateLimited ? "rate_limited" : "failed",
+        message,
+        paidBefore,
+        paidAfter: paidBefore,
+      });
       return res.status(rateLimited ? 429 : 502).json({
         success: false,
-        message: rateLimited
-          ? "Zoho rate limit reached, please try again shortly"
-          : "Could not reach Zoho. Check your network connection and try again.",
+        message,
+        lastSync: await getLastPaymentSync(orderId),
       });
     }
 
-    const [receiverPayments, receiverApprovals] = await Promise.all([
-      getReceiverPayments(orderId),
-      getReceiverApprovals(orderId),
-    ]);
-    return res.json({ success: true, receiverPayments, receiverApprovals });
+    const [receiverPayments, receiverApprovals, receiverPaymentMeta, foundRes] =
+      await Promise.all([
+        getReceiverPayments(orderId),
+        getReceiverApprovals(orderId),
+        getReceiverPaymentMeta(orderId),
+        pool.query(
+          `SELECT COUNT(*)::int AS n FROM zoho_invoices
+            WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
+          [key(formNo)],
+        ),
+      ]);
+
+    const found = foundRes.rows[0].n;
+    const total = Object.keys(receiverPayments).length;
+    const paidAfter = countPaid(receiverPayments);
+
+    const message =
+      found === 0
+        ? "No invoice found in Zoho for this order"
+        : paidAfter > paidBefore
+          ? `Updated: ${paidBefore} → ${paidAfter} of ${total} receiver(s) paid`
+          : `No change: ${paidAfter} of ${total} receiver(s) paid`;
+
+    await logPaymentSync(orderId, req.user, {
+      status: "success",
+      message,
+      found,
+      updated,
+      paidBefore,
+      paidAfter,
+      total,
+    });
+
+    return res.json({
+      success: true,
+      receiverPayments,
+      receiverApprovals,
+      receiverPaymentMeta,
+      lastSync: await getLastPaymentSync(orderId),
+    });
   } catch (err) {
     logger.error("Failed to refresh order payment status", {
       err: err.response?.data || err.message,

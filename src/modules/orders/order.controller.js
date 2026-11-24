@@ -1271,7 +1271,7 @@ export const getOrders = async (req, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
     const offset = (page - 1) * limit;
 
-    const { search, status } = req.query;
+    const { search, status, partial } = req.query;
 
     const params = [];
     const where = [];
@@ -1308,6 +1308,19 @@ export const getOrders = async (req, res) => {
       `);
     }
 
+    if (partial === "true") {
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM receivers rp
+          JOIN order_items oip ON oip.receiver_id = rp.id
+          WHERE rp.order_id = o.id
+          HAVING COALESCE(SUM(oip.delivered_qty), 0) > 0
+             AND COALESCE(SUM(oip.delivered_qty), 0) < COALESCE(SUM(oip.total_number), 0)
+        )
+      `);
+    }
+
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
     const query = `
@@ -1340,7 +1353,7 @@ export const getOrders = async (req, res) => {
               'id', r.id,
               'receiverName', r.receiver_name,
               'status', r.status,
-              'eta', r.eta,
+              'eta', TO_CHAR(r.eta, 'YYYY-MM-DD'),
 
               'shippingdetails',
               COALESCE(
@@ -1359,7 +1372,7 @@ export const getOrders = async (req, res) => {
                       'deliveredQty', COALESCE(oi.delivered_qty, 0)::int,
                       'remainingQty', COALESCE(oi.remaining_qty, oi.total_number, 0)::int,
 
-                      'trackingEta', ot.eta,
+                      'trackingEta', TO_CHAR(ot.eta, 'YYYY-MM-DD'),
                       'trackingStatus', ot.status,
                       'isDelayed', COALESCE(em.is_delayed, false),
 
@@ -1795,6 +1808,22 @@ export async function getOrdersConsignments(req, res) {
         WHERE ot2.order_id = o.id ORDER BY ot2.created_time DESC LIMIT 1
       ) ot ON true
       LEFT JOIN container_master cm ON ot.container_id = cm.cid
+            LEFT JOIN LATERAL (
+        SELECT
+          CASE WHEN COUNT(*) > 0 AND COUNT(*) = COUNT(x.rfd) THEN MAX(x.rfd) END AS rfd_date
+        FROM (
+          SELECT
+            (
+              SELECT MAX(t.created_time)
+              FROM order_tracking t
+              WHERE t.order_id = oi.order_id
+                AND t.item_ref = oi.item_ref
+                AND t.status = 'Ready for Delivery'
+            ) AS rfd
+          FROM order_items oi
+          WHERE oi.order_id = o.id
+        ) x
+      ) rfd ON true
     `;
 
     const dataQuery = `
@@ -1805,6 +1834,7 @@ export async function getOrdersConsignments(req, res) {
         o.place_of_loading,
         o.place_of_delivery,
         s.sender_name,
+        rfd.rfd_date,
         ${receiversSub}
       FROM orders o
       ${joins}
@@ -1848,6 +1878,7 @@ export async function getOrdersConsignments(req, res) {
         place_of_loading: row.place_of_loading,
         place_of_delivery: row.place_of_delivery,
         sender_name: row.sender_name || null,
+        rfd_date: row.rfd_date || null,
         receivers,
       };
     });
@@ -1889,7 +1920,7 @@ export async function getOrderById(req, res) {
     client = await pool.connect();
 
     const selectFields = [
-      "o.*",
+      "o.*, o.qty_delivered AS order_qty_delivered",
       "s.sender_name, s.sender_contact, s.sender_address, s.sender_email, s.sender_ref, s.sender_remarks, s.sender_type, s.selected_sender_owner",
       "t.transport_type, t.third_party_transport, t.driver_name, t.driver_contact, t.driver_nic",
       "t.driver_pickup_location, t.truck_number, t.drop_method, t.dropoff_name, t.drop_off_cnic",
@@ -2019,9 +2050,11 @@ export async function getOrderById(req, res) {
               SELECT SUM(ar.assigned_qty) FROM (${assignedRows}) ar
             ), 0)
           )::int,
-
+          'remainingQty',       COALESCE(oi.remaining_qty, oi.total_number, 0)::int,
           'deliveredQty',       COALESCE(oi.delivered_qty, 0)::int,
-          'remainingQty',       COALESCE(oi.remaining_qty, oi.total_number, 0)::int
+          'rfdDate',            rfd.created_time,
+          'rfdBy',              COALESCE(rfd.created_by_name, rfd.created_by),
+          'rfdByEmail',         rfd.created_by
         )
         ORDER BY oi.id
       ) AS shippingdetails
@@ -2035,6 +2068,20 @@ export async function getOrderById(req, res) {
         ORDER BY t.created_time DESC
         LIMIT 1
       ) ot ON TRUE
+      
+      LEFT JOIN LATERAL (
+        SELECT
+          t.created_time,
+          t.created_by,
+          u.name AS created_by_name
+        FROM order_tracking t
+        LEFT JOIN users u ON LOWER(u.email) = LOWER(t.created_by)
+        WHERE t.order_id = oi.order_id
+          AND t.item_ref = oi.item_ref
+          AND t.status = 'Ready for Delivery'
+        ORDER BY t.created_time DESC, t.id DESC
+        LIMIT 1
+      ) rfd ON TRUE
 
       WHERE oi.receiver_id = r.id
       ) sd_full ON TRUE
@@ -2216,6 +2263,25 @@ export async function getOrderById(req, res) {
       [numericId],
     );
 
+    const trackingResult = await client.query(
+      `
+  SELECT
+    ot.*,
+    cm.container_number,
+    con.consignment_number,
+    m.name AS module,
+    u.name AS created_by_name
+  FROM order_tracking ot
+  LEFT JOIN container_master cm ON cm.cid = ot.container_id
+  LEFT JOIN consignments con ON con.id = ot.consignment_id
+  LEFT JOIN modules m ON m.id = ot.module_id
+  LEFT JOIN users u ON LOWER(u.email) = LOWER(ot.created_by)
+  WHERE ot.order_id = $1
+  ORDER BY ot.created_time DESC, ot.id DESC
+`,
+      [numericId],
+    );
+
     let parsedAttachments = [];
     try {
       parsedAttachments =
@@ -2275,6 +2341,7 @@ export async function getOrderById(req, res) {
       qty_delivered: orderRow.qty_delivered,
       receivers,
       assignmentHistory: historyResult.rows,
+      tracking: trackingResult.rows,
     });
   } catch (err) {
     console.error("Error in getOrderById:", err);
@@ -4267,7 +4334,6 @@ export async function getOrderByTrackingId(req, res) {
   const consNumber = id.trim().toUpperCase();
 
   try {
-    // 1) Consignment header
     const consRes = await pool.query(
       `
       SELECT
@@ -4310,7 +4376,6 @@ export async function getOrderByTrackingId(req, res) {
       console.warn("Invalid consignment containers JSON:", e);
     }
 
-    // 2) Everything currently ASSIGNED to this consignment (one row per item + container)
     const { rows } = await pool.query(
       `
       SELECT
@@ -4360,7 +4425,6 @@ export async function getOrderByTrackingId(req, res) {
           ) d
         ), '[]'::json) AS history,
 
-        -- assigned across ALL consignments (for a correct "remaining")
         COALESCE((
           SELECT SUM(a2.assigned_qty)
           FROM (
@@ -4401,7 +4465,6 @@ export async function getOrderByTrackingId(req, res) {
       [cons.id],
     );
 
-    // 3) Drop-off details for the receivers involved
     const receiverIds = [
       ...new Set(rows.map((r) => r.receiver_id).filter(Boolean)),
     ];
@@ -4463,7 +4526,6 @@ export async function getOrderByTrackingId(req, res) {
       });
     }
 
-    // 4) Group: order -> receiver -> item -> shipments (one per container)
     const orderMap = new Map();
     const itemSet = new Set();
     const containerSet = new Set();
@@ -4523,7 +4585,6 @@ export async function getOrderByTrackingId(req, res) {
 
       const qty = Number(row.assigned_qty) || 0;
       const itemTotal = Number(row.total_number) || 0;
-      // use the stored assigned weight; if it's missing, prorate the item weight by qty
       const wt =
         row.assigned_weight_kg != null
           ? Number(row.assigned_weight_kg) || 0
@@ -6085,6 +6146,17 @@ export async function createOrderCollections(req, res) {
 
       insertedCollections.push({ id: collectionId, ...c });
     }
+    await client.query(
+      `UPDATE orders o
+          SET qty_delivered = COALESCE((
+            SELECT SUM(COALESCE(oi.delivered_qty, 0))
+              FROM order_items oi
+              JOIN receivers r ON r.id = oi.receiver_id
+             WHERE r.order_id = o.id
+          ), 0)
+        WHERE o.id = $1`,
+      [orderId],
+    );
 
     await client.query("COMMIT");
     res.status(201).json({ success: true, collections: insertedCollections });
