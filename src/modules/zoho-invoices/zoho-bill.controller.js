@@ -654,6 +654,57 @@ export const getUnreleasedReceivers = async (orderId, receiverIds) => {
   );
 };
 
+async function withUserNames(receiverApprovals = {}, lastSync = null) {
+  const emails = new Set();
+  const ids = new Set();
+  const addEmail = (e) => e && emails.add(String(e).trim().toLowerCase());
+  const addId = (i) => Number(i) > 0 && ids.add(Number(i));
+
+  Object.values(receiverApprovals || {}).forEach((a) => {
+    addEmail(a?.approvedByEmail);
+    addId(a?.approvedBy);
+  });
+  if (lastSync) {
+    addEmail(lastSync.syncedByEmail);
+    addId(lastSync.syncedBy);
+  }
+  if (!emails.size && !ids.size) return { receiverApprovals, lastSync };
+
+  const { rows } = await pool.query(
+    `SELECT id, name, LOWER(TRIM(email)) AS email
+       FROM users
+      WHERE LOWER(TRIM(email)) = ANY($1::text[]) OR id = ANY($2::int[])`,
+    [[...emails], [...ids]],
+  );
+  const byEmail = new Map(rows.map((r) => [r.email, r.name]));
+  const byId = new Map(rows.map((r) => [Number(r.id), r.name]));
+  const nameOf = (email, id) =>
+    byEmail.get(
+      String(email || "")
+        .trim()
+        .toLowerCase(),
+    ) ||
+    byId.get(Number(id)) ||
+    null;
+
+  return {
+    receiverApprovals: Object.fromEntries(
+      Object.entries(receiverApprovals || {}).map(([k, a]) => [
+        k,
+        a
+          ? { ...a, approvedByName: nameOf(a.approvedByEmail, a.approvedBy) }
+          : a,
+      ]),
+    ),
+    lastSync: lastSync
+      ? {
+          ...lastSync,
+          syncedByName: nameOf(lastSync.syncedByEmail, lastSync.syncedBy),
+        }
+      : lastSync,
+  };
+}
+
 export const getOrderPaymentStatus = async (req, res) => {
   const orderId = parseInt(req.params.orderId, 10);
   if (isNaN(orderId) || orderId <= 0) {
@@ -674,12 +725,13 @@ export const getOrderPaymentStatus = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Order not found" });
     }
+    const named = await withUserNames(receiverApprovals, lastSync);
     return res.json({
       success: true,
       receiverPayments,
-      receiverApprovals,
+      receiverApprovals: named.receiverApprovals,
       receiverPaymentMeta,
-      lastSync,
+      lastSync: named.lastSync,
     });
   } catch (err) {
     logger.error("Failed to build order payment status", {
@@ -779,12 +831,16 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       total,
     });
 
+    const named = await withUserNames(
+      receiverApprovals,
+      await getLastPaymentSync(orderId),
+    );
     return res.json({
       success: true,
       receiverPayments,
-      receiverApprovals,
+      receiverApprovals: named.receiverApprovals,
       receiverPaymentMeta,
-      lastSync: await getLastPaymentSync(orderId),
+      lastSync: named.lastSync,
     });
   } catch (err) {
     logger.error("Failed to refresh order payment status", {
