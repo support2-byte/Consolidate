@@ -31,6 +31,7 @@ import {
   updateItemEta,
   getMblData,
   getPublicOrderTracking,
+  syncOrderTrackingIds,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -598,5 +599,7 @@ router.patch(
 
 router.post("/:collectionId/gatepass", requireAuth, createGatepass);
 router.get("/:collectionId/gatepass", requireAuth, getGatepassesForCollection);
+
+router.post("/tracking-sync", syncOrderTrackingIds);
 
 export default router;
