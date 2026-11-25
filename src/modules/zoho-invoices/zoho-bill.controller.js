@@ -967,7 +967,9 @@ export const getConsignmentBilling = async (req, res) => {
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
                 synced_at,
-                synced_by
+                (SELECT u.name FROM users u
+                  WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(zoho_invoices.synced_by))
+                  LIMIT 1) AS synced_by
            FROM zoho_invoices
           WHERE lower(btrim(consignment_number)) = $1
           ORDER BY invoice_date, id`,
@@ -982,7 +984,9 @@ export const getConsignmentBilling = async (req, res) => {
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
                 synced_at,
-                synced_by
+                (SELECT u.name FROM users u
+                  WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(zoho_bills.synced_by))
+                  LIMIT 1) AS synced_by
            FROM zoho_bills
           WHERE lower(btrim(consignment_number)) = $1
           ORDER BY bill_date, id`,
@@ -1065,7 +1069,9 @@ export const getOrderBilling = async (req, res) => {
                 to_char(invoice_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
                 synced_at,
-                synced_by
+                (SELECT u.name FROM users u
+                  WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(zoho_invoices.synced_by))
+                  LIMIT 1) AS synced_by
            FROM zoho_invoices
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
           ORDER BY invoice_date, id`,
@@ -1079,7 +1085,9 @@ export const getOrderBilling = async (req, res) => {
                 to_char(bill_date, 'YYYY-MM-DD') AS date,
                 to_char(due_date, 'YYYY-MM-DD') AS "dueDate",
                 synced_at,
-                synced_by
+                (SELECT u.name FROM users u
+                  WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(zoho_bills.synced_by))
+                  LIMIT 1) AS synced_by
            FROM zoho_bills
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
           ORDER BY bill_date, id`,
