@@ -351,8 +351,6 @@ function normalizeDate(dateStr) {
 }
 
 export async function getConsignmentById(req, res) {
-  console.log("Fetching consignment:", req.params);
-
   try {
     const { id } = req.params;
     const { autoSync = "false" } = req.query;
