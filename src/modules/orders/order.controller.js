@@ -1750,8 +1750,7 @@ export async function getOrdersConsignments(req, res) {
         'eta', (
           SELECT TO_CHAR(t.eta, 'YYYY-MM-DD')
           FROM order_tracking t
-          WHERE t.receiver_id = oi.receiver_id
-            AND t.item_ref = oi.item_ref
+          WHERE t.receiver_id = oi.receiver_id AND t.item_ref = oi.item_ref
           ORDER BY t.created_time DESC, t.id DESC
           LIMIT 1
         ),
@@ -1781,6 +1780,13 @@ export async function getOrdersConsignments(req, res) {
         'type', COALESCE(oi.type, ''),
         'itemRef', COALESCE(oi.item_ref, ''),
         'status', COALESCE(oi.status, 'Created'),
+        'eta', (
+          SELECT TO_CHAR(t.eta, 'YYYY-MM-DD')
+          FROM order_tracking t
+          WHERE t.receiver_id = oi.receiver_id AND t.item_ref = oi.item_ref
+          ORDER BY t.created_time DESC, t.id DESC
+          LIMIT 1
+        ),
         'totalNumber', COALESCE(oi.total_number, 0),
         'weight', COALESCE(oi.weight, 0),
         'containerDetails',${containerDetailsSub},
@@ -2193,6 +2199,8 @@ export async function getOrderById(req, res) {
               'plateNo',              oc.plate_no,
               'deliveryDate',         TO_CHAR(oc.delivery_date, 'YYYY-MM-DD'),
               'createdAt',            oc.created_at,
+              'createdBy',            COALESCE(to_jsonb(oc)->>'created_by', to_jsonb(oc)->>'created_by_email'),
+              'createdByName',        cb.name,
               'status',                COALESCE(oc.status, false),
               'items', COALESCE(items.items, '[]'::json),
               'gatepass', COALESCE(gp.gatepass, '[]'::json),
@@ -2248,6 +2256,13 @@ export async function getOrderById(req, res) {
           FROM gatepass_records g
           WHERE g.collection_id = oc.id
         ) ggp ON true
+        LEFT JOIN LATERAL (
+          SELECT u.name
+          FROM users u
+          WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(COALESCE(to_jsonb(oc)->>'created_by', to_jsonb(oc)->>'created_by_email')))
+             OR u.id::text = to_jsonb(oc)->>'created_by'
+          LIMIT 1
+        ) cb ON true
         WHERE oc.order_id = $1
         GROUP BY oc.receiver_id
        `,
@@ -6042,8 +6057,8 @@ export async function createOrderCollections(req, res) {
         `INSERT INTO order_collections (
           order_id, receiver_id, collection_method, collection_scope,
           client_receiver_id, client_receiver_mobile, plate_no, delivery_date,
-          status
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+          status, created_by
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
         RETURNING *`,
         [
           orderId,
@@ -6055,6 +6070,7 @@ export async function createOrderCollections(req, res) {
           c.plateNo || null,
           c.deliveryDate ? normalizeDate(c.deliveryDate) : null,
           !!c.status,
+          req.user?.email ?? null,
         ],
       );
 
@@ -6194,6 +6210,138 @@ export async function createOrderCollections(req, res) {
     if (client) client.release();
   }
 }
+export async function updateCollectionStatus(req, res) {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    const { status } = req.body;
+
+    client = await pool.connect();
+    const result = await withUserAudit(
+      req,
+      client,
+      `UPDATE order_collections SET status = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+      [!!status, collectionId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Collection not found" });
+    }
+
+    return res.json({ success: true, collection: result.rows[0] });
+  } catch (error) {
+    console.error("Error updating collection status:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+}
+export const createGatepass = async (req, res) => {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    const {
+      driverName,
+      driverId,
+      driverContact,
+      plateNo,
+      pickupLocation,
+      qty,
+      weight,
+      commodity,
+      marksAndNumber,
+      customerName,
+      customerContact,
+      gateDate,
+    } = req.body;
+
+    if (!driverName || !plateNo) {
+      return res
+        .status(400)
+        .json({ error: "Driver name and truck number are required" });
+    }
+
+    client = await pool.connect();
+
+    const collectionRes = await client.query(
+      "SELECT id, order_id, receiver_id FROM order_collections WHERE id = $1",
+      [collectionId],
+    );
+    if (collectionRes.rowCount === 0) {
+      return res.status(404).json({ error: "Collection not found" });
+    }
+
+    const { order_id, receiver_id } = collectionRes.rows[0];
+    const blocked = await getUnreleasedReceivers(order_id, [receiver_id]);
+    if (blocked === null) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (blocked.length) {
+      return res.status(403).json({
+        error:
+          "Payment is not completed and no approval is on file for this receiver",
+      });
+    }
+
+    const gpNumber = `GP-${collectionId}-${Date.now().toString().slice(-6)}`;
+
+    const result = await withUserAudit(
+      req,
+      client,
+      `INSERT INTO gatepass_records
+        (collection_id, gp_number, driver_name, driver_id, driver_contact,
+         plate_no, pickup_location, qty, weight, commodity,
+         marks_and_number, customer_name, customer_contact, gate_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING *`,
+      [
+        collectionId,
+        gpNumber,
+        driverName,
+        driverId || null,
+        driverContact || null,
+        plateNo,
+        pickupLocation || null,
+        qty ? parseInt(qty, 10) : null,
+        weight ? parseFloat(weight) : null,
+        commodity || null,
+        marksAndNumber || null,
+        customerName || null,
+        customerContact || null,
+        gateDate || null,
+      ],
+    );
+
+    return res.status(201).json({ success: true, gatepass: result.rows[0] });
+  } catch (error) {
+    console.error("Error creating gatepass:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+};
+
+export const getGatepassesForCollection = async (req, res) => {
+  let client;
+  try {
+    const { collectionId } = req.params;
+    client = await pool.connect();
+    const result = await client.query(
+      "SELECT * FROM gatepass_records WHERE collection_id = $1 ORDER BY id DESC",
+      [collectionId],
+    );
+    return res.json({ gatepasses: result.rows });
+  } catch (error) {
+    console.error("Error fetching gatepasses:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  } finally {
+    if (client) client.release();
+  }
+};
 
 export const listBookingFormsForImport = async (req, res) => {
   try {
@@ -6327,140 +6475,6 @@ export const getBookingFormForImport = async (req, res) => {
     return res
       .status(500)
       .json({ error: "Failed to fetch booking form detail" });
-  }
-};
-
-export async function updateCollectionStatus(req, res) {
-  let client;
-  try {
-    const { collectionId } = req.params;
-    const { status } = req.body;
-
-    client = await pool.connect();
-    const result = await withUserAudit(
-      req,
-      client,
-      `UPDATE order_collections SET status = $1, updated_at = now() WHERE id = $2 RETURNING *`,
-      [!!status, collectionId],
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Collection not found" });
-    }
-
-    return res.json({ success: true, collection: result.rows[0] });
-  } catch (error) {
-    console.error("Error updating collection status:", error);
-    return res
-      .status(500)
-      .json({ error: "Internal server error", details: error.message });
-  } finally {
-    if (client) client.release();
-  }
-}
-
-export const createGatepass = async (req, res) => {
-  let client;
-  try {
-    const { collectionId } = req.params;
-    const {
-      driverName,
-      driverId,
-      driverContact,
-      plateNo,
-      pickupLocation,
-      qty,
-      weight,
-      commodity,
-      marksAndNumber,
-      customerName,
-      customerContact,
-      gateDate,
-    } = req.body;
-
-    if (!driverName || !plateNo) {
-      return res
-        .status(400)
-        .json({ error: "Driver name and truck number are required" });
-    }
-
-    client = await pool.connect();
-
-    const collectionRes = await client.query(
-      "SELECT id, order_id, receiver_id FROM order_collections WHERE id = $1",
-      [collectionId],
-    );
-    if (collectionRes.rowCount === 0) {
-      return res.status(404).json({ error: "Collection not found" });
-    }
-
-    const { order_id, receiver_id } = collectionRes.rows[0];
-    const blocked = await getUnreleasedReceivers(order_id, [receiver_id]);
-    if (blocked === null) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    if (blocked.length) {
-      return res.status(403).json({
-        error:
-          "Payment is not completed and no approval is on file for this receiver",
-      });
-    }
-
-    const gpNumber = `GP-${collectionId}-${Date.now().toString().slice(-6)}`;
-
-    const result = await withUserAudit(
-      req,
-      client,
-      `INSERT INTO gatepass_records
-        (collection_id, gp_number, driver_name, driver_id, driver_contact,
-         plate_no, pickup_location, qty, weight, commodity,
-         marks_and_number, customer_name, customer_contact, gate_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-       RETURNING *`,
-      [
-        collectionId,
-        gpNumber,
-        driverName,
-        driverId || null,
-        driverContact || null,
-        plateNo,
-        pickupLocation || null,
-        qty ? parseInt(qty, 10) : null,
-        weight ? parseFloat(weight) : null,
-        commodity || null,
-        marksAndNumber || null,
-        customerName || null,
-        customerContact || null,
-        gateDate || null,
-      ],
-    );
-
-    return res.status(201).json({ success: true, gatepass: result.rows[0] });
-  } catch (error) {
-    console.error("Error creating gatepass:", error);
-    return res
-      .status(500)
-      .json({ error: "Internal server error", details: error.message });
-  } finally {
-    if (client) client.release();
-  }
-};
-
-export const getGatepassesForCollection = async (req, res) => {
-  let client;
-  try {
-    const { collectionId } = req.params;
-    client = await pool.connect();
-    const result = await client.query(
-      "SELECT * FROM gatepass_records WHERE collection_id = $1 ORDER BY id DESC",
-      [collectionId],
-    );
-    return res.json({ gatepasses: result.rows });
-  } catch (error) {
-    console.error("Error fetching gatepasses:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  } finally {
-    if (client) client.release();
   }
 };
 
