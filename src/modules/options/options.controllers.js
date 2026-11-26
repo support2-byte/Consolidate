@@ -197,8 +197,15 @@ export async function createPlace(req, res) {
 export async function updatePlace(req, res) {
   try {
     const { id } = req.params;
-    const { name, is_loading, is_destination, country, latitude, longitude } =
-      req.body;
+    const {
+      name,
+      port,
+      is_loading,
+      is_destination,
+      country,
+      latitude,
+      longitude,
+    } = req.body;
     if (!name || !country) {
       return res
         .status(400)
