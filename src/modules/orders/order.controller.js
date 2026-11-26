@@ -6599,8 +6599,8 @@ export async function getPublicOrderTracking(req, res) {
         o.booking_ref,
         o.rgl_booking_number,
         o.created_at,
-        pol.name AS place_of_loading_name,
-        pod.name AS place_of_delivery_name,
+        COALESCE(NULLIF(TRIM(pol.port), ''), pol.name) AS place_of_loading_name,
+        COALESCE(NULLIF(TRIM(pod.port), ''), pod.name) AS place_of_delivery_name,
         t.transport_type,
         (SELECT COALESCE(jsonb_agg(r_full ORDER BY r_full.id), '[]'::jsonb)
          FROM (

@@ -134,7 +134,7 @@ export async function setThirdPartyStatus(req, res) {
 export async function getPlaces(req, res) {
   try {
     const result = await pool.query(
-      "SELECT id, name, is_loading, is_destination, country, latitude, longitude FROM places ORDER BY id",
+      "SELECT id, name, port, is_loading, is_destination, country, latitude, longitude FROM places ORDER BY id",
     );
     if (result.rowCount === 0) {
       return res.status(404).json({
@@ -153,16 +153,31 @@ export async function getPlaces(req, res) {
 
 export async function createPlace(req, res) {
   try {
-    const { name, is_loading, is_destination, country, latitude, longitude } =
-      req.body;
+    const {
+      name,
+      port,
+      is_loading,
+      is_destination,
+      country,
+      latitude,
+      longitude,
+    } = req.body;
     if (!name || !country) {
       return res
         .status(400)
         .json({ success: false, message: "Name and country are required" });
     }
     const result = await pool.query(
-      "INSERT INTO places (name, is_loading, is_destination, country, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, is_loading, is_destination, country, latitude, longitude",
-      [name, is_loading, is_destination, country, latitude, longitude],
+      "INSERT INTO places (name, port, is_loading, is_destination, country, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name, port, is_loading, is_destination, country, latitude, longitude",
+      [
+        name,
+        port?.trim() || null,
+        is_loading,
+        is_destination,
+        country,
+        latitude,
+        longitude,
+      ],
     );
     if (result.rowCount === 0) {
       return res.status(400).json({
@@ -190,8 +205,17 @@ export async function updatePlace(req, res) {
         .json({ success: false, message: "Name and country are required" });
     }
     const result = await pool.query(
-      "UPDATE places SET name = $1, is_loading = $2, is_destination = $3, country = $4, latitude = $5, longitude = $6 WHERE id = $7 RETURNING id, name, is_loading, is_destination, country, latitude, longitude",
-      [name, is_loading, is_destination, country, latitude, longitude, id],
+      "UPDATE places SET name = $1, port = $2, is_loading = $3, is_destination = $4, country = $5, latitude = $6, longitude = $7 WHERE id = $8 RETURNING id, name, port, is_loading, is_destination, country, latitude, longitude",
+      [
+        name,
+        port?.trim() || null,
+        is_loading,
+        is_destination,
+        country,
+        latitude,
+        longitude,
+        id,
+      ],
     );
     if (result.rowCount === 0) {
       return res
