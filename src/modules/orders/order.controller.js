@@ -1376,8 +1376,8 @@ export const getOrders = async (req, res) => {
                       'deliveredQty', COALESCE(oi.delivered_qty, 0)::int,
                       'remainingQty', COALESCE(oi.remaining_qty, oi.total_number, 0)::int,
 
-                      'trackingEta', TO_CHAR(ot.eta, 'YYYY-MM-DD'),
-                      'trackingStatus', ot.status,
+                      'trackingEta', COALESCE(TO_CHAR(ct.eta, 'YYYY-MM-DD'), TO_CHAR(ot.eta, 'YYYY-MM-DD')),
+                      'trackingStatus', COALESCE(ct.status, ot.status),
                       'isDelayed', COALESCE(em.is_delayed, false),
 
                       'containerDetails',
@@ -1392,7 +1392,18 @@ export const getOrders = async (req, res) => {
                               ),
 
                               'status', cah.status,
-
+                              'eta',
+                              (
+                                SELECT TO_CHAR(t.eta, 'YYYY-MM-DD')
+                                FROM order_tracking t
+                                WHERE t.order_id = o.id
+                                  AND t.item_ref = oi.item_ref
+                                  AND (t.container_id = cm.cid OR t.container_id IS NULL)
+                                  AND t.eta IS NOT NULL
+                                ORDER BY (t.container_id IS NOT NULL) DESC,
+                                         t.created_time DESC, t.id DESC
+                                LIMIT 1
+                              ),
                               'assign_total_box',
                               COALESCE(asg.assigned_qty, 0)::text,
 
@@ -1469,6 +1480,40 @@ export const getOrders = async (req, res) => {
                       AND oi2.id <= oi.id
                   )
                 ) ot ON true
+                  -- Partial shipments: the ETA/status shown for the item must come
+                  -- from the SAME container slot that owns the item's displayed
+                  -- (least advanced) status, not from whichever container was
+                  -- updated last.
+                  LEFT JOIN LATERAL (
+                    SELECT x.eta, x.status
+                      FROM (
+                        SELECT DISTINCT ON (t.container_id)
+                               t.container_id, t.eta, t.status
+                          FROM order_tracking t
+                         WHERE t.receiver_id = r.id
+                           AND t.item_ref = oi.item_ref
+                           AND t.container_id IS NOT NULL
+                           AND EXISTS (
+                             SELECT 1
+                               FROM (
+                                 SELECT DISTINCT ON (h.cid, h.consignment_id)
+                                        h.cid, h.action_type
+                                   FROM container_assignment_history h
+                                  WHERE h.detail_id = oi.id
+                                  ORDER BY h.cid, h.consignment_id, h.id DESC
+                               ) a
+                              WHERE a.cid = t.container_id
+                                AND a.action_type = 'ASSIGN'
+                           )
+                         ORDER BY t.container_id, t.id DESC
+                      ) x
+                      LEFT JOIN statuses st
+                        ON st.order_status = x.status AND st.status = true
+                     ORDER BY (x.status IS NOT DISTINCT FROM oi.status) DESC,
+                              st.sorting_number ASC NULLS LAST,
+                              x.eta ASC NULLS LAST
+                     LIMIT 1
+                  ) ct ON true
                   WHERE oi.receiver_id = r.id
                 ),
                 '[]'::jsonb
@@ -1738,6 +1783,38 @@ export async function getOrdersConsignments(req, res) {
       ), 0)
     `;
 
+    const consignmentSlotPick = (cid) => `
+      SELECT x.status, x.eta
+        FROM (
+          SELECT DISTINCT ON (a.cid) a.cid, t.status,
+                 TO_CHAR(t.eta, 'YYYY-MM-DD') AS eta
+            FROM (
+              SELECT DISTINCT ON (h.cid, h.consignment_id)
+                     h.cid, h.consignment_id, h.action_type
+                FROM container_assignment_history h
+               WHERE h.detail_id = oi.id
+               ORDER BY h.cid, h.consignment_id, h.id DESC
+            ) a
+            JOIN LATERAL (
+              SELECT t2.status, t2.eta
+                FROM order_tracking t2
+               WHERE t2.order_id = oi.order_id
+                 AND t2.item_ref = oi.item_ref
+                 AND (t2.container_id = a.cid OR t2.container_id IS NULL)
+               ORDER BY (t2.container_id IS NOT NULL) DESC,
+                        t2.created_time DESC, t2.id DESC
+               LIMIT 1
+            ) t ON true
+           WHERE a.action_type = 'ASSIGN'
+             AND a.consignment_id = ${cid}
+           ORDER BY a.cid
+        ) x
+        LEFT JOIN statuses st
+          ON st.order_status = x.status AND st.status = true
+       ORDER BY st.sorting_number ASC NULLS LAST
+       LIMIT 1
+    `;
+
     const shippingDetailsSub = consignment_id
       ? `
       (SELECT COALESCE(json_agg(json_build_object(
@@ -1746,20 +1823,21 @@ export async function getOrdersConsignments(req, res) {
         'subcategory', COALESCE(oi.subcategory, ''),
         'type', COALESCE(oi.type, ''),
         'itemRef', COALESCE(oi.item_ref, ''),
-        'status', COALESCE(oi.status, 'Created'),
-        'eta', (
+        'status', COALESCE(cst.status, oi.status, 'Created'),
+        'eta', COALESCE(cst.eta, (
           SELECT TO_CHAR(t.eta, 'YYYY-MM-DD')
           FROM order_tracking t
           WHERE t.receiver_id = oi.receiver_id AND t.item_ref = oi.item_ref
           ORDER BY t.created_time DESC, t.id DESC
           LIMIT 1
-        ),
+        )),
         'totalNumber', COALESCE(oi.total_number, 0),
         'weight', COALESCE(oi.weight, 0),
         'containerDetails',${containerDetailsSub},
         'remainingItems',  ${remainingItemsSub}
       ) ORDER BY oi.id), '[]'::json)
       FROM order_items oi
+      LEFT JOIN LATERAL (${consignmentSlotPick(parseInt(consignment_id, 10))}) cst ON true
       WHERE oi.receiver_id = r.id
         AND EXISTS (
           SELECT 1 FROM (
@@ -2227,7 +2305,11 @@ export async function getOrderById(req, res) {
               'url', ocg.url,
               'originalname', ocg.originalname,
               'mimetype', ocg.mimetype,
-              'size', ocg.size
+              'size', ocg.size,
+              'uploadedAt', COALESCE(to_jsonb(ocg)->>'uploaded_at', to_jsonb(ocg)->>'created_at', oc.created_at::text),
+              'uploadedBy', COALESCE(
+                NULLIF(BTRIM(COALESCE(to_jsonb(ocg)->>'uploaded_by', to_jsonb(ocg)->>'created_by')), ''),
+                NULLIF(BTRIM(to_jsonb(oc)->>'created_by'), ''))
             )
           ) AS gatepass
           FROM order_collection_gatepass ocg
@@ -2357,6 +2439,64 @@ export async function getOrderById(req, res) {
           ? JSON.parse(orderRow.gatepass)
           : orderRow.gatepass || [];
     } catch (e) {}
+
+    const SYSTEM_UPLOADER = "support2@royalgulfshipping.com";
+    const uploaderOf = (v) => {
+      const x = String(v ?? "").trim();
+      return !x || x.toLowerCase() === "system" ? SYSTEM_UPLOADER : x;
+    };
+    parsedAttachments = (parsedAttachments || []).map((f) => ({
+      ...f,
+      uploadedBy: uploaderOf(f.uploadedBy || orderRow.created_by),
+      uploadedAt: orderRow.created_at || f.uploadedAt || null,
+    }));
+    parsedGatepass = (parsedGatepass || []).map((f) => ({
+      ...f,
+      uploadedBy: uploaderOf(f.uploadedBy || orderRow.created_by),
+      uploadedAt: f.uploadedAt || orderRow.created_at || null,
+    }));
+    receivers.forEach((r) =>
+      (r.collections || []).forEach((c) => {
+        c.gatepass = (c.gatepass || []).map((f) => ({
+          ...f,
+          uploadedBy: uploaderOf(f.uploadedBy),
+        }));
+      }),
+    );
+
+    const fileLists = [
+      parsedAttachments,
+      parsedGatepass,
+      ...receivers
+        .map((r) => (r.collections || []).map((c) => c.gatepass || []))
+        .flat(),
+    ].flat();
+    const uploaderKeys = [
+      ...new Set(
+        fileLists
+          .map((f) => f?.uploadedBy)
+          .filter(Boolean)
+          .map((e) => String(e).trim().toLowerCase()),
+      ),
+    ];
+    if (uploaderKeys.length) {
+      // uploader may be stored as an email or a user id
+      const { rows: uploaders } = await pool.query(
+        `SELECT id::text AS id, LOWER(TRIM(email)) AS email, name FROM users
+          WHERE LOWER(TRIM(email)) = ANY($1::text[]) OR id::text = ANY($1::text[])`,
+        [uploaderKeys],
+      );
+      const nameByKey = new Map();
+      uploaders.forEach((u) => {
+        nameByKey.set(u.email, u.name);
+        nameByKey.set(u.id, u.name);
+      });
+      fileLists.forEach((f) => {
+        if (f?.uploadedBy)
+          f.uploadedByName =
+            nameByKey.get(String(f.uploadedBy).trim().toLowerCase()) || null;
+      });
+    }
 
     const formattedOrderRow = {
       ...orderRow,
@@ -3839,6 +3979,100 @@ async function resolveItemContainer(client, orderId, itemRef, cid) {
   return null;
 }
 
+export const updateItemEta = async (req, res) => {
+  const { orderId, itemRef } = req.params;
+  const { eta, cid } = req.body || {};
+
+  if (!eta || !/^\d{4}-\d{2}-\d{2}$/.test(eta)) {
+    return res.status(400).json({
+      success: false,
+      message: "eta is required in YYYY-MM-DD format",
+    });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const containerId = await resolveItemContainer(
+      client,
+      Number(orderId),
+      itemRef,
+      cid,
+    );
+
+    const cur = await client.query(
+      `SELECT id, container_id,
+              GREATEST(eta::date, CURRENT_DATE)::text AS min_eta,
+              (GREATEST(eta::date, CURRENT_DATE) + 30)::text AS max_eta
+         FROM order_tracking
+        WHERE order_id = $1 AND item_ref = $2
+          AND ($3::int IS NULL OR container_id = $3::int OR container_id IS NULL)
+        ORDER BY (container_id IS NOT NULL) DESC, created_time DESC, id DESC
+        LIMIT 1`,
+      [Number(orderId), itemRef, containerId],
+    );
+    if (cur.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        success: false,
+        message: "No tracking record found for this item",
+      });
+    }
+    const row = cur.rows[0];
+    if (eta < row.min_eta || eta > row.max_eta) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        success: false,
+        code: "ETA_OUT_OF_RANGE",
+        message: `ETA must be between ${row.min_eta} and ${row.max_eta}. It can only move forward, up to 30 days.`,
+      });
+    }
+
+    let result;
+    if (containerId && row.container_id == null) {
+      result = await client.query(
+        `INSERT INTO order_tracking
+         SELECT (jsonb_populate_record(
+           null::order_tracking,
+           to_jsonb(t) || jsonb_build_object(
+             'id', nextval(pg_get_serial_sequence('order_tracking','id')),
+             'container_id', $2::int,
+             'eta', $3::text,
+             'created_time', now()
+           )
+         )).*
+         FROM order_tracking t WHERE t.id = $1
+         RETURNING id, eta`,
+        [row.id, containerId, eta],
+      );
+    } else {
+      result = await client.query(
+        `UPDATE order_tracking SET eta = $2::date WHERE id = $1 RETURNING id, eta`,
+        [row.id, eta],
+      );
+    }
+
+    await client.query("COMMIT");
+    return res.status(200).json({
+      success: true,
+      message: "ETA updated successfully",
+      eta: result.rows[0].eta,
+    });
+  } catch (err) {
+    if (client) await client.query("ROLLBACK");
+    logger.error("updateItemEta error:", err);
+    return res.status(err.status || 500).json({
+      success: false,
+      message: err.status ? err.message : "Failed to update ETA",
+      details: err.message,
+    });
+  } finally {
+    if (client) client.release();
+  }
+};
+
 export async function updateSpecificItemsStatus(req, res) {
   const { orderId } = req.params;
   const {
@@ -3922,6 +4156,7 @@ export async function updateSpecificItemsStatus(req, res) {
         createdBy: req.user?.email || req.user?.username || "system",
         moduleId: 5,
         protectDelivered: false,
+        onBackward: "throw",
       });
       updated.push(...u);
     }
@@ -3941,6 +4176,7 @@ export async function updateSpecificItemsStatus(req, res) {
     logger.error("updateSpecificItemsStatus error:", err);
     return res.status(err.status || 500).json({
       success: false,
+      code: err.code,
       message: err.status ? err.message : "Failed to update items",
       error: err.status ? err.message : "Failed to update items",
       details: err.message,
@@ -4021,101 +4257,6 @@ export async function notifySpecificItemsStatus(req, res) {
       .json({ error: "Failed to queue notifications", details: err.message });
   }
 }
-
-export const updateItemEta = async (req, res) => {
-  const { orderId, itemRef } = req.params;
-  const { eta, cid } = req.body || {};
-
-  if (!eta || !/^\d{4}-\d{2}-\d{2}$/.test(eta)) {
-    return res.status(400).json({
-      success: false,
-      message: "eta is required in YYYY-MM-DD format",
-    });
-  }
-
-  let client;
-  try {
-    client = await pool.connect();
-    await client.query("BEGIN");
-
-    const containerId = await resolveItemContainer(
-      client,
-      Number(orderId),
-      itemRef,
-      cid,
-    );
-
-    // latest row for THIS container; fall back to a legacy NULL row
-    const cur = await client.query(
-      `SELECT id, container_id,
-              (GREATEST(eta::date, CURRENT_DATE) + 30)::text AS max_eta,
-              CURRENT_DATE::text AS today
-         FROM order_tracking
-        WHERE order_id = $1 AND item_ref = $2
-          AND ($3::int IS NULL OR container_id = $3::int OR container_id IS NULL)
-        ORDER BY (container_id IS NOT NULL) DESC, created_time DESC, id DESC
-        LIMIT 1`,
-      [Number(orderId), itemRef, containerId],
-    );
-    if (cur.rowCount === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        success: false,
-        message: "No tracking record found for this item",
-      });
-    }
-    const row = cur.rows[0];
-    if (eta < row.today || eta > row.max_eta) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        success: false,
-        message: `ETA must be between ${row.today} and ${row.max_eta}`,
-      });
-    }
-
-    let result;
-    if (containerId && row.container_id == null) {
-      // legacy shared row: clone it for this container so other containers keep their ETA
-      result = await client.query(
-        `INSERT INTO order_tracking
-         SELECT (jsonb_populate_record(
-           null::order_tracking,
-           to_jsonb(t) || jsonb_build_object(
-             'id', nextval(pg_get_serial_sequence('order_tracking','id')),
-             'container_id', $2::int,
-             'eta', $3::text,
-             'created_time', now()
-           )
-         )).*
-         FROM order_tracking t WHERE t.id = $1
-         RETURNING id, eta`,
-        [row.id, containerId, eta],
-      );
-    } else {
-      result = await client.query(
-        `UPDATE order_tracking SET eta = $2::date WHERE id = $1 RETURNING id, eta`,
-        [row.id, eta],
-      );
-    }
-
-    await client.query("COMMIT");
-    return res.status(200).json({
-      success: true,
-      message: "ETA updated successfully",
-      eta: result.rows[0].eta,
-    });
-  } catch (err) {
-    if (client) await client.query("ROLLBACK");
-    logger.error("updateItemEta error:", err);
-    return res.status(err.status || 500).json({
-      success: false,
-      message: err.status ? err.message : "Failed to update ETA",
-      details: err.message,
-    });
-  } finally {
-    if (client) client.release();
-  }
-};
 
 export async function getOrderByItemRef(req, res) {
   const { ref } = req.params;
@@ -6657,127 +6798,6 @@ export async function getPublicOrderTracking(req, res) {
 }
 
 // Full Run
-export async function syncOrderTrackingIds(req, res) {
-  const input = Array.isArray(req.body?.rows) ? req.body.rows : [];
-  if (!input.length) {
-    return res
-      .status(400)
-      .json({ success: false, message: "rows[] is required" });
-  }
-
-  const groups = new Map();
-  for (const r of input) {
-    const refId = String(r?.refId ?? "")
-      .trim()
-      .toUpperCase();
-    const orderNo = String(r?.orderNo ?? "")
-      .trim()
-      .toUpperCase();
-    if (!refId || !orderNo) continue;
-    const m = /^(\d+)([A-Z])?$/.exec(orderNo);
-    const base = m ? m[1] : orderNo;
-    const suffix = m?.[2] || "";
-    if (!groups.has(base)) groups.set(base, []);
-    groups.get(base).push({ refId, orderNo, suffix });
-  }
-
-  const result = {
-    updated: 0,
-    unchanged: 0,
-    mapInserted: 0,
-    mapUpdated: 0,
-    unmatched: [],
-    conflicts: [],
-  };
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    for (const [base, parts] of groups) {
-      const { rows: orderRows } = await client.query(
-        `SELECT id, tracking_id FROM orders WHERE TRIM(rgl_booking_number) = $1`,
-        [base],
-      );
-      if (orderRows.length === 0) {
-        result.unmatched.push(base);
-        continue;
-      }
-      if (orderRows.length > 1) {
-        result.conflicts.push({
-          orderNo: base,
-          reason: `${orderRows.length} orders share this form number`,
-        });
-        continue;
-      }
-      const order = orderRows[0];
-
-      const sorted = [...parts].sort((a, b) =>
-        a.suffix.localeCompare(b.suffix),
-      );
-      const primary = sorted[0];
-
-      const { rows: clash } = await client.query(
-        `SELECT id, rgl_booking_number FROM orders
-          WHERE UPPER(TRIM(tracking_id)) = $1 AND id <> $2 LIMIT 1`,
-        [primary.refId, order.id],
-      );
-      if (clash.length) {
-        result.conflicts.push({
-          orderNo: primary.orderNo,
-          reason: `${primary.refId} is already used by order ${clash[0].rgl_booking_number}`,
-        });
-        continue;
-      }
-
-      for (const p of parts.filter((x) => x.suffix)) {
-        const { rows: existing } = await client.query(
-          `SELECT id, tracking_id FROM order_tracking_map
-            WHERE UPPER(TRIM(form_number)) = $1`,
-          [p.orderNo],
-        );
-        if (existing.length === 0) {
-          await client.query(
-            `INSERT INTO order_tracking_map (form_number, tracking_id) VALUES ($1, $2)`,
-            [p.orderNo, p.refId],
-          );
-          result.mapInserted++;
-        } else if (existing[0].tracking_id.trim().toUpperCase() !== p.refId) {
-          await client.query(
-            `UPDATE order_tracking_map SET tracking_id = $1 WHERE id = $2`,
-            [p.refId, existing[0].id],
-          );
-          result.mapUpdated++;
-        }
-      }
-
-      const current = (order.tracking_id || "").trim().toUpperCase();
-      if (current === primary.refId) {
-        result.unchanged++;
-      } else {
-        await client.query(`UPDATE orders SET tracking_id = $1 WHERE id = $2`, [
-          primary.refId,
-          order.id,
-        ]);
-        result.updated++;
-      }
-    }
-
-    await client.query("COMMIT");
-    return res.json({ success: true, ...result });
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    console.error("syncOrderTrackingIds error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to sync tracking IDs",
-      details: err.message,
-    });
-  } finally {
-    client.release();
-  }
-}
-
 // export async function syncOrderTrackingIds(req, res) {
 //   const input = Array.isArray(req.body?.rows) ? req.body.rows : [];
 //   if (!input.length) {
@@ -6786,7 +6806,6 @@ export async function syncOrderTrackingIds(req, res) {
 //       .json({ success: false, message: "rows[] is required" });
 //   }
 
-//   // 1) Group sheet rows by base form number (38829A / 38829B -> 38829)
 //   const groups = new Map();
 //   for (const r of input) {
 //     const refId = String(r?.refId ?? "")
@@ -6816,147 +6835,73 @@ export async function syncOrderTrackingIds(req, res) {
 //   try {
 //     await client.query("BEGIN");
 
-//     const bases = [...groups.keys()];
-//     const allOrderNos = [...groups.values()].flat().map((p) => p.orderNo);
-
-//     const { rows: orderRows } = await client.query(
-//       `SELECT id, TRIM(rgl_booking_number) AS form, tracking_id
-//          FROM orders
-//         WHERE TRIM(rgl_booking_number) = ANY($1::text[])`,
-//       [bases],
-//     );
-//     const ordersByForm = new Map();
-//     for (const o of orderRows) {
-//       if (!ordersByForm.has(o.form)) ordersByForm.set(o.form, []);
-//       ordersByForm.get(o.form).push(o);
-//     }
-
-//     const { rows: mapRows } = await client.query(
-//       `SELECT id, UPPER(TRIM(form_number)) AS form, tracking_id
-//          FROM order_tracking_map
-//         WHERE UPPER(TRIM(form_number)) = ANY($1::text[])`,
-//       [allOrderNos],
-//     );
-//     const mapByForm = new Map();
-//     for (const m of mapRows)
-//       if (!mapByForm.has(m.form)) mapByForm.set(m.form, m);
-
-//     const plans = [];
 //     for (const [base, parts] of groups) {
-//       const matches = ordersByForm.get(base) || [];
-//       if (matches.length === 0) {
+//       const { rows: orderRows } = await client.query(
+//         `SELECT id, tracking_id FROM orders WHERE TRIM(rgl_booking_number) = $1`,
+//         [base],
+//       );
+//       if (orderRows.length === 0) {
 //         result.unmatched.push(base);
 //         continue;
 //       }
-//       if (matches.length > 1) {
+//       if (orderRows.length > 1) {
 //         result.conflicts.push({
 //           orderNo: base,
-//           reason: `${matches.length} orders share this form number`,
+//           reason: `${orderRows.length} orders share this form number`,
 //         });
 //         continue;
 //       }
-//       const order = matches[0];
-//       const primary = [...parts].sort((a, b) =>
-//         a.suffix.localeCompare(b.suffix),
-//       )[0];
+//       const order = orderRows[0];
 
-//       const mapInserts = [];
-//       const mapUpdates = [];
+//       const sorted = [...parts].sort((a, b) =>
+//         a.suffix.localeCompare(b.suffix),
+//       );
+//       const primary = sorted[0];
+
+//       const { rows: clash } = await client.query(
+//         `SELECT id, rgl_booking_number FROM orders
+//           WHERE UPPER(TRIM(tracking_id)) = $1 AND id <> $2 LIMIT 1`,
+//         [primary.refId, order.id],
+//       );
+//       if (clash.length) {
+//         result.conflicts.push({
+//           orderNo: primary.orderNo,
+//           reason: `${primary.refId} is already used by order ${clash[0].rgl_booking_number}`,
+//         });
+//         continue;
+//       }
+
 //       for (const p of parts.filter((x) => x.suffix)) {
-//         const ex = mapByForm.get(p.orderNo);
-//         if (!ex) mapInserts.push(p);
-//         else if (String(ex.tracking_id).trim().toUpperCase() !== p.refId)
-//           mapUpdates.push({ id: ex.id, refId: p.refId });
+//         const { rows: existing } = await client.query(
+//           `SELECT id, tracking_id FROM order_tracking_map
+//             WHERE UPPER(TRIM(form_number)) = $1`,
+//           [p.orderNo],
+//         );
+//         if (existing.length === 0) {
+//           await client.query(
+//             `INSERT INTO order_tracking_map (form_number, tracking_id) VALUES ($1, $2)`,
+//             [p.orderNo, p.refId],
+//           );
+//           result.mapInserted++;
+//         } else if (existing[0].tracking_id.trim().toUpperCase() !== p.refId) {
+//           await client.query(
+//             `UPDATE order_tracking_map SET tracking_id = $1 WHERE id = $2`,
+//             [p.refId, existing[0].id],
+//           );
+//           result.mapUpdated++;
+//         }
 //       }
 
 //       const current = (order.tracking_id || "").trim().toUpperCase();
-//       plans.push({
-//         order,
-//         primary,
-//         mapInserts,
-//         mapUpdates,
-//         needsUpdate: current !== primary.refId,
-//       });
-//     }
-
-//     const newRefByOrder = new Map(
-//       plans
-//         .filter((p) => p.needsUpdate)
-//         .map((p) => [p.order.id, p.primary.refId]),
-//     );
-//     const refsToAssign = [...new Set(newRefByOrder.values())];
-//     const clashByRef = new Map();
-//     if (refsToAssign.length) {
-//       const { rows: clashRows } = await client.query(
-//         `SELECT id, rgl_booking_number, UPPER(TRIM(tracking_id)) AS t
-//            FROM orders
-//           WHERE UPPER(TRIM(tracking_id)) = ANY($1::text[])`,
-//         [refsToAssign],
-//       );
-//       for (const c of clashRows) {
-//         const moving =
-//           newRefByOrder.has(c.id) && newRefByOrder.get(c.id) !== c.t;
-//         if (!moving) clashByRef.set(c.t, c);
-//       }
-//     }
-
-//     const orderIds = [];
-//     const orderRefs = [];
-//     const insForms = [];
-//     const insRefs = [];
-//     const updIds = [];
-//     const updRefs = [];
-
-//     for (const p of plans) {
-//       const clash = clashByRef.get(p.primary.refId);
-//       if (p.needsUpdate && clash && clash.id !== p.order.id) {
-//         result.conflicts.push({
-//           orderNo: p.primary.orderNo,
-//           reason: `${p.primary.refId} is already used by order ${clash.rgl_booking_number}`,
-//         });
-//         continue;
-//       }
-//       p.mapInserts.forEach((x) => {
-//         insForms.push(x.orderNo);
-//         insRefs.push(x.refId);
-//       });
-//       p.mapUpdates.forEach((x) => {
-//         updIds.push(x.id);
-//         updRefs.push(x.refId);
-//       });
-//       if (p.needsUpdate) {
-//         orderIds.push(p.order.id);
-//         orderRefs.push(p.primary.refId);
-//       } else {
+//       if (current === primary.refId) {
 //         result.unchanged++;
+//       } else {
+//         await client.query(`UPDATE orders SET tracking_id = $1 WHERE id = $2`, [
+//           primary.refId,
+//           order.id,
+//         ]);
+//         result.updated++;
 //       }
-//     }
-
-//     if (orderIds.length) {
-//       await client.query(
-//         `UPDATE orders o SET tracking_id = v.t
-//            FROM unnest($1::int[], $2::text[]) AS v(id, t)
-//           WHERE o.id = v.id`,
-//         [orderIds, orderRefs],
-//       );
-//       result.updated = orderIds.length;
-//     }
-//     if (insForms.length) {
-//       await client.query(
-//         `INSERT INTO order_tracking_map (form_number, tracking_id)
-//          SELECT * FROM unnest($1::text[], $2::text[])`,
-//         [insForms, insRefs],
-//       );
-//       result.mapInserted = insForms.length;
-//     }
-//     if (updIds.length) {
-//       await client.query(
-//         `UPDATE order_tracking_map m SET tracking_id = v.t
-//            FROM unnest($1::int[], $2::text[]) AS v(id, t)
-//           WHERE m.id = v.id`,
-//         [updIds, updRefs],
-//       );
-//       result.mapUpdated = updIds.length;
 //     }
 
 //     await client.query("COMMIT");
@@ -6973,3 +6918,325 @@ export async function syncOrderTrackingIds(req, res) {
 //     client.release();
 //   }
 // }
+
+export async function syncOrderTrackingIds(req, res) {
+  const input = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!input.length) {
+    return res
+      .status(400)
+      .json({ success: false, message: "rows[] is required" });
+  }
+
+  // 1) Group sheet rows by base form number (38829A / 38829B -> 38829)
+  const groups = new Map();
+  for (const r of input) {
+    const refId = String(r?.refId ?? "")
+      .trim()
+      .toUpperCase();
+    const orderNo = String(r?.orderNo ?? "")
+      .trim()
+      .toUpperCase();
+    if (!refId || !orderNo) continue;
+    const m = /^(\d+)([A-Z])?$/.exec(orderNo);
+    const base = m ? m[1] : orderNo;
+    const suffix = m?.[2] || "";
+    if (!groups.has(base)) groups.set(base, []);
+    groups.get(base).push({ refId, orderNo, suffix });
+  }
+
+  const result = {
+    updated: 0,
+    unchanged: 0,
+    mapInserted: 0,
+    mapUpdated: 0,
+    unmatched: [],
+    conflicts: [],
+  };
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const bases = [...groups.keys()];
+    const allOrderNos = [...groups.values()].flat().map((p) => p.orderNo);
+
+    const { rows: orderRows } = await client.query(
+      `SELECT id, TRIM(rgl_booking_number) AS form, tracking_id
+         FROM orders
+        WHERE TRIM(rgl_booking_number) = ANY($1::text[])`,
+      [bases],
+    );
+    const ordersByForm = new Map();
+    for (const o of orderRows) {
+      if (!ordersByForm.has(o.form)) ordersByForm.set(o.form, []);
+      ordersByForm.get(o.form).push(o);
+    }
+
+    const { rows: mapRows } = await client.query(
+      `SELECT id, UPPER(TRIM(form_number)) AS form, tracking_id
+         FROM order_tracking_map
+        WHERE UPPER(TRIM(form_number)) = ANY($1::text[])`,
+      [allOrderNos],
+    );
+    const mapByForm = new Map();
+    for (const m of mapRows)
+      if (!mapByForm.has(m.form)) mapByForm.set(m.form, m);
+
+    const plans = [];
+    for (const [base, parts] of groups) {
+      const matches = ordersByForm.get(base) || [];
+      if (matches.length === 0) {
+        result.unmatched.push(base);
+        continue;
+      }
+      if (matches.length > 1) {
+        result.conflicts.push({
+          orderNo: base,
+          reason: `${matches.length} orders share this form number`,
+        });
+        continue;
+      }
+      const order = matches[0];
+      const primary = [...parts].sort((a, b) =>
+        a.suffix.localeCompare(b.suffix),
+      )[0];
+
+      const mapInserts = [];
+      const mapUpdates = [];
+      for (const p of parts.filter((x) => x.suffix)) {
+        const ex = mapByForm.get(p.orderNo);
+        if (!ex) mapInserts.push(p);
+        else if (String(ex.tracking_id).trim().toUpperCase() !== p.refId)
+          mapUpdates.push({ id: ex.id, refId: p.refId });
+      }
+
+      const current = (order.tracking_id || "").trim().toUpperCase();
+      plans.push({
+        order,
+        primary,
+        mapInserts,
+        mapUpdates,
+        needsUpdate: current !== primary.refId,
+      });
+    }
+
+    const newRefByOrder = new Map(
+      plans
+        .filter((p) => p.needsUpdate)
+        .map((p) => [p.order.id, p.primary.refId]),
+    );
+    const refsToAssign = [...new Set(newRefByOrder.values())];
+    const clashByRef = new Map();
+    if (refsToAssign.length) {
+      const { rows: clashRows } = await client.query(
+        `SELECT id, rgl_booking_number, UPPER(TRIM(tracking_id)) AS t
+           FROM orders
+          WHERE UPPER(TRIM(tracking_id)) = ANY($1::text[])`,
+        [refsToAssign],
+      );
+      for (const c of clashRows) {
+        const moving =
+          newRefByOrder.has(c.id) && newRefByOrder.get(c.id) !== c.t;
+        if (!moving) clashByRef.set(c.t, c);
+      }
+    }
+
+    const orderIds = [];
+    const orderRefs = [];
+    const insForms = [];
+    const insRefs = [];
+    const updIds = [];
+    const updRefs = [];
+
+    for (const p of plans) {
+      const clash = clashByRef.get(p.primary.refId);
+      if (p.needsUpdate && clash && clash.id !== p.order.id) {
+        result.conflicts.push({
+          orderNo: p.primary.orderNo,
+          reason: `${p.primary.refId} is already used by order ${clash.rgl_booking_number}`,
+        });
+        continue;
+      }
+      p.mapInserts.forEach((x) => {
+        insForms.push(x.orderNo);
+        insRefs.push(x.refId);
+      });
+      p.mapUpdates.forEach((x) => {
+        updIds.push(x.id);
+        updRefs.push(x.refId);
+      });
+      if (p.needsUpdate) {
+        orderIds.push(p.order.id);
+        orderRefs.push(p.primary.refId);
+      } else {
+        result.unchanged++;
+      }
+    }
+
+    if (orderIds.length) {
+      await client.query(
+        `UPDATE orders o SET tracking_id = v.t
+           FROM unnest($1::int[], $2::text[]) AS v(id, t)
+          WHERE o.id = v.id`,
+        [orderIds, orderRefs],
+      );
+      result.updated = orderIds.length;
+    }
+    if (insForms.length) {
+      await client.query(
+        `INSERT INTO order_tracking_map (form_number, tracking_id)
+         SELECT * FROM unnest($1::text[], $2::text[])`,
+        [insForms, insRefs],
+      );
+      result.mapInserted = insForms.length;
+    }
+    if (updIds.length) {
+      await client.query(
+        `UPDATE order_tracking_map m SET tracking_id = v.t
+           FROM unnest($1::int[], $2::text[]) AS v(id, t)
+          WHERE m.id = v.id`,
+        [updIds, updRefs],
+      );
+      result.mapUpdated = updIds.length;
+    }
+
+    await client.query("COMMIT");
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("syncOrderTrackingIds error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to sync tracking IDs",
+      details: err.message,
+    });
+  } finally {
+    client.release();
+  }
+}
+
+export async function markOrderCollected(req, res) {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const { orderId } = req.params;
+    const wanted = Array.isArray(req.body?.receiverIds)
+      ? req.body.receiverIds.map(Number).filter(Boolean)
+      : [];
+
+    const orderRes = await client.query("SELECT id FROM orders WHERE id = $1", [
+      orderId,
+    ]);
+    if (orderRes.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const { rows } = await client.query(
+      `SELECT oi.id, oi.item_ref, oi.status, oi.receiver_id,
+              GREATEST(0, COALESCE(oi.remaining_qty, oi.total_number, 0)) AS remaining
+         FROM order_items oi
+         JOIN receivers r ON r.id = oi.receiver_id
+        WHERE r.order_id = $1
+          AND ($2::int[] IS NULL OR r.id = ANY($2::int[]))
+        FOR UPDATE OF oi`,
+      [orderId, wanted.length ? wanted : null],
+    );
+
+    const open = rows.filter((r) => Number(r.remaining) > 0);
+    if (open.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Nothing left to collect" });
+    }
+
+    const byReceiver = {};
+    for (const it of open) (byReceiver[it.receiver_id] ||= []).push(it);
+    const receiverIds = Object.keys(byReceiver).map(Number);
+
+    const blocked = await getUnreleasedReceivers(orderId, receiverIds);
+    if (blocked === null) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (blocked.length) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "Payment is not completed for the selected receiver",
+        receiverIds: blocked,
+      });
+    }
+
+    const OK = ["Ready for Delivery", "Shipment Delivered"];
+    const badItem = open.find((i) => !OK.includes(i.status));
+    if (badItem) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: `Item ${badItem.item_ref} must be Ready for Delivery or Shipment Delivered`,
+      });
+    }
+
+    const created = [];
+    for (const rid of receiverIds) {
+      const items = byReceiver[rid];
+      const headerRes = await withUserAudit(
+        req,
+        client,
+        `INSERT INTO order_collections (
+           order_id, receiver_id, collection_method, collection_scope,
+           delivery_date, status, created_by
+         ) VALUES ($1,$2,'Marked as Collected','Full',CURRENT_DATE,true,$3)
+         RETURNING id`,
+        [orderId, rid, req.user?.email ?? null],
+      );
+      const collectionId = headerRes.rows[0].id;
+
+      const vals = [];
+      const ph = items
+        .map((it, idx) => {
+          const b = idx * 4;
+          vals.push(collectionId, it.id, it.item_ref, Number(it.remaining));
+          return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
+        })
+        .join(", ");
+      await client.query(
+        `INSERT INTO order_collection_items (collection_id, order_item_id, item_ref, qty_delivered)
+         VALUES ${ph}`,
+        vals,
+      );
+
+      await client.query(
+        `UPDATE order_items
+            SET delivered_qty = COALESCE(delivered_qty, 0) + GREATEST(0, COALESCE(remaining_qty, total_number, 0)),
+                remaining_qty = 0
+          WHERE id = ANY($1::int[])`,
+        [items.map((i) => i.id)],
+      );
+      created.push(collectionId);
+    }
+
+    await client.query(
+      `UPDATE orders o
+          SET qty_delivered = COALESCE((
+            SELECT SUM(COALESCE(oi.delivered_qty, 0))
+              FROM order_items oi
+              JOIN receivers r ON r.id = oi.receiver_id
+             WHERE r.order_id = o.id
+          ), 0)
+        WHERE o.id = $1`,
+      [orderId],
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json({ success: true, collectionIds: created });
+  } catch (error) {
+    console.error("Error marking order collected:", error);
+    if (client) await client.query("ROLLBACK");
+    res
+      .status(500)
+      .json({ error: "Internal server error", details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+}

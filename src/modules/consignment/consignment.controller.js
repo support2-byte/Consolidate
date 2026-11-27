@@ -8,6 +8,12 @@ import {
   applyConsignmentStatus,
   getActorLabel,
   countDeliveredSlots,
+  applyConsignmentEta,
+  assertEtaInWindow,
+  assertNotBackward,
+  httpError,
+  isStatusLocked,
+  getStatusRank,
 } from "../../services/statusSync.js";
 import { uploadConsignmentInvoicesToZoho } from "../zoho-invoices/zoho-invoice.service.js";
 import { v2 as cloudinary } from "cloudinary";
@@ -19,6 +25,22 @@ const canEditConsignmentRow = (user, row) =>
   isAdminLevel(user) ||
   (row?.edit_access_to != null &&
     String(row.edit_access_to) === String(user?.id));
+
+const LOCKED_CONSIGNMENT_STATUSES = ["Delivered", "Cancelled"];
+
+const isConsignmentStatusLocked = (status) =>
+  LOCKED_CONSIGNMENT_STATUSES.includes(String(status ?? "").trim());
+
+const sendStatusLocked = (res, status) => {
+  const msg = `This consignment is ${status}, so its status can no longer be changed.`;
+  return res.status(409).json({
+    success: false,
+    code: "STATUS_LOCKED",
+    message: msg,
+    error: msg,
+    currentStatus: status,
+  });
+};
 
 export async function getEditAccessUsers(req, res) {
   try {
@@ -70,6 +92,41 @@ export async function setConsignmentEditAccess(req, res) {
     });
   } catch (err) {
     console.error("Error updating edit access:", err);
+    res.status(500).json({ error: "Failed to update edit access" });
+  }
+}
+
+export async function setConsignmentEditAccessBulk(req, res) {
+  try {
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : [])
+      .map((x) => parseInt(x, 10))
+      .filter((x) => Number.isInteger(x) && x > 0);
+    if (ids.length === 0) {
+      return res.status(400).json({ error: "No consignments selected." });
+    }
+    const { userId } = req.body;
+    const grant = userId !== null && userId !== undefined && userId !== "";
+
+    const { rowCount } = grant
+      ? await pool.query(
+          `UPDATE consignments
+           SET edit_access_to = $1, edit_access_by = $2, edit_access_at = NOW()
+           WHERE id = ANY($3::int[])`,
+          [String(userId), String(req.user.id), ids],
+        )
+      : await pool.query(
+          `UPDATE consignments
+           SET edit_access_to = NULL, edit_access_by = NULL, edit_access_at = NULL
+           WHERE id = ANY($1::int[])`,
+          [ids],
+        );
+
+    res.json({
+      message: grant ? "Edit access granted" : "Edit access revoked",
+      updated: rowCount,
+    });
+  } catch (err) {
+    console.error("Error updating bulk edit access:", err);
     res.status(500).json({ error: "Failed to update edit access" });
   }
 }
@@ -1435,38 +1492,87 @@ export async function updateConsignment(req, res) {
     const query = `UPDATE consignments SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`;
 
     let updatedConsignment;
-    let computedETA = input.eta;
+    let finalEta = null;
     const containerDiffSummary = { released: [], added: [] };
 
     await withTransaction(async (client) => {
-      if (!computedETA) {
+      const curRes = await client.query(
+        `SELECT status::text AS status, eta::date::text AS eta
+           FROM consignments WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      if (curRes.rowCount === 0) throw new Error("Consignment not found");
+      const { status: currentStatus, eta: currentEta } = curRes.rows[0];
+
+      const requestedStatus =
+        input.status != null && String(input.status).trim() !== ""
+          ? String(input.status).trim()
+          : null;
+      const statusChanged =
+        requestedStatus !== null && requestedStatus !== currentStatus;
+      const toYmd = async (v) => {
+        const n = normalizeDate(v);
+        if (!n) return null;
+        const r = await client.query(`SELECT $1::date::text AS d`, [n]);
+        return r.rows[0]?.d || null;
+      };
+      const requestedEta = await toYmd(input.eta);
+      const etaRequestedChange =
+        requestedEta !== null && requestedEta !== currentEta;
+
+      if (
+        isStatusLocked(currentStatus) &&
+        (statusChanged || etaRequestedChange)
+      ) {
+        throw httpError(
+          409,
+          "STATUS_LOCKED",
+          `This consignment is ${currentStatus}, so its status and ETA can no longer be changed.`,
+        );
+      }
+
+      if (statusChanged) {
+        await assertNotBackward(client, {
+          entity: "consignment",
+          current: currentStatus,
+          target: requestedStatus,
+        });
+      }
+
+      const statusIdx = updateFields.indexOf("status");
+      if (statusIdx !== -1) {
+        values[statusIdx + 1] = statusChanged ? requestedStatus : currentStatus;
+      }
+
+      let nextEta = currentEta;
+      if (etaRequestedChange) {
+        await assertEtaInWindow(client, currentEta, requestedEta);
+        nextEta = requestedEta;
+      } else if (requestedEta === null && statusChanged) {
         const statusRow = await client.query(
           `SELECT order_status FROM statuses WHERE consignment_status = $1 AND status = true LIMIT 1`,
-          [input.status || data.status],
+          [requestedStatus],
         );
         const resolvedStatus =
-          statusRow.rows[0]?.order_status ?? input.status ?? data.status;
+          statusRow.rows[0]?.order_status ?? requestedStatus;
         const etaResult = await calculateETA(client, resolvedStatus);
-        computedETA = etaResult.eta;
+        const computed = await toYmd(etaResult.eta);
 
         logger.info(`[updateConsignment] ETA recomputed`, {
           consignment_id: id,
           resolvedStatus,
-          computedETA,
+          computed,
         });
 
-        const etaIndex = updateFields.indexOf("eta");
-        if (etaIndex !== -1) values[etaIndex + 1] = normalizeDate(computedETA);
+        if (computed && (!currentEta || computed >= currentEta)) {
+          nextEta = computed;
+        }
       }
+      finalEta = nextEta;
+      const etaChanged = !!nextEta && nextEta !== currentEta;
 
-      let etaChanged = false;
-      if (computedETA) {
-        const etaCheck = await client.query(
-          `SELECT eta IS DISTINCT FROM $2::date AS changed FROM consignments WHERE id = $1`,
-          [id, normalizeDate(computedETA)],
-        );
-        etaChanged = etaCheck.rows[0]?.changed === true;
-      }
+      const etaIdx = updateFields.indexOf("eta");
+      if (etaIdx !== -1) values[etaIdx + 1] = nextEta || null;
 
       const updateResult = await withUserAudit(req, client, query, values);
       if (updateResult.rowCount === 0) {
@@ -1616,14 +1722,15 @@ export async function updateConsignment(req, res) {
       if (etaChanged) {
         await applyConsignmentEta(client, {
           consignmentId: Number(id),
-          eta: normalizeDate(computedETA),
+          eta: nextEta,
+          skipGuards: true,
         });
       }
 
       if (data.status !== undefined) {
         const logResult = await logToTracking(client, id, "status_updated", {
-          newStatus: input.status,
-          eta: computedETA,
+          newStatus: statusChanged ? requestedStatus : currentStatus,
+          eta: nextEta,
         });
         if (!logResult.success) {
           logger.warn(`[updateConsignment] Tracking log failed`, {
@@ -1633,8 +1740,8 @@ export async function updateConsignment(req, res) {
         } else {
           logger.info(`[updateConsignment] Tracking log recorded`, {
             consignment_id: id,
-            newStatus: input.status,
-            eta: computedETA,
+            newStatus: statusChanged ? requestedStatus : currentStatus,
+            eta: nextEta,
           });
         }
       }
@@ -1673,6 +1780,11 @@ export async function updateConsignment(req, res) {
       stack: err.stack,
     });
 
+    if (err.status) {
+      return res
+        .status(err.status)
+        .json({ error: err.message, message: err.message, code: err.code });
+    }
     if (err.message === "Consignment not found") {
       return res.status(404).json({ error: "Consignment not found" });
     }
@@ -1741,6 +1853,9 @@ export async function advanceStatus(req, res) {
       });
     }
     const currentStatus = rows[0].status;
+    if (isConsignmentStatusLocked(currentStatus)) {
+      return sendStatusLocked(res, currentStatus);
+    }
 
     const statusResult = await pool.query(
       `SELECT id, consignment_status, order_status, container_status, days_offset, sorting_number, send_email
@@ -1872,11 +1987,28 @@ export async function changeConsignmentStatus(req, res) {
       });
     }
     const currentStatus = rows[0].status;
+    if (isConsignmentStatusLocked(currentStatus)) {
+      return sendStatusLocked(res, currentStatus);
+    }
     if (currentStatus === trimmedStatus) {
       return res.status(400).json({
         success: false,
         message: "New status is the same as current status",
         error: "New status is the same as current status",
+      });
+    }
+
+    const currentRank = await getStatusRank(pool, currentStatus);
+    const nextRank =
+      Number(statusRow.sorting_number) ||
+      (await getStatusRank(pool, trimmedStatus));
+    if (currentRank > 0 && nextRank > 0 && nextRank < currentRank) {
+      const msg = `Cannot move consignment back from "${currentStatus}" to "${trimmedStatus}".`;
+      return res.status(409).json({
+        success: false,
+        code: "STATUS_BACKWARD",
+        message: msg,
+        error: msg,
       });
     }
 
@@ -1920,6 +2052,59 @@ export async function changeConsignmentStatus(req, res) {
       success: false,
       message: "Failed to change status",
       error: "Failed to change status",
+      details: err.message,
+    });
+  }
+}
+export async function updateConsignmentEta(req, res) {
+  try {
+    const numericId = Number(req.params.id);
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid consignment ID.",
+        error: "Invalid consignment ID.",
+      });
+    }
+
+    const { eta } = req.body || {};
+    if (!eta || !/^\d{4}-\d{2}-\d{2}$/.test(eta)) {
+      const msg = "eta is required in YYYY-MM-DD format";
+      return res.status(400).json({
+        success: false,
+        code: "ETA_INVALID",
+        message: msg,
+        error: msg,
+      });
+    }
+
+    let result;
+    await withTransaction(async (client) => {
+      result = await applyConsignmentEta(client, {
+        consignmentId: numericId,
+        eta,
+      });
+    });
+
+    return res.json({
+      success: true,
+      message: `ETA updated for ${result.affectedContainers} container(s) and ${result.affectedItems} item(s)`,
+      data: result,
+    });
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        error: err.message,
+      });
+    }
+    logger.error("updateConsignmentEta ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update ETA",
+      error: "Failed to update ETA",
       details: err.message,
     });
   }

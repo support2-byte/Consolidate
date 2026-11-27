@@ -15,6 +15,7 @@ import {
   setReceiverPaymentApproval,
 } from "./zoho-bill.controller.js";
 import { requireAuth, requireRole } from "../auth/auth.middleware.js";
+import { getFinanceOverview } from "./zoho-finance.controller.js";
 
 const router = express.Router();
 const jobDetailsAccess = requireRole("super admin", "admin");
@@ -28,6 +29,14 @@ router.get(
   jobDetailsAccess,
   getConsignmentBilling,
 );
+
+router.get(
+  "/finance/overview",
+  requireAuth,
+  jobDetailsAccess,
+  getFinanceOverview,
+);
+
 router.post(
   "/consignment/:consignmentId/billing/sync",
   requireAuth,

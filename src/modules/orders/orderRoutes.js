@@ -32,6 +32,7 @@ import {
   getMblData,
   getPublicOrderTracking,
   syncOrderTrackingIds,
+  markOrderCollected,
 } from "./order.controller.js";
 import {
   sendShipmentEmail,
@@ -260,6 +261,12 @@ router.post(
   requireAuth,
   gatepassUpload,
   createOrderCollections,
+);
+
+router.post(
+  "/:orderId/collections/mark-collected",
+  requireAuth,
+  markOrderCollected,
 );
 
 /**

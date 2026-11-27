@@ -481,9 +481,58 @@ const scanInvoicesByConsignment = async (token, consignmentNumber) => {
   return found;
 };
 
+// Look up invoices by the order form number ONLY, asking Zoho to filter on the
+// custom field instead of scanning the newest 1,000 invoices.
+const scanInvoicesByOrderNumber = async (token, formNo) => {
+  const orderFilter =
+    process.env.ZOHO_INVOICE_ORDER_FILTER || "cf_order_number";
+  const form = String(formNo ?? "").trim();
+  const wanted = form.toLowerCase();
+  if (!wanted) return [];
+
+  // exact form number, or form number + part letters (1234A, 1234B)
+  const matches = (i) => {
+    const v = String(i[orderFilter] ?? "")
+      .trim()
+      .toLowerCase();
+    return v === wanted || v.replace(/[a-z]+$/, "") === wanted;
+  };
+
+  // 1) startswith finds 1234, 1234A, 1234B in one request
+  let list = [];
+  try {
+    list = await fetchAllZohoInvoiceList(
+      token,
+      { [`${orderFilter}_startswith`]: form },
+      2,
+    );
+  } catch (err) {
+    if (err.response?.status === 429) throw err;
+    logger.warn("[INV-BY-ORDER] startswith filter failed, trying exact", {
+      form,
+      status: err.response?.status,
+      err: err.response?.data || err.message,
+    });
+  }
+  let found = list.filter(matches);
+
+  // 2) fall back to an exact filter if startswith found nothing
+  if (!found.length) {
+    list = await fetchAllZohoInvoiceList(token, { [orderFilter]: form }, 2);
+    found = list.filter(matches);
+  }
+
+  logger.info("[INV-BY-ORDER]", {
+    form,
+    returned: list.length,
+    found: found.map((i) => `${i.invoice_number}:${i[orderFilter]}`),
+  });
+  return found;
+};
+
 export const syncInvoicesForOrder = async (formNo, syncedBy = null) => {
   const token = await getZohoAccessToken();
-  const matched = await scanInvoicesForForms(token, [formNo]);
+  const matched = await scanInvoicesByOrderNumber(token, formNo);
   return matched.length ? syncInvoiceRows(matched, token, syncedBy) : 0;
 };
 

@@ -14,6 +14,7 @@ import {
   deleteConsignmentAttachment,
   getEditAccessUsers,
   setConsignmentEditAccess,
+  setConsignmentEditAccessBulk,
 } from "../consignment/consignment.controller.js";
 import { requireAuth, requireRole } from "../auth/auth.middleware.js";
 import { consignmentUpload } from "../../middleware/upload.js";
@@ -123,6 +124,13 @@ router.put(
   requireAuth,
   requireRole("admin", "super admin"),
   setConsignmentEditAccess,
+);
+
+router.put(
+  "/edit-access/bulk",
+  requireAuth,
+  requireRole("admin", "super admin"),
+  setConsignmentEditAccessBulk,
 );
 
 /**
