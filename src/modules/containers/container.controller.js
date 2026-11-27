@@ -3,9 +3,11 @@ import { calculateETA } from "../../services/calculateEta.js";
 import { v2 as cloudinary } from "cloudinary";
 import { withTransaction } from "../../services/transaction.js";
 import {
+  applyContainerEta,
   applyContainerStatus,
   getActorLabel,
   getStatusRow,
+  isStatusLocked as isEtaStatusLocked,
 } from "../../services/statusSync.js";
 
 cloudinary.config({
@@ -45,7 +47,7 @@ function validateSocFields({
   if (!purchase_price) errors.push("purchase_price");
   if (!purchase_from) errors.push("purchase_from");
   if (!owned_by) errors.push("owned_by");
-  if (!available_at) errors.push("available_at"); // Treat as string from dropdown, not date
+  if (!available_at) errors.push("available_at");
   return errors;
 }
 
@@ -677,6 +679,10 @@ export const getAllContainers = async (req, res) => {
         cm.container_type,
         cm.owner_type,
         cm.created_time,
+        CASE
+          WHEN lc.active = false OR lc.active IS NULL THEN NULL
+          ELSE cm.eta::date::text
+        END AS eta,
         COALESCE(cs.location, '') AS location,
         COALESCE(cs.availability, 'Available') AS current_status,
         CASE
@@ -1170,7 +1176,7 @@ export const releaseContainer = async (req, res) => {
       await client.query(
         `
         UPDATE container_master
-          SET status = 'Available'
+          SET status = 'Available', eta = NULL
         WHERE cid = $1
         `,
         [releasedAssignment.container_id],
@@ -1489,13 +1495,37 @@ export async function updateContainerStatus(req, res) {
   let client;
 
   try {
-    client = await pool.connect();
-    await client.query("BEGIN");
-
     const { cid } = req.params;
 
-    const { current_status, derived_status, location, container_status } =
+    const { current_status, derived_status, location, container_status, eta } =
       req.body;
+
+    const dbRow = await pool.query(
+      `SELECT status::text AS status FROM container_master WHERE cid = $1`,
+      [cid],
+    );
+    const dbStatus = dbRow.rows[0]?.status;
+    const lockedStatus = isEtaStatusLocked(dbStatus)
+      ? dbStatus
+      : isEtaStatusLocked(current_status)
+        ? current_status
+        : null;
+    const etaLocked = !!lockedStatus;
+    const wantsEtaChange =
+      (container_status && container_status !== lockedStatus) || !!eta;
+    if (etaLocked && wantsEtaChange) {
+      const msg = `This container's ETA status is ${lockedStatus}, so its ETA and ETA status can no longer be changed.`;
+      return res.status(409).json({
+        success: false,
+        code: "STATUS_LOCKED",
+        message: msg,
+        error: msg,
+        currentStatus: lockedStatus,
+      });
+    }
+
+    client = await pool.connect();
+    await client.query("BEGIN");
 
     const created_by = await getActorLabel(pool, req);
 
@@ -1521,7 +1551,11 @@ export async function updateContainerStatus(req, res) {
       );
     }
 
-    if (container_status && current_status) {
+    if (
+      container_status &&
+      !etaLocked &&
+      container_status !== (current_status || "")
+    ) {
       const statusRow = await getStatusRow(
         client,
         "container",
@@ -1533,27 +1567,44 @@ export async function updateContainerStatus(req, res) {
           .status(400)
           .json({ error: `Invalid container status "${container_status}"` });
       }
-      const eta = statusRow.order_status
+      const statusEta = statusRow.order_status
         ? ((await calculateETA(client, statusRow.order_status))?.eta ?? null)
         : null;
       await applyContainerStatus(client, {
         cid: Number(cid),
         currentStatus: current_status,
         statusRow,
-        eta,
+        eta: statusEta,
         createdBy: created_by,
       });
+    }
+
+    let etaResult = null;
+    if (eta) {
+      etaResult = await applyContainerEta(client, { cid: Number(cid), eta });
     }
 
     await client.query("COMMIT");
 
     return res.status(200).json({
       success: true,
-      message: "Container status updated successfully",
+      message: etaResult
+        ? `Container updated. ETA set to ${eta} for ${etaResult.affectedItems} item(s).`
+        : "Container status updated successfully",
+      data: etaResult,
     });
   } catch (err) {
     if (client) {
       await client.query("ROLLBACK");
+    }
+
+    if (err.status) {
+      return res.status(err.status).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        error: err.message,
+      });
     }
 
     console.error("Container status update failed:", err);

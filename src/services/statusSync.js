@@ -8,6 +8,73 @@ const LEVEL_COLUMN = {
 };
 const ASSIGN_COLUMN = { consignment: "consignment_id", container: "cid" };
 
+export const ETA_MAX_DAYS = 30;
+const LOCKED_STATUSES = ["Delivered", "Shipment Delivered", "Cancelled"];
+
+export const isStatusLocked = (status) =>
+  LOCKED_STATUSES.includes(String(status ?? "").trim());
+
+export function httpError(status, code, message) {
+  const err = new Error(message);
+  err.status = status;
+  err.code = code;
+  return err;
+}
+
+const rankSql = (expr) => `COALESCE((
+  SELECT s.sorting_number FROM statuses s
+   WHERE s.status = true
+     AND LOWER(${expr}::text) IN (
+       LOWER(s.order_status), LOWER(s.container_status), LOWER(s.consignment_status)
+     )
+   ORDER BY s.sorting_number ASC LIMIT 1
+), 0)`;
+
+export async function getStatusRank(db, value) {
+  const v = String(value ?? "").trim();
+  if (!v) return 0;
+  const r = await db.query(`SELECT ${rankSql("$1")} AS rank`, [v]);
+  return Number(r.rows[0]?.rank) || 0;
+}
+
+export async function assertNotBackward(db, { entity, current, target }) {
+  const [cur, next] = await Promise.all([
+    getStatusRank(db, current),
+    getStatusRank(db, target),
+  ]);
+  if (cur > 0 && next > 0 && next < cur) {
+    throw httpError(
+      409,
+      "STATUS_BACKWARD",
+      `Cannot move ${entity} back from "${current}" to "${target}".`,
+    );
+  }
+}
+
+export async function getEtaWindow(db, currentEta) {
+  const r = await db.query(
+    `SELECT GREATEST(CURRENT_DATE, $1::date)::text AS min,
+            (GREATEST(CURRENT_DATE, $1::date) + ${ETA_MAX_DAYS})::text AS max`,
+    [currentEta || null],
+  );
+  return r.rows[0];
+}
+
+export async function assertEtaInWindow(db, currentEta, nextEta) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(nextEta ?? ""))) {
+    throw httpError(400, "ETA_INVALID", "ETA must be in YYYY-MM-DD format.");
+  }
+  const { min, max } = await getEtaWindow(db, currentEta);
+  if (nextEta < min || nextEta > max) {
+    throw httpError(
+      400,
+      "ETA_OUT_OF_RANGE",
+      `ETA must be between ${min} and ${max}. It can only move forward, up to ${ETA_MAX_DAYS} days.`,
+    );
+  }
+  return { min, max };
+}
+
 export async function getActorLabel(db, req) {
   if (req.user?.email) return req.user.email;
   if (req.user?.id) {
@@ -108,6 +175,35 @@ async function syncParents(client, rows, receiverEta) {
         WHERE o.id = agg.order_id AND o.status IS DISTINCT FROM agg.status`,
       [orderIds],
     );
+    await client.query(
+      `UPDATE orders o
+          SET eta = m.min_eta, updated_at = CURRENT_TIMESTAMP
+         FROM (SELECT order_id, MIN(eta) AS min_eta FROM receivers
+                WHERE order_id = ANY($1::int[]) GROUP BY order_id) m
+        WHERE o.id = m.order_id AND m.min_eta IS NOT NULL
+          AND o.eta IS DISTINCT FROM m.min_eta`,
+      [orderIds],
+    );
+  }
+}
+
+// ETA-only parent sync: receivers/orders ETA never move backwards
+async function syncParentEta(client, rows, eta) {
+  const receiverIds = [
+    ...new Set(rows.map((r) => r.receiver_id).filter(Boolean)),
+  ];
+  const orderIds = [...new Set(rows.map((r) => r.order_id).filter(Boolean))];
+
+  if (receiverIds.length) {
+    await client.query(
+      `UPDATE receivers
+          SET eta = $2::timestamp, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ANY($1::int[])
+          AND (eta IS NULL OR eta < $2::timestamp)`,
+      [receiverIds, eta],
+    );
+  }
+  if (orderIds.length) {
     await client.query(
       `UPDATE orders o
           SET eta = m.min_eta, updated_at = CURRENT_TIMESTAMP
@@ -285,6 +381,9 @@ export async function applyItemStatus(
     createdBy = "system",
     moduleId,
     protectDelivered = true,
+    // "skip": silently leave items that are already further along (cascades)
+    // "throw": reject the request (explicit user action on a single item)
+    onBackward = "skip",
   },
 ) {
   const orderStatus = statusRow?.order_status;
@@ -308,6 +407,31 @@ export async function applyItemStatus(
     [ids, cidList],
   );
 
+  const rankRes = await client.query(
+    `SELECT order_status, sorting_number FROM statuses
+      WHERE status = true AND order_status IS NOT NULL`,
+  );
+  const rankMap = new Map(
+    rankRes.rows.map((r) => [r.order_status.toLowerCase(), r.sorting_number]),
+  );
+  const rankOf = (v) => rankMap.get(String(v ?? "").toLowerCase()) ?? 0;
+  const targetRank = rankOf(orderStatus);
+  const isBackward = (s) =>
+    s.cur_status !== orderStatus &&
+    targetRank > 0 &&
+    rankOf(s.cur_status) > targetRank;
+
+  if (onBackward === "throw") {
+    const bad = slotRes.rows.find(isBackward);
+    if (bad) {
+      throw httpError(
+        409,
+        "STATUS_BACKWARD",
+        `Cannot move item back from "${bad.cur_status}" to "${orderStatus}".`,
+      );
+    }
+  }
+
   const toWrite = slotRes.rows
     .map((s) => ({
       ...s,
@@ -316,6 +440,7 @@ export async function applyItemStatus(
     .filter(
       (s) =>
         s.cur_status !== orderStatus &&
+        !isBackward(s) &&
         !(protectDelivered && s.cur_status === DELIVERED),
     );
 
@@ -354,7 +479,6 @@ export async function applyItemStatus(
     );
   }
 
-  // item status = least advanced across ALL its containers (always recomputed)
   const changed = await client.query(
     `WITH ${SLOTS_CTE},
      agg AS (
@@ -403,19 +527,42 @@ export async function applyContainerStatus(
   client,
   { cid, currentStatus, statusRow, eta, createdBy },
 ) {
-  await client.query(`UPDATE container_master SET status = $1 WHERE cid = $2`, [
-    statusRow.container_status,
-    cid,
-  ]);
-
-  const assigned = (await getAssignedItems(client, "container", cid)).filter(
-    (a) => a.status === currentStatus,
+  const dbRes = await client.query(
+    `SELECT status::text AS status FROM container_master WHERE cid = $1 FOR UPDATE`,
+    [cid],
   );
+  const dbStatus = dbRes.rows[0]?.status || "";
+  const [dbRank, uiRank, nextRank] = await Promise.all([
+    getStatusRank(client, dbStatus),
+    getStatusRank(client, currentStatus),
+    getStatusRank(client, statusRow.container_status),
+  ]);
+  if (nextRank > 0 && nextRank < Math.max(dbRank, uiRank)) {
+    throw httpError(
+      409,
+      "STATUS_BACKWARD",
+      `Cannot move container back from "${dbRank >= uiRank ? dbStatus : currentStatus}" to "${statusRow.container_status}".`,
+    );
+  }
+
+  await client.query(
+    `UPDATE container_master
+        SET status = $1::text,
+            eta = CASE WHEN LOWER(status::text) IS DISTINCT FROM LOWER($1::text)
+                       THEN COALESCE($3::date, eta) ELSE eta END
+      WHERE cid = $2`,
+    [statusRow.container_status, cid, eta || null],
+  );
+
+  const assigned = await getAssignedItems(client, "container", cid);
   if (!assigned.length) return [];
 
   await client.query(
-    `UPDATE container_assignment_history SET status = $1 WHERE id = ANY($2::int[])`,
-    [statusRow.container_status, assigned.map((a) => a.id)],
+    `UPDATE container_assignment_history h
+        SET status = $1::text
+      WHERE h.id = ANY($2::int[])
+        AND ($3::int = 0 OR ${rankSql("h.status")} < $3::int)`,
+    [statusRow.container_status, assigned.map((a) => a.id), nextRank],
   );
 
   if (!statusRow.order_status) {
@@ -455,17 +602,30 @@ export async function applyConsignmentStatus(
 
   const assigned = await getAssignedItems(client, "consignment", consignmentId);
 
+  const cids = [...new Set(assigned.map((a) => a.cid).filter(Boolean))];
+  const targetRank =
+    Number(statusRow.sorting_number) ||
+    (await getStatusRank(client, statusRow.consignment_status));
+
   if (statusRow.container_status && assigned.length) {
-    const cids = [...new Set(assigned.map((a) => a.cid).filter(Boolean))];
     if (cids.length) {
       await client.query(
-        `UPDATE container_master SET status = $1 WHERE cid = ANY($2)`,
-        [statusRow.container_status, cids],
+        `UPDATE container_master cm
+            SET status = $1, eta = COALESCE($4::date, cm.eta)
+          WHERE cm.cid = ANY($2::int[]) AND ${rankSql("cm.status")} < $3`,
+        [statusRow.container_status, cids, targetRank, eta || null],
       );
     }
     await client.query(
-      `UPDATE container_assignment_history SET status = $1 WHERE id = ANY($2::int[])`,
-      [statusRow.container_status, assigned.map((a) => a.id)],
+      `UPDATE container_assignment_history h
+          SET status = $1
+        WHERE h.id = ANY($2::int[]) AND ${rankSql("h.status")} < $3`,
+      [statusRow.container_status, assigned.map((a) => a.id), targetRank],
+    );
+  } else if (eta && cids.length) {
+    await client.query(
+      `UPDATE container_master SET eta = $2::date WHERE cid = ANY($1::int[])`,
+      [cids, eta],
     );
   }
 
@@ -502,4 +662,134 @@ export async function applyConsignmentStatus(
   });
 
   return updatedItems;
+}
+
+export async function applyItemEta(client, { itemIds, cids = null, eta }) {
+  const ids = [...new Set((itemIds || []).filter(Boolean))];
+  if (!ids.length || !eta) return [];
+  const cidList = cids?.length ? cids.map(Number) : null;
+
+  const LATEST = `WITH ${SLOTS_CTE},
+    latest AS (
+      SELECT DISTINCT lt.id, lt.container_id, sl.cid
+        FROM slots sl
+        JOIN order_items oi ON oi.id = sl.item_id
+        JOIN LATERAL (
+          SELECT t.id, t.container_id
+            FROM order_tracking t
+           WHERE t.order_id = oi.order_id AND t.item_ref = oi.item_ref
+             AND (t.container_id = sl.cid OR t.container_id IS NULL)
+           ORDER BY (t.container_id IS NOT NULL) DESC, t.created_time DESC, t.id DESC
+           LIMIT 1
+        ) lt ON TRUE
+       WHERE sl.cid IS NOT NULL
+    )`;
+
+  await client.query(
+    `${LATEST}
+     INSERT INTO order_tracking
+     SELECT (jsonb_populate_record(
+       null::order_tracking,
+       to_jsonb(t) || jsonb_build_object(
+         'id', nextval(pg_get_serial_sequence('order_tracking','id')),
+         'container_id', l.cid,
+         'eta', $3::date::text,
+         'created_time', now()
+       )
+     )).*
+       FROM latest l
+       JOIN order_tracking t ON t.id = l.id
+      WHERE l.container_id IS NULL
+        AND (t.eta IS NULL OR t.eta::date < $3::date)`,
+    [ids, cidList, eta],
+  );
+
+  await client.query(
+    `${LATEST}
+     UPDATE order_tracking ot
+        SET eta = $3::date
+       FROM latest l
+      WHERE ot.id = l.id AND l.container_id IS NOT NULL
+        AND (ot.eta IS NULL OR ot.eta::date < $3::date)`,
+    [ids, cidList, eta],
+  );
+
+  const items = await client.query(
+    `SELECT id, order_id, receiver_id FROM order_items WHERE id = ANY($1::int[])`,
+    [ids],
+  );
+  await syncParentEta(client, items.rows, eta);
+  return items.rows;
+}
+
+export async function applyContainerEta(client, { cid, eta }) {
+  const cur = await client.query(
+    `SELECT eta::date::text AS eta FROM container_master WHERE cid = $1 FOR UPDATE`,
+    [cid],
+  );
+  if (!cur.rowCount) throw httpError(404, "NOT_FOUND", "Container not found");
+
+  await assertEtaInWindow(client, cur.rows[0].eta, eta);
+
+  await client.query(
+    `UPDATE container_master SET eta = $1::date WHERE cid = $2`,
+    [eta, cid],
+  );
+  const assigned = await getAssignedItems(client, "container", cid);
+  await applyItemEta(client, {
+    itemIds: assigned.map((a) => a.detail_id),
+    cids: [cid],
+    eta,
+  });
+  return { eta, affectedItems: new Set(assigned.map((a) => a.detail_id)).size };
+}
+
+export async function applyConsignmentEta(
+  client,
+  { consignmentId, eta, skipGuards = false },
+) {
+  const cur = await client.query(
+    `SELECT status::text AS status, eta::date::text AS eta
+       FROM consignments WHERE id = $1 FOR UPDATE`,
+    [consignmentId],
+  );
+  if (!cur.rowCount) {
+    throw httpError(404, "NOT_FOUND", "Consignment not found");
+  }
+  const { status, eta: currentEta } = cur.rows[0];
+  if (!skipGuards) {
+    if (isStatusLocked(status)) {
+      throw httpError(
+        409,
+        "STATUS_LOCKED",
+        `This consignment is ${status}, so its ETA can no longer be changed.`,
+      );
+    }
+    await assertEtaInWindow(client, currentEta, eta);
+
+    await client.query(
+      `UPDATE consignments SET eta = $1::date, updated_at = NOW() WHERE id = $2`,
+      [eta, consignmentId],
+    );
+  }
+
+  const assigned = await getAssignedItems(client, "consignment", consignmentId);
+  const cids = [...new Set(assigned.map((a) => a.cid).filter(Boolean))];
+  if (cids.length) {
+    await client.query(
+      `UPDATE container_master SET eta = $2::date
+        WHERE cid = ANY($1::int[]) AND (eta IS NULL OR eta::date < $2::date)`,
+      [cids, eta],
+    );
+  }
+  await applyItemEta(client, {
+    itemIds: assigned.map((a) => a.detail_id),
+    cids,
+    eta,
+  });
+  return {
+    eta,
+    affectedContainers: cids.length,
+    affectedItems: new Set(assigned.map((a) => a.detail_id)).size,
+  };
 }

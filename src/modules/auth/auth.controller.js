@@ -1,17 +1,15 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import crypto from "crypto";
 import pool from "../../db/pool.js";
 import { getEffectivePermissions } from "../../services/getEffectivePermissions.js";
 import logger from "../../services/logger.js";
 import { transporter } from "../../middleware/nodeMailer.js";
 import { buildAdminResetRequestEmailHtml } from "../../services/passwordResetEmailHtml.js";
 import { buildPasswordUpdatedEmailHtml } from "../../services/updatePasswordEmail.js";
-
-const JWT_SECRET = process.env.JWT_SECRET;
-const ACCESS_TOKEN_TTL = "15m";
-const REFRESH_TOKEN_TTL_DAYS = 30;
-const ACCESS_TOKEN_MAX_AGE_MS = 15 * 60 * 1000;
+import {
+  signAccessToken,
+  setAccessCookie,
+  clearAuthCookies,
+} from "./auth.session.js";
 
 export async function register(req, res) {
   try {
@@ -90,7 +88,7 @@ export async function login(req, res) {
       logger.warn("Login attempt for unknown email", { email });
       return res.status(401).json({
         success: false,
-        error: "INVALID_CREDENIALS".replace("ENIAL", "ENTIAL"),
+        error: "INVALID_CREDENTIALS",
       });
     }
 
@@ -114,41 +112,15 @@ export async function login(req, res) {
 
     const permissions = await getEffectivePermissions(user.id, user.role_id);
 
-    const accessToken = jwt.sign(
-      {
+    setAccessCookie(
+      res,
+      signAccessToken({
         id: user.id,
         email: user.email,
         roleId: user.role_id,
         roleName: user.role_name,
-      },
-      JWT_SECRET,
-      { algorithm: "HS256", expiresIn: ACCESS_TOKEN_TTL },
+      }),
     );
-
-    const refreshToken = crypto.randomBytes(48).toString("hex");
-    const expiresAt = new Date(
-      Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-    );
-
-    await pool.query(
-      `INSERT INTO refresh_token (user_id, token, expires_at)
-       VALUES ($1, $2, $3)`,
-      [user.id, refreshToken, expiresAt],
-    );
-
-    res.cookie("accessToken", accessToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: ACCESS_TOKEN_MAX_AGE_MS,
-    });
-
-    res.cookie("refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-    });
 
     logger.info("User logged in", {
       userId: user.id,
@@ -173,147 +145,9 @@ export async function login(req, res) {
   }
 }
 
-export async function refreshToken(req, res) {
-  try {
-    const incomingToken = req.cookies?.refreshToken;
-
-    if (!incomingToken) {
-      logger.warn("Refresh attempt with no token present");
-      return res.status(401).json({
-        success: false,
-        error: "REFRESH_TOKEN_MISSING",
-      });
-    }
-
-    const tokenResult = await pool.query(
-      `SELECT rt.id, rt.user_id, rt.expires_at, u.email, u.active, u.role AS role_id, r.name AS role_name
-       FROM refresh_token rt
-       JOIN users u ON u.id = rt.user_id
-       JOIN roles r ON r.id = u.role
-       WHERE rt.token = $1`,
-      [incomingToken],
-    );
-
-    const tokenRow = tokenResult.rows[0];
-
-    if (!tokenRow) {
-      logger.warn("Refresh attempt with invalid/unknown token");
-      return res.status(401).json({
-        success: false,
-        error: "INVALID_REFRESH_TOKEN",
-      });
-    }
-
-    if (new Date(tokenRow.expires_at) < new Date()) {
-      await pool.query("DELETE FROM refresh_token WHERE id = $1", [
-        tokenRow.id,
-      ]);
-      logger.info("Refresh token expired, removed", {
-        userId: tokenRow.user_id,
-      });
-      return res.status(401).json({
-        success: false,
-        error: "REFRESH_TOKEN_EXPIRED",
-      });
-    }
-
-    if (!tokenRow.active) {
-      await pool.query("DELETE FROM refresh_token WHERE id = $1", [
-        tokenRow.id,
-      ]);
-      logger.warn("Refresh attempt for disabled account", {
-        userId: tokenRow.user_id,
-      });
-      return res.status(403).json({
-        success: false,
-        error: "ACCOUNT_DISABLED",
-      });
-    }
-
-    const newRefreshToken = crypto.randomBytes(48).toString("hex");
-    const newExpiresAt = new Date(
-      Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-    );
-
-    await pool.query(
-      `UPDATE refresh_token SET token = $1, expires_at = $2 WHERE id = $3`,
-      [newRefreshToken, newExpiresAt, tokenRow.id],
-    );
-
-    const permissions = await getEffectivePermissions(
-      tokenRow.user_id,
-      tokenRow.role_id,
-    );
-
-    const accessToken = jwt.sign(
-      {
-        id: tokenRow.user_id,
-        email: tokenRow.email,
-        roleId: tokenRow.role_id,
-        roleName: tokenRow.role_name,
-      },
-      JWT_SECRET,
-      { algorithm: "HS256", expiresIn: ACCESS_TOKEN_TTL },
-    );
-
-    res.cookie("accessToken", accessToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: ACCESS_TOKEN_MAX_AGE_MS,
-    });
-
-    res.cookie("refreshToken", newRefreshToken, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-    });
-
-    logger.debug("Access token refreshed", { userId: tokenRow.user_id });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        id: tokenRow.user_id,
-        email: tokenRow.email,
-        roleName: tokenRow.role_name,
-        permissions,
-      },
-    });
-  } catch (err) {
-    logger.error("Token refresh failed", {
-      message: err.message,
-      stack: err.stack,
-    });
-    return res.status(500).json({
-      success: false,
-      error: "INTERNAL_ERROR",
-    });
-  }
-}
-
 export async function logout(req, res) {
   try {
-    const incomingToken = req.cookies?.refreshToken;
-
-    if (incomingToken) {
-      await pool.query("DELETE FROM refresh_token WHERE token = $1", [
-        incomingToken,
-      ]);
-    }
-
-    res.clearCookie("accessToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
-
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
+    clearAuthCookies(res);
 
     logger.info("User logged out", { userId: req.user?.id });
 
@@ -666,8 +500,6 @@ export async function deleteUser(req, res) {
       });
     }
 
-    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [id]);
-
     const result = await pool.query(
       "DELETE FROM users WHERE id = $1 RETURNING id",
       [id],
@@ -757,9 +589,7 @@ export async function adminForceResetPassword(req, res) {
 
     const updatedUser = result.rows[0];
 
-    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [id]);
-
-    logger.info("Password reset by admin, sessions revoked", {
+    logger.info("Password reset by admin", {
       actorId: req.user?.id,
       targetUserId: id,
     });
@@ -812,21 +642,7 @@ export async function adminForceResetPassword(req, res) {
 
 export async function logoutAll(req, res) {
   try {
-    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [
-      req.user.id,
-    ]);
-
-    res.clearCookie("accessToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
-
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
+    clearAuthCookies(res);
 
     return res.status(200).json({
       success: true,
@@ -908,21 +724,9 @@ export const changePassword = async (req, res) => {
       [passwordHash, userId],
     );
 
-    await pool.query("DELETE FROM refresh_token WHERE user_id = $1", [userId]);
+    clearAuthCookies(res);
 
-    res.clearCookie("accessToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
-
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-    });
-
-    logger.info("Password changed successfully, all sessions revoked", {
+    logger.info("Password changed successfully", {
       userId,
     });
 
