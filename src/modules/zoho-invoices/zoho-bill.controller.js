@@ -488,33 +488,43 @@ const computeReceiverPayments = (receivers, invoices, senderName = "") => {
   );
 };
 
-export const getReceiverPayments = async (orderId) => {
-  const orderRes = await pool.query(
-    `SELECT o.rgl_booking_number, s.sender_name
-       FROM orders o
-       LEFT JOIN senders s ON s.order_id = o.id
-      WHERE o.id = $1`,
-    [orderId],
-  );
-  if (!orderRes.rows[0]) return null;
-  const orderKey = key(orderRes.rows[0].rgl_booking_number);
-  const senderName = orderRes.rows[0].sender_name;
-
-  const [recRes, invRes] = await Promise.all([
+export const loadPaymentData = async (orderId) => {
+  const [orderRes, recRes, invRes] = await Promise.all([
+    pool.query(
+      `SELECT o.rgl_booking_number, s.sender_name
+         FROM orders o
+         LEFT JOIN senders s ON s.order_id = o.id
+        WHERE o.id = $1`,
+      [orderId],
+    ),
     pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
       orderId,
     ]),
-    orderKey
-      ? pool.query(
-          `SELECT customer_name AS customer, status,
-                  total::float8 AS total, balance::float8 AS balance
-             FROM zoho_invoices
-              WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
-          [orderKey],
-        )
-      : { rows: [] },
+    pool.query(
+      `SELECT invoice_number AS number, customer_name AS customer, status,
+              total::float8 AS total, balance::float8 AS balance,
+              order_number, consignment_number,
+              to_char(last_payment_date, 'YYYY-MM-DD') AS "paidDate"
+         FROM zoho_invoices
+        WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') =
+              (SELECT NULLIF(lower(btrim(rgl_booking_number)), '')
+                 FROM orders WHERE id = $1)`,
+      [orderId],
+    ),
   ]);
-  return computeReceiverPayments(recRes.rows, invRes.rows, senderName);
+  if (!orderRes.rows[0]) return null;
+  return {
+    orderKey: key(orderRes.rows[0].rgl_booking_number),
+    senderName: orderRes.rows[0].sender_name,
+    receivers: recRes.rows,
+    invoices: invRes.rows,
+  };
+};
+
+export const getReceiverPayments = async (orderId, data) => {
+  const d = data === undefined ? await loadPaymentData(orderId) : data;
+  if (!d) return null;
+  return computeReceiverPayments(d.receivers, d.invoices, d.senderName);
 };
 
 export const getReceiverApprovals = async (orderId) => {
@@ -541,33 +551,12 @@ export const getReceiverApprovals = async (orderId) => {
 const countPaid = (map) =>
   Object.values(map || {}).filter((s) => s === "paid").length;
 
-export const getReceiverPaymentMeta = async (orderId) => {
-  const orderRes = await pool.query(
-    `SELECT o.rgl_booking_number, s.sender_name
-       FROM orders o
-       LEFT JOIN senders s ON s.order_id = o.id
-      WHERE o.id = $1`,
-    [orderId],
-  );
-  if (!orderRes.rows[0]) return {};
-  const orderKey = key(orderRes.rows[0].rgl_booking_number);
-  const senderKey = normalizeName(orderRes.rows[0].sender_name);
-
-  const [recRes, invRes] = await Promise.all([
-    pool.query("SELECT id, receiver_name FROM receivers WHERE order_id = $1", [
-      orderId,
-    ]),
-    orderKey
-      ? pool.query(
-          `SELECT customer_name AS customer, status,
-                  total::float8 AS total, balance::float8 AS balance,
-                  to_char(last_payment_date, 'YYYY-MM-DD') AS "paidDate"
-             FROM zoho_invoices
-            WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
-          [orderKey],
-        )
-      : { rows: [] },
-  ]);
+export const getReceiverPaymentMeta = async (orderId, data) => {
+  const d = data === undefined ? await loadPaymentData(orderId) : data;
+  if (!d) return {};
+  const senderKey = normalizeName(d.senderName);
+  const recRes = { rows: d.receivers };
+  const invRes = { rows: d.invoices };
 
   const byCustomer = {};
   for (const inv of invRes.rows) {
@@ -598,6 +587,158 @@ export const getReceiverPaymentMeta = async (orderId) => {
       ];
     }),
   );
+};
+
+const partOf = (orderNumber) =>
+  (
+    String(orderNumber ?? "")
+      .trim()
+      .toLowerCase()
+      .match(/[a-z]+$/)?.[0] ?? ""
+  ).toUpperCase();
+
+const consKey = (v) => stripConsignmentPrefix(v).toLowerCase();
+
+export const getReceiverParts = async (orderId, data) => {
+  const d = data === undefined ? await loadPaymentData(orderId) : data;
+  if (!d) return {};
+  const senderKey = normalizeName(d.senderName);
+  const recRes = { rows: d.receivers };
+  const invRes = { rows: d.invoices };
+
+  const byCustomer = {};
+  for (const inv of invRes.rows) {
+    const k = normalizeName(inv.customer);
+    (byCustomer[k] = byCustomer[k] || []).push(inv);
+  }
+
+  return Object.fromEntries(
+    recRes.rows.map((r) => {
+      const keys = new Set([normalizeName(r.receiver_name)]);
+      if (senderKey) keys.add(senderKey);
+      const docs = [...keys].flatMap((k) => byCustomer[k] || []);
+
+      const groups = {};
+      for (const d of docs) (groups[partOf(d.order_number)] ||= []).push(d);
+
+      const parts = Object.keys(groups)
+        .sort()
+        .map((part) => {
+          const g = groups[part];
+          const live = g.filter((d) => !EXCLUDED_STATUSES.includes(d.status));
+          const paidDates = live
+            .map((d) => d.paidDate)
+            .filter(Boolean)
+            .sort();
+          const status = paymentStatusOf(g);
+          return {
+            part,
+            status,
+            invoices: live.map((d) => d.number),
+            consignments: [
+              ...new Set(
+                live
+                  .map((d) => stripConsignmentPrefix(d.consignment_number))
+                  .filter(Boolean),
+              ),
+            ],
+            total: sum(live),
+            balance: Number(live.reduce((s, d) => s + d.balance, 0).toFixed(2)),
+            paidDate: status === "paid" ? paidDates.pop() || null : null,
+          };
+        });
+      return [r.id, parts];
+    }),
+  );
+};
+
+export const itemReleaseState = (
+  parts,
+  itemConsignments,
+  { approved = false, receiverPaid = false } = {},
+) => {
+  if (approved) return { ok: true };
+  if (!(parts || []).some((p) => p.part)) {
+    return receiverPaid
+      ? { ok: true }
+      : { ok: false, reason: "Payment pending" };
+  }
+  const keys = (itemConsignments || []).map(consKey).filter(Boolean);
+  const hit = parts.filter((p) =>
+    (p.consignments || []).some((c) => keys.includes(consKey(c))),
+  );
+  const applicable = hit.length
+    ? hit
+    : parts.filter((p) => !(p.consignments || []).length);
+  if (!applicable.length) {
+    return { ok: false, reason: "No invoice for this shipment yet" };
+  }
+  const bad = applicable.filter((p) => p.status !== "paid");
+  return bad.length
+    ? {
+        ok: false,
+        reason: `Part ${bad.map((p) => p.part || "-").join(", ")} not paid`,
+      }
+    : { ok: true };
+};
+
+export const getUnreleasedItems = async (orderId, orderItemIds) => {
+  const ids = [...new Set((orderItemIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return [];
+
+  const data = await loadPaymentData(orderId);
+  const [payments, approvals, parts, itemsRes] = await Promise.all([
+    getReceiverPayments(orderId, data),
+    getReceiverApprovals(orderId),
+    getReceiverParts(orderId, data),
+    pool.query(
+      `SELECT oi.id, oi.item_ref, oi.receiver_id,
+              COALESCE(array_agg(DISTINCT cons.consignment_number)
+                FILTER (WHERE cons.consignment_number IS NOT NULL), '{}') AS consignments
+         FROM order_items oi
+         JOIN receivers r ON r.id = oi.receiver_id AND r.order_id = $1
+         LEFT JOIN (
+           SELECT DISTINCT ON (h.detail_id, h.cid)
+                  h.detail_id, h.consignment_id, h.action_type
+             FROM container_assignment_history h
+            WHERE h.detail_id = ANY($2::int[])
+            ORDER BY h.detail_id, h.cid, h.id DESC
+         ) a ON a.detail_id = oi.id AND a.action_type = 'ASSIGN'
+         LEFT JOIN consignments cons ON cons.id = a.consignment_id
+        WHERE oi.id = ANY($2::int[])
+        GROUP BY oi.id, oi.item_ref, oi.receiver_id`,
+      [orderId, ids],
+    ),
+  ]);
+  if (!payments) return null;
+
+  const found = new Map(itemsRes.rows.map((r) => [Number(r.id), r]));
+  const blocked = [];
+  for (const id of ids) {
+    const row = found.get(id);
+    if (!row) {
+      blocked.push({
+        orderItemId: id,
+        itemRef: null,
+        reason: "Item not on this order",
+      });
+      continue;
+    }
+    const rid = row.receiver_id;
+    const st = itemReleaseState(parts[rid] || [], row.consignments, {
+      approved: approvals[rid]?.approved === true,
+      receiverPaid: payments[rid] === "paid",
+    });
+    if (!st.ok) {
+      blocked.push({
+        orderItemId: id,
+        itemRef: row.item_ref,
+        receiverId: rid,
+        reason: st.reason,
+      });
+    }
+  }
+  return blocked;
 };
 
 export const getLastPaymentSync = async (orderId) => {
@@ -713,13 +854,14 @@ export const getOrderPaymentStatus = async (req, res) => {
       .json({ success: false, message: "Invalid order ID" });
   }
   try {
-    const [receiverPayments, receiverApprovals, receiverPaymentMeta, lastSync] =
-      await Promise.all([
-        getReceiverPayments(orderId),
-        getReceiverApprovals(orderId),
-        getReceiverPaymentMeta(orderId),
-        getLastPaymentSync(orderId),
-      ]);
+    const data = await loadPaymentData(orderId);
+    const [receiverApprovals, lastSync] = await Promise.all([
+      getReceiverApprovals(orderId),
+      getLastPaymentSync(orderId),
+    ]);
+    const receiverPayments = await getReceiverPayments(orderId, data);
+    const receiverPaymentMeta = await getReceiverPaymentMeta(orderId, data);
+    const receiverParts = await getReceiverParts(orderId, data);
     if (!receiverPayments) {
       return res
         .status(404)
@@ -731,6 +873,7 @@ export const getOrderPaymentStatus = async (req, res) => {
       receiverPayments,
       receiverApprovals: named.receiverApprovals,
       receiverPaymentMeta,
+      receiverParts,
       lastSync: named.lastSync,
     });
   } catch (err) {
@@ -798,19 +941,13 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       });
     }
 
-    const [receiverPayments, receiverApprovals, receiverPaymentMeta, foundRes] =
-      await Promise.all([
-        getReceiverPayments(orderId),
-        getReceiverApprovals(orderId),
-        getReceiverPaymentMeta(orderId),
-        pool.query(
-          `SELECT COUNT(*)::int AS n FROM zoho_invoices
-            WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1`,
-          [key(formNo)],
-        ),
-      ]);
+    const data = await loadPaymentData(orderId);
+    const receiverApprovals = await getReceiverApprovals(orderId);
+    const receiverPayments = await getReceiverPayments(orderId, data);
+    const receiverPaymentMeta = await getReceiverPaymentMeta(orderId, data);
+    const receiverParts = await getReceiverParts(orderId, data);
 
-    const found = foundRes.rows[0].n;
+    const found = data.invoices.length;
     const total = Object.keys(receiverPayments).length;
     const paidAfter = countPaid(receiverPayments);
 
@@ -840,6 +977,7 @@ export const refreshOrderPaymentStatus = async (req, res) => {
       receiverPayments,
       receiverApprovals: named.receiverApprovals,
       receiverPaymentMeta,
+      receiverParts,
       lastSync: named.lastSync,
     });
   } catch (err) {
@@ -1115,6 +1253,7 @@ export const getOrderBilling = async (req, res) => {
     }
 
     const orderKey = key(order.rgl_booking_number);
+    const invoicesOnly = String(req.query?.invoicesOnly ?? "") === "1";
 
     const [invRes, billRes, recRes] = await Promise.all([
       pool.query(
@@ -1133,8 +1272,10 @@ export const getOrderBilling = async (req, res) => {
           ORDER BY invoice_date, id`,
         [orderKey],
       ),
-      pool.query(
-        `SELECT zoho_bill_id AS id, bill_number AS number,
+      invoicesOnly
+        ? { rows: [] }
+        : pool.query(
+            `SELECT zoho_bill_id AS id, bill_number AS number,
                 vendor_name AS vendor, status, currency_code AS currency,
                 total::float8 AS total, balance::float8 AS balance, exchange_rate::float8 AS "exchangeRate",
                 order_number, consignment_number AS "consignmentNumber",
@@ -1147,8 +1288,8 @@ export const getOrderBilling = async (req, res) => {
            FROM zoho_bills
           WHERE regexp_replace(lower(btrim(order_number)), '[a-z]+$', '') = $1
           ORDER BY bill_date, id`,
-        [orderKey],
-      ),
+            [orderKey],
+          ),
       pool.query(
         "SELECT id, receiver_name FROM receivers WHERE order_id = $1",
         [orderId],

@@ -4,7 +4,6 @@ import {
   register,
   login,
   logout,
-  refreshToken,
   me,
   getUsers,
   createUser,
@@ -89,24 +88,6 @@ router.post("/register", register);
 router.post("/login", login);
 
 router.post("/request-reset", requestResetPassword);
-
-/**
- * @swagger
- * /auth/refresh:
- *   post:
- *     summary: Refresh the access token using the refresh token cookie
- *     tags: [Auth]
- *     responses:
- *       200:
- *         description: New access token issued
- *       401:
- *         description: Invalid or expired refresh token
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- */
-router.post("/refresh", refreshToken);
 
 /**
  * @swagger
