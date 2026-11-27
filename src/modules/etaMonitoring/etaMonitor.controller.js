@@ -36,8 +36,25 @@ const buildFilter = (req, statusCol, searchCols) => {
     params.push(status);
     conds.push(`${statusCol} = $${params.length}`);
   }
-  return { params, where: conds.length ? `WHERE ${conds.join(" AND ")}` : "" };
+  return {
+    params,
+    conds,
+    where: conds.length ? `WHERE ${conds.join(" AND ")}` : "",
+  };
 };
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// ETA Reached: today >= ETA, for items that are not closed.
+// FINAL_STATUSES is a fixed constant, so inlining it is safe.
+const FINAL_LIST_SQL = FINAL_STATUSES.map(
+  (s) => `'${s.replace(/'/g, "''")}'`,
+).join(", ");
+// Excludes Closed (final status) and On track (not delayed and idle < check after),
+// so only Stale and Delayed items can be flagged.
+const ETA_REACHED_SQL = `(m.status_snapshot NOT IN (${FINAL_LIST_SQL})
+  AND eta_latest(m.order_item_id)::date <= CURRENT_DATE
+  AND (m.is_delayed = true OR ${IDLE_SQL} >= ${CHECK_AFTER_SQL}))`;
 
 export const getStatusOptions = async (req, res) => {
   try {
@@ -269,17 +286,37 @@ export const markDelayed = async (req, res) => {
 export const getMonitorItems = async (req, res) => {
   try {
     const { page, limit, offset } = paging(req);
-    const { params, where: baseWhere } = buildFilter(req, "m.status_snapshot", [
+    const { params, conds } = buildFilter(req, "m.status_snapshot", [
       "o.rgl_booking_number",
       "o.booking_ref",
       "oi.item_ref",
       "r.receiver_name",
     ]);
 
+    const etaFrom = (req.query.eta_from || "").trim();
+    const etaTo = (req.query.eta_to || "").trim();
+    if (DATE_RE.test(etaFrom)) {
+      params.push(etaFrom);
+      conds.push(
+        `eta_latest(m.order_item_id)::date >= $${params.length}::date`,
+      );
+    }
+    if (DATE_RE.test(etaTo)) {
+      params.push(etaTo);
+      conds.push(
+        `eta_latest(m.order_item_id)::date <= $${params.length}::date`,
+      );
+    }
+    const baseWhere = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    // Snapshot of params before the flag filter, used by the counts query
+    const baseParams = [...params];
+
     const flag = (req.query.flag || "").trim();
     let flagCond = "";
     if (flag === "delayed") {
       flagCond = `m.is_delayed = true`;
+    } else if (flag === "eta_reached") {
+      flagCond = ETA_REACHED_SQL;
     } else if (["closed", "stale", "on_track"].includes(flag)) {
       params.push(FINAL_STATUSES);
       const fin = `$${params.length}::text[]`;
@@ -295,30 +332,62 @@ export const getMonitorItems = async (req, res) => {
         ? `${baseWhere} AND (${flagCond})`
         : `WHERE ${flagCond}`
       : baseWhere;
-    const base = `FROM eta_monitor m
+    const baseFrom = `FROM eta_monitor m
       JOIN order_items oi ON oi.id = m.order_item_id
       JOIN receivers r ON r.id = oi.receiver_id
-      JOIN orders o ON o.id = r.order_id
+      JOIN orders o ON o.id = r.order_id`;
+    const base = `${baseFrom}
       ${where}`;
 
-    const [rows, count] = await Promise.all([
+    // Flag counts ignore the flag filter so the cards stay stable while filtering
+    const finIdx = baseParams.length + 1;
+    const countsSql = `SELECT CASE
+        WHEN m.is_delayed THEN 'delayed'
+        WHEN m.status_snapshot = ANY($${finIdx}::text[]) THEN 'closed'
+        WHEN ${IDLE_SQL} >= ${CHECK_AFTER_SQL} THEN 'stale'
+        ELSE 'on_track'
+      END AS flag, COUNT(*)::int AS n
+      ${baseFrom}
+      ${baseWhere}
+      GROUP BY 1`;
+
+    // ETA Reached is not exclusive with the other flags, so it is counted separately
+    const reachedSql = `SELECT COUNT(*)::int AS n
+      ${baseFrom}
+      ${baseWhere ? `${baseWhere} AND` : "WHERE"} ${ETA_REACHED_SQL}`;
+
+    const [rows, count, flagCounts, reachedCount] = await Promise.all([
       pool.query(
         `SELECT o.rgl_booking_number, o.booking_ref, oi.item_ref, r.receiver_name,
                 m.status_snapshot AS status, (CURRENT_DATE - m.status_since::date) AS days_in_status,
                 ${IDLE_SQL} AS idle_days, m.grace_used, m.is_delayed, m.delayed_reason,
                 ${CHECK_AFTER_SQL} AS check_after_days,
-                eta_latest(m.order_item_id) AS eta
+                eta_latest(m.order_item_id) AS eta,
+                COALESCE(${ETA_REACHED_SQL}, false) AS eta_reached
          ${base}
          ORDER BY GREATEST(m.status_since, COALESCE(m.last_grace_at, m.status_since)) DESC, m.order_item_id DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         [...params, limit, offset],
       ),
       pool.query(`SELECT COUNT(*) ${base}`, params),
+      pool.query(countsSql, [...baseParams, FINAL_STATUSES]),
+      pool.query(reachedSql, baseParams),
     ]);
+    const counts = {
+      on_track: 0,
+      stale: 0,
+      delayed: 0,
+      closed: 0,
+      eta_reached: reachedCount.rows[0].n,
+    };
+    flagCounts.rows.forEach((r) => {
+      counts[r.flag] = r.n;
+    });
     return res.json({
       success: true,
       rows: rows.rows,
       total: Number(count.rows[0].count),
+      counts,
     });
   } catch (err) {
     return fail(res, err, "eta monitor items");
